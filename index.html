@@ -134,6 +134,10 @@ canvas{display:block;touch-action:none}
 .hud-btn:active{transform:scale(.93)}
 .hud-sel{font-size:11.5px;color:rgba(255,212,226,.85);background:rgba(18,14,10,.78);padding:4px 12px;
   border-radius:999px;border:1px solid rgba(255,143,177,.28);pointer-events:none;backdrop-filter:blur(8px)}
+.hud-srow{align-items:center}
+.hud-range{width:150px;pointer-events:auto;touch-action:none}
+.hud-slbl{font-size:11px;color:#ffd4e2;background:rgba(18,14,10,.85);padding:6px 9px;border-radius:8px;pointer-events:none}
+.hud-sval{font-size:11px;color:rgba(255,212,226,.85);min-width:30px;text-align:center;pointer-events:none}
 @media(max-width:820px){#editHud{bottom:72px}}
 #rotBall{position:absolute;right:12px;top:12px;width:80px;height:80px;cursor:grab;display:none;z-index:8;touch-action:none;border-radius:50%}
 </style>
@@ -328,10 +332,11 @@ dom.addEventListener('pointerdown',function(e){
   if(active.view==='paint'&&paint.mode3d&&ptrs.size===1){
     paint.drawing=true;paint.last=null;paint._3dSnap=paint.ctx.getImageData(0,0,1024,1024);
     do3dPaint(e.clientX,e.clientY);}
-  else if(active.view==='edit'&&ptrs.size===1&&EM.selCount()>0){
-    editDirect.pending=true;editDirect.ptId=e.pointerId;
-    editDirect.startX=e.clientX;editDirect.startY=e.clientY;
-    editDirect.prevX=e.clientX;editDirect.prevY=e.clientY;}
+  else if(active.view==='edit'&&ptrs.size===1){
+    if(editState.tool==='sculpt'&&EM._meshObj){Sculpt.down(e);}
+    else if(EM.selCount()>0){editDirect.pending=true;editDirect.ptId=e.pointerId;
+      editDirect.startX=e.clientX;editDirect.startY=e.clientY;
+      editDirect.prevX=e.clientX;editDirect.prevY=e.clientY;}}
   invalidate();});
 dom.addEventListener('pointermove',function(e){
   if(gizmoDrag===e.pointerId){Gizmo.drag(rayFromEvent(e),e);return;}
@@ -341,6 +346,7 @@ dom.addEventListener('pointermove',function(e){
     if(paint.drawing){clickStart=null;do3dPaint(e.clientX,e.clientY);}
     return;}
   if(active.view==='edit'&&ptrs.size===1){
+    if(Sculpt.painting&&Sculpt.ptId===e.pointerId){Sculpt.move(e);invalidate();return;}
     if(editDirect.ptId===e.pointerId){
       if(!editDirect.active&&editDirect.pending&&Math.hypot(e.clientX-editDirect.startX,e.clientY-editDirect.startY)>5){
         editDirect.active=true;editDirect.pending=false;
@@ -359,6 +365,7 @@ dom.addEventListener('pointermove',function(e){
   invalidate();});
 function endPtr(e){
   if(gizmoDrag===e.pointerId){Gizmo.end();gizmoDrag=null;invalidate();return;}
+  if(active.view==='edit'&&Sculpt.painting&&Sculpt.ptId===e.pointerId){Sculpt.up();}
   if(active.view==='edit'&&editDirect.ptId===e.pointerId){
     if(editDirect.active){
       var snap=editDirect.snap,curr=EM.V.map(function(v){return v.clone();});
@@ -861,6 +868,44 @@ function distSeg2D(px,py,ax,ay,bx,by){var dx=bx-ax,dy=by-ay,l2=dx*dx+dy*dy;if(!l
 
 var editDirect={ptId:null,pending:false,active:false,startX:0,startY:0,prevX:0,prevY:0,snap:null};
 
+/* ─── Sculpt brush (push/pull verts on the surface, Blender-like) ─── */
+function falloff(d,R){var t=1-d/R;return t<=0?0:t*t*(3-2*t);}
+var Sculpt={painting:false,ptId:null,brush:'draw',radius:.32,strength:.5,
+  _snap:null,_norm:null,_adj:null,_grab:null,_prevX:0,_prevY:0,
+  hit:function(e){if(!EM._meshObj)return null;var r=dom.getBoundingClientRect();
+    var ray=new THREE.Raycaster();ray.setFromCamera({x:((e.clientX-r.left)/r.width)*2-1,y:-((e.clientY-r.top)/r.height)*2+1},active.vs.cam);
+    return ray.intersectObject(EM._meshObj,false)[0]||null;},
+  down:function(e){this.painting=true;this.ptId=e.pointerId;this._prevX=e.clientX;this._prevY=e.clientY;clickStart=null;
+    this._snap=EM.V.map(function(v){return v.clone();});this._norm=EM._vertNormals();this._adj=EM._adjacency();
+    var h=this.hit(e);
+    if(this.brush==='grab'){this._grab=[];if(h){var c=h.point,R=this.radius;for(var i=0;i<EM.V.length;i++){var d=EM.V[i].distanceTo(c);if(d<R)this._grab.push({i:i,w:falloff(d,R)});}}}
+    else if(h)this.apply(h.point);},
+  move:function(e){if(!this.painting)return;
+    if(this.brush==='grab'){var dx=e.clientX-this._prevX,dy=e.clientY-this._prevY;this._prevX=e.clientX;this._prevY=e.clientY;
+      var mv=screenDeltaToWorld(dx,dy),g=this._grab||[];for(var k=0;k<g.length;k++)EM.V[g[k].i].addScaledVector(mv,g[k].w);EM._syncPositions();return;}
+    this._prevX=e.clientX;this._prevY=e.clientY;var h=this.hit(e);if(h)this.apply(h.point);},
+  apply:function(c){
+    var V=EM.V,N=this._norm,adj=this._adj,br=this.brush,R=this.radius,st=this.strength;
+    var hits=[];for(var i=0;i<V.length;i++){var d=V[i].distanceTo(c);if(d<R)hits.push({i:i,w:falloff(d,R)});}
+    if(!hits.length)return;
+    if(br==='smooth'){
+      var moves=hits.map(function(o){var nb=adj[o.i];if(!nb.length)return null;var s=new THREE.Vector3();for(var j=0;j<nb.length;j++)s.add(V[nb[j]]);s.divideScalar(nb.length);return {i:o.i,t:s,w:o.w};});
+      moves.forEach(function(m){if(m)V[m.i].lerp(m.t,m.w*st*.6);});
+    }else if(br==='flatten'){
+      var an=new THREE.Vector3();hits.forEach(function(o){an.add(N[o.i]);});if(an.lengthSq()<1e-9)an.set(0,1,0);an.normalize();
+      hits.forEach(function(o){var diff=V[o.i].clone().sub(c).dot(an);V[o.i].addScaledVector(an,-diff*o.w*st);});
+    }else if(br==='pinch'){
+      hits.forEach(function(o){var dir=c.clone().sub(V[o.i]);V[o.i].addScaledVector(dir,o.w*st*.35);});
+    }else{ // draw (out) / carve (in) along surface normal
+      var sign=(br==='carve')?-1:1,amt=st*R*.18;
+      hits.forEach(function(o){V[o.i].addScaledVector(N[o.i],amt*o.w*sign);});
+    }
+    EM._syncPositions();},
+  up:function(){if(!this.painting)return;this.painting=false;this.ptId=null;
+    var snap=this._snap,curr=EM.V.map(function(v){return v.clone();});EM._refresh();
+    History.push(function(){EM.V.forEach(function(v,i){v.copy(snap[i]);});EM._refresh();},function(){EM.V.forEach(function(v,i){v.copy(curr[i]);});EM._refresh();});
+    this._snap=this._norm=this._adj=this._grab=null;}};
+
 var RotBall={
   el:null,ctx:null,_px:null,_py:null,
   init:function(){
@@ -1149,6 +1194,25 @@ var EM={
     g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));
     return g;},
 
+  // Per-vertex normals (area-weighted) for sculpting
+  _vertNormals:function(){
+    var N=this.V.map(function(){return new THREE.Vector3();});
+    for(var fi=0;fi<this.F.length;fi++){var f=this.F[fi],n=this._faceNormal(fi);for(var i=0;i<f.vi.length;i++)N[f.vi[i]].add(n);}
+    N.forEach(function(n){if(n.lengthSq()>1e-12)n.normalize();else n.set(0,1,0);});return N;},
+
+  // Adjacency list (vertex → neighbor verts) from current edges
+  _adjacency:function(){var adj=this.V.map(function(){return [];});this.E.forEach(function(e){adj[e.a].push(e.b);adj[e.b].push(e.a);});return adj;},
+
+  // Fast position-only update (topology unchanged) — used during sculpt drags
+  _syncPositions:function(){
+    if(!this._meshObj)return;
+    var mg=this._meshObj.geometry,mp=mg.attributes.position;
+    for(var i=0;i<this.V.length;i++)mp.setXYZ(i,this.V[i].x,this.V[i].y,this.V[i].z);
+    mp.needsUpdate=true;mg.computeVertexNormals();
+    if(this._vertObj){var vp=this._vertObj.geometry.attributes.position;for(var i=0;i<this.V.length;i++)vp.setXYZ(i,this.V[i].x,this.V[i].y,this.V[i].z);vp.needsUpdate=true;}
+    if(this._edgeObj){var ep=this._edgeObj.geometry.attributes.position;for(var i=0;i<this.E.length;i++){var e=this.E[i];ep.setXYZ(i*2,this.V[e.a].x,this.V[e.a].y,this.V[e.a].z);ep.setXYZ(i*2+1,this.V[e.b].x,this.V[e.b].y,this.V[e.b].z);}ep.needsUpdate=true;}
+    invalidate(2);},
+
   _faceNormal:function(fi){
     var f=this.F[fi],v0=this.V[f.vi[0]],v1=this.V[f.vi[1]],v2=this.V[f.vi[2]];
     return new THREE.Vector3().crossVectors(new THREE.Vector3().subVectors(v1,v0),new THREE.Vector3().subVectors(v2,v0)).normalize();},
@@ -1167,13 +1231,38 @@ function do3dPaint(clientX,clientY){
   paintAt(hit.uv.x*1024,(1-hit.uv.y)*1024);}
 
 /* ----- Edit HUD (always-visible in-viewport toolbar) ----- */
+function hudSlider(label,min,max,val,step,on){
+  var out=el('span',{class:'hud-sval',text:(+val).toFixed(2)});
+  var r=el('input',{type:'range',min:min,max:max,step:step,value:val,class:'hud-range',
+    oninput:function(e){out.textContent=(+e.target.value).toFixed(2);on(+e.target.value);}});
+  return el('div',{class:'hud-row hud-srow'},[el('span',{class:'hud-slbl',text:label}),r,out]);}
 function renderEditHud(){
   var hud=$('#editHud');if(!hud)return;
   hud.innerHTML='';
   var has=EM.V.length>0;
   hud.classList.toggle('on',has);
   if(!has)return;
-  var selN=EM.selCount(),mode=editState.mode;
+  var selN=EM.selCount(),mode=editState.mode,sculpting=editState.tool==='sculpt';
+
+  /* tool toggle row: Select/Move vs Sculpt */
+  var tr=el('div',{class:'hud-row'});
+  tr.appendChild(el('button',{class:'hud-btn'+(!sculpting?' on':''),text:'Select',onclick:function(){editState.tool='select';renderEditHud();renderPanel();}}));
+  tr.appendChild(el('button',{class:'hud-btn'+(sculpting?' on':''),text:'Sculpt',onclick:function(){editState.tool='sculpt';EM.clearSel();EM._refresh();renderEditHud();renderPanel();}}));
+  hud.appendChild(tr);
+
+  if(sculpting){
+    hud.appendChild(el('div',{class:'hud-sel',text:'Drag on the surface to sculpt · RotBall to orbit'}));
+    var brow=el('div',{class:'hud-row'});
+    [['draw','Draw'],['carve','Carve'],['smooth','Smooth'],['grab','Grab'],['flatten','Flatten'],['pinch','Pinch']].forEach(function(p){
+      brow.appendChild(el('button',{class:'hud-btn'+(Sculpt.brush===p[0]?' on':''),text:p[1],onclick:function(){Sculpt.brush=p[0];renderEditHud();}}));});
+    hud.appendChild(brow);
+    hud.appendChild(hudSlider('Size',.05,1.2,Sculpt.radius,.01,function(x){Sculpt.radius=x;}));
+    hud.appendChild(hudSlider('Strength',.05,1,Sculpt.strength,.01,function(x){Sculpt.strength=x;}));
+    var er2=el('div',{class:'hud-row'});
+    er2.appendChild(el('button',{class:'hud-btn',text:'Save as model →',onclick:function(){EM.exportToModel();}}));
+    hud.appendChild(er2);
+    return;
+  }
 
   if(selN>0)
     hud.appendChild(el('div',{class:'hud-sel',text:selN+' '+mode+(selN>1?'s':'')+' selected · drag to move'}));
@@ -1224,6 +1313,25 @@ function panelEdit(b){
   ]));
 
   if(!EM.V.length)return;
+
+  b.appendChild(el('div',{class:'section-title',text:'Tool'}));
+  var toolRow=el('div',{class:'chiprow'});
+  [['select','Select / Move'],['sculpt','Sculpt']].forEach(function(t){
+    toolRow.appendChild(el('button',{class:'chip'+(editState.tool===t[0]?' on':''),text:t[1],onclick:function(){editState.tool=t[0];if(t[0]==='sculpt'){EM.clearSel();EM._refresh();}renderEditHud();renderPanel();}}));});
+  b.appendChild(toolRow);
+  if(editState.tool==='sculpt'){
+    b.appendChild(el('p',{class:'small muted',style:'margin:6px 0',text:'Drag on the surface to sculpt. RotBall orbits, two fingers zoom/pan.'}));
+    var bRow=el('div',{class:'chiprow'});
+    [['draw','Draw'],['carve','Carve'],['smooth','Smooth'],['grab','Grab'],['flatten','Flatten'],['pinch','Pinch']].forEach(function(p){
+      bRow.appendChild(el('button',{class:'chip'+(Sculpt.brush===p[0]?' on':''),text:p[1],onclick:function(){Sculpt.brush=p[0];renderEditHud();renderPanel();}}));});
+    b.appendChild(bRow);
+    b.appendChild(slider('Brush size',.05,1.2,Sculpt.radius,.01,function(x){Sculpt.radius=x;}));
+    b.appendChild(slider('Brush strength',.05,1,Sculpt.strength,.01,function(x){Sculpt.strength=x;}));
+    b.appendChild(el('p',{class:'small muted',style:'margin-top:6px',text:'Tip: add a Subdivide Smooth modifier first for more clay-like detail.'}));
+    b.appendChild(el('hr',{class:'sep'}));
+    b.appendChild(el('button',{class:'pri',style:'width:100%',text:'Save mesh as model',onclick:function(){EM.exportToModel();}}));
+    return;
+  }
 
   b.appendChild(el('div',{class:'section-title',text:'Select mode'}));
   var modeRow=el('div',{class:'chiprow'});
