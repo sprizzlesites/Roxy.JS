@@ -615,14 +615,24 @@ function exportGLB(root,name){root.updateWorldMatrix(true,true);var rootInv=new 
  download(new Blob([out],{type:'model/gltf-binary'}),name);}
 
 /* ---------------- paint ---------------- */
-var paint={cv:$('#paintCanvas'),ctx:null,part:0,color:'#d8466a',size:38,erase:false,drawing:false,last:null,tex:null,mode3d:false,_3dSnap:null};
+var paint={cv:$('#paintCanvas'),ctx:null,part:0,color:'#d8466a',size:38,soft:0,erase:false,drawing:false,last:null,tex:null,mode3d:false,_3dSnap:null};
 paint.ctx=paint.cv.getContext('2d');
 function paintInit(){var m=getModel(state.activeId);paint.ctx.fillStyle='#ffffff';paint.ctx.fillRect(0,0,1024,1024);
   if(m&&m.userData.parts[paint.part]){var mat=m.userData.parts[paint.part].mat;if(mat.map&&mat.map.image){try{paint.ctx.drawImage(mat.map.image,0,0,1024,1024);}catch(e){}}}
   paint.tex=tex(paint.cv,true,[1,1]);applyPaintTex();}
 function applyPaintTex(){var m=getModel(state.activeId);if(m&&m.userData.parts[paint.part]){var mat=m.userData.parts[paint.part].mat;mat.map=paint.tex;mat.color.setHex(0xffffff);mat.needsUpdate=true;}}
 function paintAt(x,y){var c=paint.ctx;c.globalCompositeOperation=paint.erase?'destination-out':'source-over';c.strokeStyle=paint.color;c.fillStyle=paint.color;c.lineWidth=paint.size;c.lineCap='round';c.lineJoin='round';
-  if(paint.last){c.beginPath();c.moveTo(paint.last.x,paint.last.y);c.lineTo(x,y);c.stroke();}else{c.beginPath();c.arc(x,y,paint.size/2,0,7);c.fill();}paint.last={x:x,y:y};paint.tex.needsUpdate=true;invalidate();}
+  if(paint.soft>0){c.shadowBlur=paint.soft*paint.size*0.9;c.shadowColor=paint.erase?'rgba(0,0,0,1)':paint.color;}else c.shadowBlur=0;
+  if(paint.last){c.beginPath();c.moveTo(paint.last.x,paint.last.y);c.lineTo(x,y);c.stroke();}else{c.beginPath();c.arc(x,y,paint.size/2,0,7);c.fill();}
+  c.shadowBlur=0;paint.last={x:x,y:y};paint.tex.needsUpdate=true;invalidate();}
+function paintPattern(kind){var c=paint.ctx,S=1024,before=c.getImageData(0,0,S,S);c.globalCompositeOperation='source-over';c.shadowBlur=0;
+  if(kind==='checker'){var n=8,s=S/n;for(var y=0;y<n;y++)for(var x=0;x<n;x++){c.fillStyle=((x+y)%2)?paint.color:'#ffffff';c.fillRect(x*s,y*s,s,s);}}
+  else if(kind==='stripes'){var w=64;for(var x=0;x<S;x+=w*2){c.fillStyle='#ffffff';c.fillRect(x,0,w,S);c.fillStyle=paint.color;c.fillRect(x+w,0,w,S);}}
+  else if(kind==='dots'){c.fillStyle='#ffffff';c.fillRect(0,0,S,S);c.fillStyle=paint.color;for(var y=0;y<S;y+=80)for(var x=0;x<S;x+=80){c.beginPath();c.arc(x+40,y+40,18,0,7);c.fill();}}
+  else if(kind==='gradient'){var g=c.createLinearGradient(0,0,0,S);g.addColorStop(0,paint.color);g.addColorStop(1,'#ffffff');c.fillStyle=g;c.fillRect(0,0,S,S);}
+  else if(kind==='sprinkles'){c.fillStyle='#ffffff';c.fillRect(0,0,S,S);var cols=['#ff5d8f','#ffd23f','#5ec5ff','#7be0a3','#c08bff','#ff8a3d'];for(var i=0;i<900;i++){var x=Math.random()*S,y=Math.random()*S,a=Math.random()*Math.PI;c.save();c.translate(x,y);c.rotate(a);c.fillStyle=cols[(Math.random()*cols.length)|0];c.fillRect(-3,-12,6,24);c.restore();}}
+  var after=c.getImageData(0,0,S,S),tx=paint.tex;paint.tex.needsUpdate=true;invalidate();
+  History.push(function(){c.putImageData(before,0,0);tx.needsUpdate=true;invalidate();},function(){c.putImageData(after,0,0);tx.needsUpdate=true;invalidate();});}
 function paintUV(x,y){var r=paint.cv.getBoundingClientRect();return {x:(x-r.left)/r.width*1024,y:(y-r.top)/r.height*1024};}
 (function bindPaint(){var c=paint.cv;var snap=null;
   c.addEventListener('pointerdown',function(e){if(paint.mode3d)return;c.setPointerCapture(e.pointerId);paint.drawing=true;paint.last=null;snap=paint.ctx.getImageData(0,0,1024,1024);var u=paintUV(e.clientX,e.clientY);paintAt(u.x,u.y);});
@@ -668,6 +678,8 @@ function panelViewer(b){var m=getModel(state.activeId);
   b.appendChild(el('h2',{text:'Model'}));b.appendChild(el('p',{class:'sub',text:m?m.userData.name:'No model'}));
   var sel=el('select',{onchange:function(e){setActiveModel(e.target.value);}});state.models.forEach(function(mm){sel.appendChild(el('option',{value:mm.userData.id,text:mm.userData.name}));});if(m)sel.value=m.userData.id;
   b.appendChild(el('label',{class:'fld',text:'Active model'}));b.appendChild(sel);
+  b.appendChild(el('div',{class:'section-title',text:'Lighting / Environment'}));
+  var ev=el('select',{onchange:function(e){applyEnv(viewerScene,e.target.value);}});ENVS.forEach(function(p){ev.appendChild(el('option',{value:p.id,text:p.name}));});ev.value=viewerScene.userData.envId;b.appendChild(ev);
   b.appendChild(el('div',{class:'section-title',text:'Material'}));
   if(m&&m.userData.parts.length){
     var pSel=el('select',{});m.userData.parts.forEach(function(p,i){pSel.appendChild(el('option',{value:i,text:'Part '+(i+1)}));});
@@ -725,11 +737,16 @@ function panelPaint(b){var m=getModel(state.activeId);b.appendChild(el('h2',{tex
   var col=el('input',{type:'color',value:paint.color,oninput:function(e){paint.color=e.target.value;paint.erase=false;updEr();}});
   b.appendChild(el('div',{class:'spread'},[el('label',{class:'fld',text:'Brush color'}),col]));
   b.appendChild(slider('Brush size',2,160,paint.size,1,function(x){paint.size=x;}));
+  b.appendChild(slider('Brush softness',0,1,paint.soft,.01,function(x){paint.soft=x;}));
   var erBtn=el('button',{text:'Eraser',onclick:function(){paint.erase=!paint.erase;updEr();}});function updEr(){erBtn.className=paint.erase?'on':'';}
   b.appendChild(el('div',{class:'grid2'},[erBtn,el('button',{text:'Clear',onclick:function(){paint.ctx.globalCompositeOperation='source-over';paint.ctx.fillStyle='#ffffff';paint.ctx.fillRect(0,0,1024,1024);paint.tex.needsUpdate=true;}})]));
   b.appendChild(el('div',{class:'grid2',style:'margin-top:8px'},[el('button',{text:'Fill color',onclick:function(){paint.ctx.globalCompositeOperation='source-over';paint.ctx.fillStyle=paint.color;paint.ctx.fillRect(0,0,1024,1024);paint.tex.needsUpdate=true;}}),
     el('button',{text:'Noise fill',onclick:function(){var n=fbm(512,[{s:8,a:.5},{s:32,a:.4},{s:128,a:.3}]);paint.ctx.globalCompositeOperation='source-over';paint.ctx.drawImage(n,0,0,1024,1024);paint.tex.needsUpdate=true;}})]));
   b.appendChild(el('div',{class:'grid2',style:'margin-top:8px'},[el('button',{text:'Show UVs',onclick:paintDrawUV}),el('button',{text:'Stamp image',onclick:function(){imgTarget='paint';$('#fileImg').click();}})]));
+  b.appendChild(el('div',{class:'section-title',text:'Patterns (use brush color)'}));
+  var pr=el('div',{class:'chiprow'});
+  [['sprinkles','Sprinkles'],['dots','Dots'],['stripes','Stripes'],['checker','Checker'],['gradient','Gradient']].forEach(function(p){pr.appendChild(el('button',{class:'chip',text:p[1],onclick:function(){paintPattern(p[0]);}}));});
+  b.appendChild(pr);
   b.appendChild(el('hr',{class:'sep'}));b.appendChild(el('p',{class:'small muted',text:'The painted map applies to the model in the preview and is embedded when you export this model as .glb.'}));}
 
 /* ----- Build panel ----- */
