@@ -957,9 +957,36 @@ var EM={
     this._refresh();},
 
   exportToModel:function(){
-    var geo=this._toGeo(),mat=makeMaterial({color:0xcdb7a4,rough:.55});
+    var geo=this._toExportGeo(),mat=makeMaterial({color:0xcdb7a4,rough:.55});
     var name='Mesh '+(state.models.length+1);var m=makeModel(name,[{geo:geo,mat:mat}]);
     addModel(m);setActiveModel(m.userData.id);toast('"'+name+'" added — open Viewer');renderPanel();},
+
+  // Unindexed geometry with per-face box-mapped UVs (required for texture painting)
+  _toExportGeo:function(){
+    var pos=[],nor=[],uv=[];
+    // Collect all tris with per-face normals
+    for(var fi=0;fi<this.F.length;fi++){
+      var f=this.F[fi],vi=f.vi,n=this._faceNormal(fi);
+      for(var t=1;t<vi.length-1;t++){
+        var idxs=[vi[0],vi[t],vi[t+1]];
+        for(var k=0;k<3;k++){var v=this.V[idxs[k]];pos.push(v.x,v.y,v.z);nor.push(n.x,n.y,n.z);}}}
+    // Compute bounding box for UV normalization
+    var mn=[1e9,1e9,1e9],mx=[-1e9,-1e9,-1e9];
+    for(var i=0;i<pos.length;i+=3)for(var j=0;j<3;j++){mn[j]=Math.min(mn[j],pos[i+j]);mx[j]=Math.max(mx[j],pos[i+j]);}
+    var sz=[mx[0]-mn[0],mx[1]-mn[1],mx[2]-mn[2]],maxS=Math.max(sz[0],sz[1],sz[2],1e-3);
+    var cx=(mn[0]+mx[0])*.5,cy=(mn[1]+mx[1])*.5,cz=(mn[2]+mx[2])*.5;
+    // Assign triplanar UVs using per-face normal as the dominant axis
+    for(var i=0;i<pos.length;i+=3){
+      var px=(pos[i]-cx)/maxS+.5,py=(pos[i+1]-cy)/maxS+.5,pz=(pos[i+2]-cz)/maxS+.5;
+      var nx=Math.abs(nor[i]),ny=Math.abs(nor[i+1]),nz=Math.abs(nor[i+2]);
+      var u,v;
+      if(nx>=ny&&nx>=nz){u=pz;v=py;}else if(ny>=nx&&ny>=nz){u=px;v=pz;}else{u=px;v=py;}
+      uv.push(u,v);}
+    var g=new THREE.BufferGeometry();
+    g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+    g.setAttribute('normal',new THREE.Float32BufferAttribute(nor,3));
+    g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));
+    return g;},
 
   _faceNormal:function(fi){
     var f=this.F[fi],v0=this.V[f.vi[0]],v1=this.V[f.vi[1]],v2=this.V[f.vi[2]];
