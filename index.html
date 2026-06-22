@@ -763,6 +763,10 @@ function panelPaint(b){var m=getModel(state.activeId);b.appendChild(el('h2',{tex
   if(m&&m.userData.parts.length>1){var pSel=el('select',{onchange:function(e){paint.part=+e.target.value;paintInit();}});m.userData.parts.forEach(function(p,i){pSel.appendChild(el('option',{value:i,text:'Part '+(i+1)}));});pSel.value=paint.part;b.appendChild(el('label',{class:'fld',text:'Target part'}));b.appendChild(pSel);}
   var col=el('input',{type:'color',value:paint.color,oninput:function(e){paint.color=e.target.value;paint.erase=false;updEr();}});
   b.appendChild(el('div',{class:'spread'},[el('label',{class:'fld',text:'Brush color'}),col]));
+  var swRow=el('div',{class:'chiprow',style:'margin-top:6px'});
+  ['#d8466a','#f6a8c4','#ff5d8f','#ffd23f','#ff8a3d','#c47a44','#7b4a2d','#7be0a3','#5ec5ff','#c08bff','#ffffff','#2a1d12'].forEach(function(cl){
+    swRow.appendChild(el('button',{class:'chip',style:'width:24px;height:24px;padding:0;border-radius:6px;background:'+cl,onclick:function(){paint.color=cl;paint.erase=false;col.value=cl;updEr();}}));});
+  b.appendChild(swRow);
   b.appendChild(slider('Brush size',2,160,paint.size,1,function(x){paint.size=x;}));
   b.appendChild(slider('Brush softness',0,1,paint.soft,.01,function(x){paint.soft=x;}));
   var erBtn=el('button',{text:'Eraser',onclick:function(){paint.erase=!paint.erase;updEr();}});function updEr(){erBtn.className=paint.erase?'on':'';}
@@ -931,15 +935,22 @@ var Sculpt={painting:false,ptId:null,brush:'draw',radius:.32,strength:.5,symmetr
   hit:function(e){if(!EM._meshObj)return null;var r=dom.getBoundingClientRect();
     var ray=new THREE.Raycaster();ray.setFromCamera({x:((e.clientX-r.left)/r.width)*2-1,y:-((e.clientY-r.top)/r.height)*2+1},active.vs.cam);
     return ray.intersectObject(EM._meshObj,false)[0]||null;},
+  _ringObj:null,
+  _ensureRing:function(){if(this._ringObj)return;var g=new THREE.RingGeometry(.86,1,40);
+    var mt=new THREE.MeshBasicMaterial({color:0xff8fb1,side:THREE.DoubleSide,transparent:true,opacity:.5,depthTest:false});
+    this._ringObj=new THREE.Mesh(g,mt);this._ringObj.renderOrder=20;this._ringObj.visible=false;editScene.add(this._ringObj);},
+  ring:function(h){this._ensureRing();var r=this._ringObj;if(!h){r.visible=false;invalidate(2);return;}
+    r.visible=true;r.position.copy(h.point);var n=h.face?h.face.normal.clone():new THREE.Vector3(0,1,0);
+    r.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,1),n.normalize());r.scale.setScalar(this.radius);invalidate(2);},
   down:function(e){this.painting=true;this.ptId=e.pointerId;this._prevX=e.clientX;this._prevY=e.clientY;clickStart=null;
     this._snap=EM.V.map(function(v){return v.clone();});this._norm=EM._vertNormals();this._adj=EM._adjacency();
-    var h=this.hit(e);
+    var h=this.hit(e);this.ring(h);
     if(this.brush==='grab'){this._grab=[];if(h){var c=h.point,R=this.radius;for(var i=0;i<EM.V.length;i++){var d=EM.V[i].distanceTo(c);if(d<R)this._grab.push({i:i,w:falloff(d,R)});}}}
     else if(h)this.apply(h.point);},
   move:function(e){if(!this.painting)return;
     if(this.brush==='grab'){var dx=e.clientX-this._prevX,dy=e.clientY-this._prevY;this._prevX=e.clientX;this._prevY=e.clientY;
       var mv=screenDeltaToWorld(dx,dy),g=this._grab||[];for(var k=0;k<g.length;k++)EM.V[g[k].i].addScaledVector(mv,g[k].w);EM._syncPositions();return;}
-    this._prevX=e.clientX;this._prevY=e.clientY;var h=this.hit(e);if(h)this.apply(h.point);},
+    this._prevX=e.clientX;this._prevY=e.clientY;var h=this.hit(e);this.ring(h);if(h)this.apply(h.point);},
   apply:function(c){this._dab(c);
     if(this.symmetry){var m=c.clone();m.setComponent(this.symmetry-1,-m.getComponent(this.symmetry-1));this._dab(m);}
     EM._syncPositions();},
@@ -959,7 +970,7 @@ var Sculpt={painting:false,ptId:null,brush:'draw',radius:.32,strength:.5,symmetr
       var sign=(br==='carve')?-1:1,amt=st*R*.18;
       hits.forEach(function(o){V[o.i].addScaledVector(N[o.i],amt*o.w*sign);});
     }},
-  up:function(){if(!this.painting)return;this.painting=false;this.ptId=null;
+  up:function(){if(!this.painting)return;this.painting=false;this.ptId=null;this.ring(null);
     var snap=this._snap,curr=EM.V.map(function(v){return v.clone();});EM._refresh();
     History.push(function(){EM.V.forEach(function(v,i){v.copy(snap[i]);});EM._refresh();},function(){EM.V.forEach(function(v,i){v.copy(curr[i]);});EM._refresh();});
     this._snap=this._norm=this._adj=this._grab=null;}};
