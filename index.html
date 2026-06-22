@@ -60,6 +60,8 @@ canvas{display:block;touch-action:none}
 /* paint view split */
 .view[data-view=paint]{display:none}
 .view[data-view=paint].on{display:grid;grid-template-columns:1fr 360px}
+.view[data-view=paint].on.mode3d{grid-template-columns:1fr}
+.view[data-view=paint].on.mode3d .paint2d{display:none}
 .paint2d{position:relative;display:flex;align-items:center;justify-content:center;background:#0d0a07;overflow:hidden}
 .paint2d canvas{max-width:96%;max-height:96%;border:1px solid var(--line);border-radius:8px;background:#fff;box-shadow:0 10px 40px rgba(0,0,0,.5)}
 .paint-prev{position:relative;border-left:1px solid var(--line)}
@@ -547,8 +549,8 @@ function paintAt(x,y){var c=paint.ctx;c.globalCompositeOperation=paint.erase?'de
   if(paint.last){c.beginPath();c.moveTo(paint.last.x,paint.last.y);c.lineTo(x,y);c.stroke();}else{c.beginPath();c.arc(x,y,paint.size/2,0,7);c.fill();}paint.last={x:x,y:y};paint.tex.needsUpdate=true;invalidate();}
 function paintUV(x,y){var r=paint.cv.getBoundingClientRect();return {x:(x-r.left)/r.width*1024,y:(y-r.top)/r.height*1024};}
 (function bindPaint(){var c=paint.cv;var snap=null;
-  c.addEventListener('pointerdown',function(e){c.setPointerCapture(e.pointerId);paint.drawing=true;paint.last=null;snap=paint.ctx.getImageData(0,0,1024,1024);var u=paintUV(e.clientX,e.clientY);paintAt(u.x,u.y);});
-  c.addEventListener('pointermove',function(e){if(!paint.drawing)return;var u=paintUV(e.clientX,e.clientY);paintAt(u.x,u.y);});
+  c.addEventListener('pointerdown',function(e){if(paint.mode3d)return;c.setPointerCapture(e.pointerId);paint.drawing=true;paint.last=null;snap=paint.ctx.getImageData(0,0,1024,1024);var u=paintUV(e.clientX,e.clientY);paintAt(u.x,u.y);});
+  c.addEventListener('pointermove',function(e){if(paint.mode3d||!paint.drawing)return;var u=paintUV(e.clientX,e.clientY);paintAt(u.x,u.y);});
   function up(){if(!paint.drawing)return;paint.drawing=false;paint.last=null;if(snap){var before=snap,after=paint.ctx.getImageData(0,0,1024,1024);var tx=paint.tex;
     History.push(function(){paint.ctx.putImageData(before,0,0);tx.needsUpdate=true;invalidate();},function(){paint.ctx.putImageData(after,0,0);tx.needsUpdate=true;invalidate();});snap=null;}}
   c.addEventListener('pointerup',up);c.addEventListener('pointercancel',up);})();
@@ -564,7 +566,7 @@ function setView(v){active.view=v;active.scene=(v==='build')?buildScene:(v==='sc
   $$('#tabbar .tab').forEach(function(t){t.classList.toggle('on',t.getAttribute('data-v')===v);});
   $('#vtitle').textContent=VIEWS.filter(function(x){return x[0]===v;})[0][1];
   var slot=curSlot();if(slot){slot.appendChild(dom);}
-  if(v==='paint')paintInit();if(v==='scene')syncSceneFromModels();if(v==='assets')renderAssets();
+  if(v==='paint'){paintInit();$('[data-view=paint]').classList.toggle('mode3d',paint.mode3d);}if(v==='scene')syncSceneFromModels();if(v==='assets')renderAssets();
   if(v==='edit'&&!EM.V.length){EM.fromPrim('Cube');frameObject(EM._meshObj,viewState.edit);}
   RotBall.show(v==='paint'||v==='edit');if(v==='paint'||v==='edit')RotBall.draw();
   renderPanel();setTimeout(resizeActive,30);}
@@ -623,7 +625,10 @@ function panelViewer(b){var m=getModel(state.activeId);
 /* ----- Paint panel ----- */
 function panelPaint(b){var m=getModel(state.activeId);b.appendChild(el('h2',{text:'Texture Paint'}));b.appendChild(el('p',{class:'sub',text:'Paint maps onto '+(m?m.userData.name:'—')+' live.'}));
   var m3Btn=el('button',{class:paint.mode3d?'on':'',text:paint.mode3d?'✓ Paint on 3D surface':'Paint on 3D surface',
-    onclick:function(){paint.mode3d=!paint.mode3d;paint.last=null;m3Btn.className=paint.mode3d?'on':'';m3Btn.textContent=paint.mode3d?'✓ Paint on 3D surface':'Paint on 3D surface';
+    onclick:function(){paint.mode3d=!paint.mode3d;paint.last=null;
+      $('[data-view=paint]').classList.toggle('mode3d',paint.mode3d);
+      setTimeout(resizeActive,10);
+      m3Btn.className=paint.mode3d?'on':'';m3Btn.textContent=paint.mode3d?'✓ Paint on 3D surface':'Paint on 3D surface';
       toast(paint.mode3d?'Drag on 3D preview to paint · RotBall to orbit':'Back to 2D canvas painting');}});
   b.appendChild(el('div',{style:'margin-bottom:10px'},[m3Btn]));
   if(m&&m.userData.parts.length>1){var pSel=el('select',{onchange:function(e){paint.part=+e.target.value;paintInit();}});m.userData.parts.forEach(function(p,i){pSel.appendChild(el('option',{value:i,text:'Part '+(i+1)}));});pSel.value=paint.part;b.appendChild(el('label',{class:'fld',text:'Target part'}));b.appendChild(pSel);}
