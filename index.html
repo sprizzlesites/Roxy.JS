@@ -618,6 +618,18 @@ function exportGLB(root,name){root.updateWorldMatrix(true,true);var rootInv=new 
  d.setUint32(0,0x46546C67,true);d.setUint32(4,2,true);d.setUint32(8,total,true);P=12;d.setUint32(P,jc.byteLength,true);d.setUint32(P+4,0x4E4F534A,true);P+=8;u8.set(jc,P);P+=jc.byteLength;d.setUint32(P,bc.byteLength,true);d.setUint32(P+4,0x004E4942,true);P+=8;u8.set(bc,P);
  download(new Blob([out],{type:'model/gltf-binary'}),name);}
 
+/* ---------------- OBJ export (geometry only) ---------------- */
+function exportOBJ(root,name){root.updateWorldMatrix(true,true);var rootInv=new THREE.Matrix4().copy(root.matrixWorld).invert();
+  var lines=['# Blaster Studio export'],vOff=0,tmp=new THREE.Vector3(),rel=new THREE.Matrix4();
+  root.traverse(function(o){if(!(o.isMesh&&o.geometry))return;var g=o.geometry,pos=g.attributes.position;if(!pos)return;
+    rel.multiplyMatrices(rootInv,o.matrixWorld);var norm=new THREE.Matrix3().getNormalMatrix(rel);var hasN=g.attributes.normal;
+    for(var i=0;i<pos.count;i++){tmp.fromBufferAttribute(pos,i).applyMatrix4(rel);lines.push('v '+tmp.x.toFixed(5)+' '+tmp.y.toFixed(5)+' '+tmp.z.toFixed(5));}
+    if(hasN){for(var i=0;i<hasN.count;i++){tmp.fromBufferAttribute(hasN,i).applyMatrix3(norm).normalize();lines.push('vn '+tmp.x.toFixed(5)+' '+tmp.y.toFixed(5)+' '+tmp.z.toFixed(5));}}
+    function fc(a,b,c){a+=1+vOff;b+=1+vOff;c+=1+vOff;lines.push(hasN?('f '+a+'//'+a+' '+b+'//'+b+' '+c+'//'+c):('f '+a+' '+b+' '+c));}
+    var idx=g.index;if(idx){for(var i=0;i<idx.count;i+=3)fc(idx.getX(i),idx.getX(i+1),idx.getX(i+2));}else{for(var i=0;i<pos.count;i+=3)fc(i,i+1,i+2);}
+    vOff+=pos.count;});
+  download(new Blob([lines.join('\n')],{type:'text/plain'}),name);toast('Exported '+name);}
+
 /* ---------------- paint ---------------- */
 var paint={cv:$('#paintCanvas'),ctx:null,part:0,color:'#d8466a',size:38,soft:0,erase:false,drawing:false,last:null,tex:null,mode3d:false,_3dSnap:null};
 paint.ctx=paint.cv.getContext('2d');
@@ -726,7 +738,8 @@ function panelViewer(b){var m=getModel(state.activeId);
   b.appendChild(el('hr',{class:'sep'}));
   b.appendChild(el('div',{class:'section-title',text:'Export model'}));
   b.appendChild(el('div',{class:'grid2'},[el('button',{class:'pri',text:'Export .glb',onclick:function(){if(m)exportGLB(m,(m.userData.name||'model')+'.glb');}}),
-    el('button',{text:'Send to Scene',onclick:function(){addPlacement(state.activeId);toast('Added to scene');}})]));}
+    el('button',{text:'Export .obj',onclick:function(){if(m)exportOBJ(m,(m.userData.name||'model')+'.obj');}})]));
+  b.appendChild(el('button',{style:'width:100%;margin-top:8px',text:'Send to Scene',onclick:function(){addPlacement(state.activeId);toast('Added to scene');}}));}
 
 /* ----- Paint panel ----- */
 function panelPaint(b){var m=getModel(state.activeId);b.appendChild(el('h2',{text:'Texture Paint'}));b.appendChild(el('p',{class:'sub',text:'Paint maps onto '+(m?m.userData.name:'—')+' live.'}));
@@ -790,6 +803,12 @@ function addLight(kind){var L,helper;if(kind==='Point'){L=new THREE.PointLight(0
   History.push(function(){sceneScene.userData.lights.remove(L);sceneScene.userData.lights.remove(sph);if(state.selLight===L)state.selLight=null;},function(){sceneScene.userData.lights.add(L);sceneScene.userData.lights.add(sph);state.selLight=L;});renderPanel();}
 function panelScene(b){b.appendChild(el('h2',{text:'Scene'}));b.appendChild(el('p',{class:'sub',text:'Compose models, lights & camera, then render.'}));
   b.appendChild(el('div',{class:'section-title',text:'Environment'}));var es=el('select',{onchange:function(e){applyEnv(sceneScene,e.target.value);}});ENVS.forEach(function(p){es.appendChild(el('option',{value:p.id,text:p.name}));});es.value=sceneScene.userData.envId;b.appendChild(es);
+  var bgIn=el('input',{type:'color',value:'#'+(sceneScene.background&&sceneScene.background.getHexString?sceneScene.background.getHexString():'14100c'),oninput:function(e){sceneScene.background=new THREE.Color(e.target.value);invalidate();}});
+  b.appendChild(el('div',{class:'spread',style:'margin-top:8px'},[el('label',{class:'fld',text:'Background'}),bgIn]));
+  var gridChk=el('input',{type:'checkbox'});gridChk.checked=sceneScene.userData.grid?sceneScene.userData.grid.visible:false;
+  gridChk.addEventListener('change',function(){sceneScene.userData.showGrid=gridChk.checked;if(sceneScene.userData.grid)sceneScene.userData.grid.visible=gridChk.checked;invalidate();});
+  b.appendChild(el('label',{class:'spread',style:'margin-top:8px'},[gridChk,el('span',{class:'small',text:'Show grid'})]));
+  b.appendChild(slider('Camera lens (FOV)',20,80,active.vs.cam.fov,1,function(x){active.vs.cam.fov=x;active.vs.cam.updateProjectionMatrix();if(state.renderCam){state.renderCam.fov=x;state.renderCam.updateProjectionMatrix();}invalidate();}));
   b.appendChild(el('div',{class:'section-title',text:'Add model to scene'}));var ms=el('select',{});state.models.forEach(function(mm){ms.appendChild(el('option',{value:mm.userData.id,text:mm.userData.name}));});
   b.appendChild(el('div',{class:'spread'},[ms,el('button',{text:'Add',onclick:function(){addPlacement(ms.value);}})]));
   b.appendChild(el('div',{class:'section-title',text:'Lights'}));b.appendChild(el('div',{class:'chiprow'},[el('button',{class:'chip',text:'+ Point',onclick:function(){addLight('Point');}}),el('button',{class:'chip',text:'+ Spot',onclick:function(){addLight('Spot');}}),el('button',{class:'chip',text:'+ Sun',onclick:function(){addLight('Sun');}})]));
@@ -833,7 +852,7 @@ function renderAssets(){var body=$('#assetsBody');body.innerHTML='';body.appendC
   var grid=el('div',{class:'thumbs'});state.models.forEach(function(m){var parts=m.userData.parts.length;
     grid.appendChild(el('div',{class:'thumb'},[el('div',{class:'nm',text:m.userData.name}),el('div',{class:'mt',text:parts+' part'+(parts===1?'':'s')+' · '+m.userData.mods.length+' modifier'+(m.userData.mods.length===1?'':'s')}),
       el('div',{class:'grid2'},[el('button',{text:'Open',onclick:function(){setActiveModel(m.userData.id);setView('viewer');}}),el('button',{text:'To Scene',onclick:function(){addPlacement(m.userData.id);toast('Added to scene');}})]),
-      el('button',{style:'width:100%',text:'Export .glb',onclick:function(){exportGLB(m,m.userData.name+'.glb');}})]));});
+      el('div',{class:'grid2'},[el('button',{text:'Export .glb',onclick:function(){exportGLB(m,m.userData.name+'.glb');}}),el('button',{text:'Export .obj',onclick:function(){exportOBJ(m,m.userData.name+'.obj');}})])]));});
   body.appendChild(grid);}
 
 /* ----- file inputs ----- */
