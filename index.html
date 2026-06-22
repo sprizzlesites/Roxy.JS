@@ -687,6 +687,9 @@ function panelViewer(b){var m=getModel(state.activeId);
     var emCol=el('input',{type:'color',value:'#'+curMat().emissive.getHexString(),oninput:function(e){curMat().emissive.set(e.target.value);curMat().needsUpdate=true;invalidate();}});
     b.appendChild(el('div',{class:'spread'},[el('label',{class:'fld',text:'Emission (glow)'}),emCol]));
     b.appendChild(slider('Emission strength',0,8,curMat().emissiveIntensity,.05,function(x){curMat().emissiveIntensity=x;curMat().needsUpdate=true;}));
+    var flatChk=el('input',{type:'checkbox'});flatChk.checked=!!curMat().flatShading;
+    flatChk.addEventListener('change',function(){curMat().flatShading=flatChk.checked;curMat().needsUpdate=true;invalidate();});
+    b.appendChild(el('label',{class:'spread',style:'margin-top:8px'},[flatChk,el('span',{class:'small',text:'Flat shading (faceted)'})]));
     pSel.addEventListener('change',function(){state.viewerPart=+pSel.value;renderPanel();});
   }
   b.appendChild(el('div',{class:'section-title',text:'Modifiers'}));
@@ -870,7 +873,7 @@ var editDirect={ptId:null,pending:false,active:false,startX:0,startY:0,prevX:0,p
 
 /* ─── Sculpt brush (push/pull verts on the surface, Blender-like) ─── */
 function falloff(d,R){var t=1-d/R;return t<=0?0:t*t*(3-2*t);}
-var Sculpt={painting:false,ptId:null,brush:'draw',radius:.32,strength:.5,
+var Sculpt={painting:false,ptId:null,brush:'draw',radius:.32,strength:.5,symmetry:0,
   _snap:null,_norm:null,_adj:null,_grab:null,_prevX:0,_prevY:0,
   hit:function(e){if(!EM._meshObj)return null;var r=dom.getBoundingClientRect();
     var ray=new THREE.Raycaster();ray.setFromCamera({x:((e.clientX-r.left)/r.width)*2-1,y:-((e.clientY-r.top)/r.height)*2+1},active.vs.cam);
@@ -884,7 +887,10 @@ var Sculpt={painting:false,ptId:null,brush:'draw',radius:.32,strength:.5,
     if(this.brush==='grab'){var dx=e.clientX-this._prevX,dy=e.clientY-this._prevY;this._prevX=e.clientX;this._prevY=e.clientY;
       var mv=screenDeltaToWorld(dx,dy),g=this._grab||[];for(var k=0;k<g.length;k++)EM.V[g[k].i].addScaledVector(mv,g[k].w);EM._syncPositions();return;}
     this._prevX=e.clientX;this._prevY=e.clientY;var h=this.hit(e);if(h)this.apply(h.point);},
-  apply:function(c){
+  apply:function(c){this._dab(c);
+    if(this.symmetry){var m=c.clone();m.setComponent(this.symmetry-1,-m.getComponent(this.symmetry-1));this._dab(m);}
+    EM._syncPositions();},
+  _dab:function(c){
     var V=EM.V,N=this._norm,adj=this._adj,br=this.brush,R=this.radius,st=this.strength;
     var hits=[];for(var i=0;i<V.length;i++){var d=V[i].distanceTo(c);if(d<R)hits.push({i:i,w:falloff(d,R)});}
     if(!hits.length)return;
@@ -899,8 +905,7 @@ var Sculpt={painting:false,ptId:null,brush:'draw',radius:.32,strength:.5,
     }else{ // draw (out) / carve (in) along surface normal
       var sign=(br==='carve')?-1:1,amt=st*R*.18;
       hits.forEach(function(o){V[o.i].addScaledVector(N[o.i],amt*o.w*sign);});
-    }
-    EM._syncPositions();},
+    }},
   up:function(){if(!this.painting)return;this.painting=false;this.ptId=null;
     var snap=this._snap,curr=EM.V.map(function(v){return v.clone();});EM._refresh();
     History.push(function(){EM.V.forEach(function(v,i){v.copy(snap[i]);});EM._refresh();},function(){EM.V.forEach(function(v,i){v.copy(curr[i]);});EM._refresh();});
@@ -1118,6 +1123,15 @@ var EM={
       } else newF.push(f);});
     this.F=newF;this._buildEdges();this._refresh();},
 
+  bridgeEdges:function(){
+    var sel=this.E.filter(function(e){return e.sel;});
+    if(sel.length!==2){toast('Select exactly 2 edges (Edge mode)');return;}
+    var e1=sel[0],e2=sel[1],a1=e1.a,b1=e1.b,a2=e2.a,b2=e2.b;
+    var d1=this.V[a1].distanceTo(this.V[a2])+this.V[b1].distanceTo(this.V[b2]);
+    var d2=this.V[a1].distanceTo(this.V[b2])+this.V[b1].distanceTo(this.V[a2]);
+    this.F.push({vi:(d1<=d2?[a1,b1,b2,a2]:[a1,b1,a2,b2]),sel:false});
+    this.clearSel();this._buildEdges();this._refresh();toast('Bridged');},
+
   deleteSelected:function(){
     var mode=editState.mode;
     if(mode==='face'){this.F=this.F.filter(function(f){return !f.sel;});}
@@ -1167,12 +1181,22 @@ var EM={
     var name='Mesh '+(state.models.length+1);var m=makeModel(name,[{geo:geo,mat:mat}]);
     addModel(m);setActiveModel(m.userData.id);toast('"'+name+'" added — open Viewer');renderPanel();},
 
+  // Separate selected faces into a brand-new model (e.g. icing off a donut top)
+  separateSelection:function(){
+    var sel=this.F.filter(function(f){return f.sel;});
+    if(!sel.length){toast('Select face(s) first (Face mode)');return;}
+    var geo=this._facesToGeo(sel),mat=makeMaterial({color:0xf6a8c4,rough:.3});
+    var name='Part '+(state.models.length+1);var m=makeModel(name,[{geo:geo,mat:mat}]);
+    addModel(m);setActiveModel(m.userData.id);toast('"'+name+'" separated — open Viewer');renderPanel();},
+
+  _toExportGeo:function(){return this._facesToGeo(this.F);},
+
   // Unindexed geometry with per-face box-mapped UVs (required for texture painting)
-  _toExportGeo:function(){
+  _facesToGeo:function(faces){
     var pos=[],nor=[],uv=[];
     // Collect all tris with per-face normals
-    for(var fi=0;fi<this.F.length;fi++){
-      var f=this.F[fi],vi=f.vi,n=this._faceNormal(fi);
+    for(var q=0;q<faces.length;q++){
+      var f=faces[q],fi=this.F.indexOf(f),vi=f.vi,n=this._faceNormal(fi);
       for(var t=1;t<vi.length-1;t++){
         var idxs=[vi[0],vi[t],vi[t+1]];
         for(var k=0;k<3;k++){var v=this.V[idxs[k]];pos.push(v.x,v.y,v.z);nor.push(n.x,n.y,n.z);}}}
@@ -1256,6 +1280,9 @@ function renderEditHud(){
     [['draw','Draw'],['carve','Carve'],['smooth','Smooth'],['grab','Grab'],['flatten','Flatten'],['pinch','Pinch']].forEach(function(p){
       brow.appendChild(el('button',{class:'hud-btn'+(Sculpt.brush===p[0]?' on':''),text:p[1],onclick:function(){Sculpt.brush=p[0];renderEditHud();}}));});
     hud.appendChild(brow);
+    var symrow=el('div',{class:'hud-row'});
+    [[0,'Sym Off'],[1,'X'],[2,'Y'],[3,'Z']].forEach(function(p){symrow.appendChild(el('button',{class:'hud-btn'+(Sculpt.symmetry===p[0]?' on':''),text:p[1],onclick:function(){Sculpt.symmetry=p[0];renderEditHud();}}));});
+    hud.appendChild(symrow);
     hud.appendChild(hudSlider('Size',.05,1.2,Sculpt.radius,.01,function(x){Sculpt.radius=x;}));
     hud.appendChild(hudSlider('Strength',.05,1,Sculpt.strength,.01,function(x){Sculpt.strength=x;}));
     var er2=el('div',{class:'hud-row'});
@@ -1282,6 +1309,7 @@ function renderEditHud(){
     if(mode==='face'){
       or.appendChild(el('button',{class:'hud-btn',text:'Extrude',onclick:function(){EM.extrude();}}));
       or.appendChild(el('button',{class:'hud-btn',text:'Inset',onclick:function(){EM.inset();}}));
+      or.appendChild(el('button',{class:'hud-btn',text:'Separate',onclick:function(){EM.separateSelection();}}));
     }
     if(mode==='vert'){
       or.appendChild(el('button',{class:'hud-btn',text:'Merge',onclick:function(){EM.mergeSelected();}}));
@@ -1325,6 +1353,9 @@ function panelEdit(b){
     [['draw','Draw'],['carve','Carve'],['smooth','Smooth'],['grab','Grab'],['flatten','Flatten'],['pinch','Pinch']].forEach(function(p){
       bRow.appendChild(el('button',{class:'chip'+(Sculpt.brush===p[0]?' on':''),text:p[1],onclick:function(){Sculpt.brush=p[0];renderEditHud();renderPanel();}}));});
     b.appendChild(bRow);
+    var symRow=el('div',{class:'chiprow',style:'margin-top:6px'});
+    [[0,'Symmetry Off'],[1,'X'],[2,'Y'],[3,'Z']].forEach(function(p){symRow.appendChild(el('button',{class:'chip'+(Sculpt.symmetry===p[0]?' on':''),text:p[1],onclick:function(){Sculpt.symmetry=p[0];renderEditHud();renderPanel();}}));});
+    b.appendChild(symRow);
     b.appendChild(slider('Brush size',.05,1.2,Sculpt.radius,.01,function(x){Sculpt.radius=x;}));
     b.appendChild(slider('Brush strength',.05,1,Sculpt.strength,.01,function(x){Sculpt.strength=x;}));
     b.appendChild(el('p',{class:'small muted',style:'margin-top:6px',text:'Tip: add a Subdivide Smooth modifier first for more clay-like detail.'}));
@@ -1361,6 +1392,10 @@ function panelEdit(b){
   b.appendChild(el('div',{class:'grid2',style:'margin-top:6px'},[
     el('button',{text:'Delete  [X]',onclick:function(){EM.deleteSelected();}}),
     el('button',{text:'Flip Normals',onclick:function(){EM.flipNormals();}})
+  ]));
+  b.appendChild(el('div',{class:'grid2',style:'margin-top:6px'},[
+    el('button',{text:'Separate Faces',onclick:function(){EM.separateSelection();}}),
+    el('button',{text:'Bridge Edges',onclick:function(){EM.bridgeEdges();renderPanel();}})
   ]));
   b.appendChild(el('div',{class:'grid2',style:'margin-top:6px'},[
     el('button',{text:'Merge Verts',onclick:function(){EM.mergeSelected();}}),
