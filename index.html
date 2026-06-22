@@ -279,7 +279,7 @@ var viewState={ // per-view orbit state
  paint:{th:.7,ph:1.0,rad:4,tx:0,ty:0,tz:0,cam:mkCam()},
  build:{th:.8,ph:1.0,rad:7,tx:0,ty:1,tz:0,cam:mkCam()},
  scene:{th:.8,ph:1.0,rad:8,tx:0,ty:1,tz:0,cam:mkCam()},
- edit:{th:.7,ph:1.0,rad:4,tx:0,ty:.5,tz:0,cam:mkCam()}
+ edit:{th:.5,ph:.85,rad:5,tx:0,ty:0,tz:0,cam:mkCam()}
 };
 var active={view:'viewer',scene:viewerScene,vs:viewState.viewer};
 
@@ -686,7 +686,7 @@ function setView(v){active.view=v;active.scene=(v==='build')?buildScene:(v==='sc
   $('#vtitle').textContent=VIEWS.filter(function(x){return x[0]===v;})[0][1];
   var slot=curSlot();if(slot){slot.appendChild(dom);}
   if(v==='paint'){paintInit();$('[data-view=paint]').classList.toggle('mode3d',paint.mode3d);}if(v==='scene')syncSceneFromModels();if(v==='assets')renderAssets();
-  if(v==='edit'&&!EM.V.length){EM.fromPrim('Cube');frameObject(EM._meshObj,viewState.edit);}
+  if(v==='edit'&&!EM.V.length){EM.fromPrim('Cube');frameObject(EM._meshObj,viewState.edit);viewState.edit.rad=4;}
   if(v==='edit')renderEditHud();
   RotBall.show(v==='paint'||v==='edit');if(v==='paint'||v==='edit')RotBall.draw();
   renderPanel();setTimeout(resizeActive,30);}
@@ -1678,11 +1678,10 @@ window.addEventListener('resize',resizeActive);
 buildNav();
 Gizmo.build();
 RotBall.init();
-var donut=buildDonut();addModel(donut);setActiveModel(donut.userData.id);
-setView('viewer');updUndo();
+setView('edit');updUndo();
 loop();
 boot.style.display='none';
-toast('Welcome — drag to orbit, tap to select, drag the gizmo to move');
+toast('Welcome to ROXY.JS — tap a face/vert/edge to select, drag the gizmo to move');
 })();
 </script>
 </body>
