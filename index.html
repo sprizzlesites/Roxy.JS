@@ -119,6 +119,7 @@ canvas{display:block;touch-action:none}
 }
 @media (max-width:820px){ .desktop-only{display:none} }
 @media (min-width:821px){ .mobile-only{display:none} }
+#rotBall{position:absolute;right:12px;top:12px;width:80px;height:80px;cursor:grab;display:none;z-index:8;touch-action:none;border-radius:50%}
 </style>
 </head>
 <body>
@@ -149,6 +150,7 @@ canvas{display:block;touch-action:none}
     <section class="view" data-view="scene"><div class="gl-slot" id="slot-scene"></div><button class="fab" id="fabScene">+</button></section>
     <section class="view" data-view="assets"><div class="assets-body" id="assetsBody"></div></section>
     <section class="view" data-view="edit"><div class="gl-slot" id="slot-edit"></div></section>
+    <canvas id="rotBall" width="80" height="80"></canvas>
   </main>
 
   <aside id="panel">
@@ -305,24 +307,53 @@ var ptrs=new Map(),lastDist=0,lastMid=null,clickStart=null;
 function clamp(x,a,b){return Math.max(a,Math.min(b,x));}
 dom.addEventListener('pointerdown',function(e){
   if((active.view==='build'||active.view==='scene')&&Gizmo.target){var ray=rayFromEvent(e);var hi=Gizmo.hit(ray);if(hi){Gizmo.start(hi,ray,e);dom.setPointerCapture(e.pointerId);gizmoDrag=e.pointerId;invalidate();return;}}
-  if(active.view==='edit'&&editState.tool==='grab'){editState.grabActive=true;editState.grabPtId=e.pointerId;editState.grabPrevX=e.clientX;editState.grabPrevY=e.clientY;dom.setPointerCapture(e.pointerId);invalidate();return;}
-  dom.setPointerCapture(e.pointerId);ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY});clickStart={x:e.clientX,y:e.clientY,t:Date.now(),id:e.pointerId};invalidate();});
+  dom.setPointerCapture(e.pointerId);ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  clickStart={x:e.clientX,y:e.clientY,t:Date.now(),id:e.pointerId};
+  if(active.view==='paint'&&paint.mode3d&&ptrs.size===1){
+    paint.drawing=true;paint.last=null;paint._3dSnap=paint.ctx.getImageData(0,0,1024,1024);
+    do3dPaint(e.clientX,e.clientY);}
+  else if(active.view==='edit'&&ptrs.size===1&&EM.selCount()>0){
+    editDirect.pending=true;editDirect.ptId=e.pointerId;
+    editDirect.startX=e.clientX;editDirect.startY=e.clientY;
+    editDirect.prevX=e.clientX;editDirect.prevY=e.clientY;}
+  invalidate();});
 dom.addEventListener('pointermove',function(e){
   if(gizmoDrag===e.pointerId){Gizmo.drag(rayFromEvent(e),e);return;}
-  if(active.view==='edit'&&editState.grabActive&&editState.grabPtId===e.pointerId){var dx=e.clientX-editState.grabPrevX,dy=e.clientY-editState.grabPrevY;editState.grabPrevX=e.clientX;editState.grabPrevY=e.clientY;EM.grab(screenDeltaToWorld(dx,dy));return;}
-  var p=ptrs.get(e.pointerId);if(!p)return;var dx=e.clientX-p.x,dy=e.clientY-p.y;p.x=e.clientX;p.y=e.clientY;var vs=active.vs;
-  if(ptrs.size===1){vs.th-=dx*.005;vs.ph=clamp(vs.ph-dy*.005,.1,1.5);if(clickStart&&Math.hypot(e.clientX-clickStart.x,e.clientY-clickStart.y)>6)clickStart=null;}
+  var p=ptrs.get(e.pointerId);if(!p)return;
+  var dx=e.clientX-p.x,dy=e.clientY-p.y;p.x=e.clientX;p.y=e.clientY;var vs=active.vs;
+  if(active.view==='paint'&&ptrs.size===1&&paint.mode3d){
+    if(paint.drawing){clickStart=null;do3dPaint(e.clientX,e.clientY);}
+    return;}
+  if(active.view==='edit'&&ptrs.size===1){
+    if(editDirect.ptId===e.pointerId){
+      if(!editDirect.active&&editDirect.pending&&Math.hypot(e.clientX-editDirect.startX,e.clientY-editDirect.startY)>5){
+        editDirect.active=true;editDirect.pending=false;
+        editDirect.snap=EM.V.map(function(v){return v.clone();});clickStart=null;}
+      if(editDirect.active){
+        var ddx=e.clientX-editDirect.prevX,ddy=e.clientY-editDirect.prevY;
+        editDirect.prevX=e.clientX;editDirect.prevY=e.clientY;EM.grab(screenDeltaToWorld(ddx,ddy));}}
+    invalidate();return;}
+  if(ptrs.size===1){
+    if(active.view!=='paint'&&active.view!=='edit'){vs.th-=dx*.005;vs.ph=clamp(vs.ph-dy*.005,.1,1.5);}
+    if(clickStart&&Math.hypot(e.clientX-clickStart.x,e.clientY-clickStart.y)>6)clickStart=null;}
   else if(ptrs.size===2){var v=Array.from(ptrs.values());var d=Math.hypot(v[0].x-v[1].x,v[0].y-v[1].y);var mid={x:(v[0].x+v[1].x)/2,y:(v[0].y+v[1].y)/2};
     if(lastDist)vs.rad=clamp(vs.rad*(lastDist/d),.6,60);lastDist=d;
     if(lastMid){var sp=Math.sin(vs.ph);var rightx=Math.cos(vs.th+Math.PI/2),rightz=Math.sin(vs.th+Math.PI/2);var k=vs.rad*.0016;
-      vs.tx-=(mid.x-lastMid.x)*k*rightx;vs.tz-=(mid.x-lastMid.x)*k*rightz;vs.ty+=(mid.y-lastMid.y)*k;}lastMid=mid;clickStart=null;}invalidate();});
-function endPtr(e){if(gizmoDrag===e.pointerId){Gizmo.end();gizmoDrag=null;invalidate();return;}
-  if(active.view==='edit'&&editState.grabActive&&e.pointerId===editState.grabPtId){
-    editState.grabActive=false;editState.grabPtId=null;
-    var snap=editState.grabSnap,curr=EM.V.map(function(v){return v.clone();});
-    History.push(function(){EM.V.forEach(function(v,i){v.copy(snap[i]);});EM._refresh();},
-                 function(){EM.V.forEach(function(v,i){v.copy(curr[i]);});EM._refresh();});
-    editState.tool='select';editState.grabSnap=null;renderPanel();return;}
+      vs.tx-=(mid.x-lastMid.x)*k*rightx;vs.tz-=(mid.x-lastMid.x)*k*rightz;vs.ty+=(mid.y-lastMid.y)*k;}lastMid=mid;clickStart=null;}
+  invalidate();});
+function endPtr(e){
+  if(gizmoDrag===e.pointerId){Gizmo.end();gizmoDrag=null;invalidate();return;}
+  if(active.view==='edit'&&editDirect.ptId===e.pointerId){
+    if(editDirect.active){
+      var snap=editDirect.snap,curr=EM.V.map(function(v){return v.clone();});
+      History.push(function(){EM.V.forEach(function(v,i){v.copy(snap[i]);});EM._refresh();},
+                   function(){EM.V.forEach(function(v,i){v.copy(curr[i]);});EM._refresh();});}
+    editDirect.ptId=null;editDirect.pending=false;editDirect.active=false;editDirect.snap=null;}
+  if(active.view==='paint'&&paint.mode3d&&paint.drawing){
+    paint.drawing=false;paint.last=null;
+    var bef=paint._3dSnap,aft=paint.ctx.getImageData(0,0,1024,1024),tx=paint.tex;
+    if(bef){History.push(function(){paint.ctx.putImageData(bef,0,0);tx.needsUpdate=true;invalidate();},function(){paint.ctx.putImageData(aft,0,0);tx.needsUpdate=true;invalidate();});}
+    paint._3dSnap=null;}
   ptrs.delete(e.pointerId);lastDist=0;lastMid=null;
   if(clickStart&&clickStart.id===e.pointerId&&Date.now()-clickStart.t<350&&Math.hypot(e.clientX-clickStart.x,e.clientY-clickStart.y)<6){onViewportTap(e);}clickStart=null;}
 dom.addEventListener('pointerup',endPtr);dom.addEventListener('pointercancel',endPtr);
@@ -336,7 +367,8 @@ function curSlot(){var v=active.view;if(v==='paint')return $('#slot-paint');retu
 function loop(){requestAnimationFrame(loop);updateCam();if(Gizmo.group)Gizmo.update();
   var slot=curSlot();var act=ptrs.size>0||gizmoDrag!=null;
   if((renderFrames>0||act)&&slot&&slot.contains(dom))renderer.render(active.scene,active.vs.cam);
-  if(renderFrames>0&&!act)renderFrames--;}
+  if(renderFrames>0&&!act)renderFrames--;
+  if(RotBall.el&&RotBall.el.style.display!=='none')RotBall.draw();}
 
 /* ---------------- model system ---------------- */
 var state={models:[],activeId:null,selBuild:null,selScene:null,selLight:null,renderCam:null};
@@ -505,7 +537,7 @@ function exportGLB(root,name){root.updateWorldMatrix(true,true);var rootInv=new 
  download(new Blob([out],{type:'model/gltf-binary'}),name);}
 
 /* ---------------- paint ---------------- */
-var paint={cv:$('#paintCanvas'),ctx:null,part:0,color:'#d8466a',size:38,erase:false,drawing:false,last:null,tex:null};
+var paint={cv:$('#paintCanvas'),ctx:null,part:0,color:'#d8466a',size:38,erase:false,drawing:false,last:null,tex:null,mode3d:false,_3dSnap:null};
 paint.ctx=paint.cv.getContext('2d');
 function paintInit(){var m=getModel(state.activeId);paint.ctx.fillStyle='#ffffff';paint.ctx.fillRect(0,0,1024,1024);
   if(m&&m.userData.parts[paint.part]){var mat=m.userData.parts[paint.part].mat;if(mat.map&&mat.map.image){try{paint.ctx.drawImage(mat.map.image,0,0,1024,1024);}catch(e){}}}
@@ -534,6 +566,7 @@ function setView(v){active.view=v;active.scene=(v==='build')?buildScene:(v==='sc
   var slot=curSlot();if(slot){slot.appendChild(dom);}
   if(v==='paint')paintInit();if(v==='scene')syncSceneFromModels();if(v==='assets')renderAssets();
   if(v==='edit'&&!EM.V.length){EM.fromPrim('Cube');frameObject(EM._meshObj,viewState.edit);}
+  RotBall.show(v==='paint'||v==='edit');if(v==='paint'||v==='edit')RotBall.draw();
   renderPanel();setTimeout(resizeActive,30);}
 
 function slider(label,min,max,val,step,on){var out=el('span',{class:'muted small',text:(+val).toFixed(2)});var startV=null;
@@ -589,6 +622,10 @@ function panelViewer(b){var m=getModel(state.activeId);
 
 /* ----- Paint panel ----- */
 function panelPaint(b){var m=getModel(state.activeId);b.appendChild(el('h2',{text:'Texture Paint'}));b.appendChild(el('p',{class:'sub',text:'Paint maps onto '+(m?m.userData.name:'—')+' live.'}));
+  var m3Btn=el('button',{class:paint.mode3d?'on':'',text:paint.mode3d?'✓ Paint on 3D surface':'Paint on 3D surface',
+    onclick:function(){paint.mode3d=!paint.mode3d;paint.last=null;m3Btn.className=paint.mode3d?'on':'';m3Btn.textContent=paint.mode3d?'✓ Paint on 3D surface':'Paint on 3D surface';
+      toast(paint.mode3d?'Drag on 3D preview to paint · RotBall to orbit':'Back to 2D canvas painting');}});
+  b.appendChild(el('div',{style:'margin-bottom:10px'},[m3Btn]));
   if(m&&m.userData.parts.length>1){var pSel=el('select',{onchange:function(e){paint.part=+e.target.value;paintInit();}});m.userData.parts.forEach(function(p,i){pSel.appendChild(el('option',{value:i,text:'Part '+(i+1)}));});pSel.value=paint.part;b.appendChild(el('label',{class:'fld',text:'Target part'}));b.appendChild(pSel);}
   var col=el('input',{type:'color',value:paint.color,oninput:function(e){paint.color=e.target.value;paint.erase=false;updEr();}});
   b.appendChild(el('div',{class:'spread'},[el('label',{class:'fld',text:'Brush color'}),col]));
@@ -732,6 +769,42 @@ function screenDeltaToWorld(dx,dy){
   return new THREE.Vector3().addScaledVector(right,dx*k).addScaledVector(up,-dy*k);}
 
 function distSeg2D(px,py,ax,ay,bx,by){var dx=bx-ax,dy=by-ay,l2=dx*dx+dy*dy;if(!l2)return Math.hypot(px-ax,py-ay);var t=Math.max(0,Math.min(1,((px-ax)*dx+(py-ay)*dy)/l2));return Math.hypot(px-(ax+t*dx),py-(ay+t*dy));}
+
+var editDirect={ptId:null,pending:false,active:false,startX:0,startY:0,prevX:0,prevY:0,snap:null};
+
+var RotBall={
+  el:null,ctx:null,_px:null,_py:null,
+  init:function(){
+    this.el=$('#rotBall');if(!this.el)return;this.ctx=this.el.getContext('2d');
+    var self=this;
+    this.el.addEventListener('pointerdown',function(e){
+      e.stopPropagation();self.el.setPointerCapture(e.pointerId);self._px=e.clientX;self._py=e.clientY;});
+    this.el.addEventListener('pointermove',function(e){
+      if(self._px==null)return;
+      var dx=e.clientX-self._px,dy=e.clientY-self._py;self._px=e.clientX;self._py=e.clientY;
+      active.vs.th-=dx*.013;active.vs.ph=clamp(active.vs.ph-dy*.013,.1,1.5);
+      updateCam();self.draw();invalidate();});
+    this.el.addEventListener('pointerup',function(){self._px=self._py=null;});
+    this.el.addEventListener('pointercancel',function(){self._px=self._py=null;});},
+  show:function(v){if(this.el)this.el.style.display=v?'block':'none';},
+  draw:function(){
+    if(!this.el||!this.ctx||!(active.vs&&active.vs.cam))return;
+    var c=this.ctx,S=80,cx=40,cy=40,R=34;
+    c.clearRect(0,0,S,S);
+    c.fillStyle='rgba(18,14,10,.72)';c.beginPath();c.arc(cx,cy,R,0,Math.PI*2);c.fill();
+    c.strokeStyle='rgba(255,255,255,.1)';c.lineWidth=1;c.beginPath();c.arc(cx,cy,R,0,Math.PI*2);c.stroke();
+    var cam=active.vs.cam;
+    var items=[
+      {dir:new THREE.Vector3().setFromMatrixColumn(cam.matrix,0),l:'X',fc:'#ff6b78',bc:'#5a1f28'},
+      {dir:new THREE.Vector3().setFromMatrixColumn(cam.matrix,1),l:'Y',fc:'#9be0a3',bc:'#1f4a28'},
+      {dir:new THREE.Vector3().setFromMatrixColumn(cam.matrix,2).negate(),l:'Z',fc:'#6cc6ff',bc:'#1a3d58'}
+    ].map(function(a){return {x:cx+a.dir.x*(R-12),y:cy-a.dir.y*(R-12),z:a.dir.z,l:a.l,fc:a.fc,bc:a.bc};});
+    items.slice().sort(function(a,b){return a.z-b.z;}).forEach(function(it){
+      var front=it.z>=0,col=front?it.fc:it.bc,r=front?6:4;
+      c.strokeStyle=col;c.lineWidth=front?2.5:1.5;
+      c.beginPath();c.moveTo(cx,cy);c.lineTo(it.x,it.y);c.stroke();
+      c.fillStyle=col;c.beginPath();c.arc(it.x,it.y,r,0,Math.PI*2);c.fill();
+      if(front){c.fillStyle='rgba(0,0,0,.8)';c.font='bold 9px sans-serif';c.textAlign='center';c.textBaseline='middle';c.fillText(it.l,it.x,it.y);}});}};
 
 var EM={
   V:[],F:[],E:[],_triMap:[],
@@ -878,8 +951,7 @@ var EM={
       for(var i=0;i<f.vi.length;i++){var a=f.vi[i],b=f.vi[(i+1)%f.vi.length];self.F.push({vi:[a,b,vMap[b],vMap[a]],sel:false});}
       f.vi=f.vi.map(function(vi){return vMap[vi];});f.sel=true;});
     this._buildEdges();this._refresh();
-    editState.tool='grab';editState.grabSnap=this.V.map(function(v){return v.clone();});
-    renderPanel();toast('Drag viewport to position extrusion');},
+    renderPanel();toast('Extruded — drag the new faces to reposition');},
 
   inset:function(){
     var self=this,selF=this.F.filter(function(f){return f.sel;});
@@ -996,6 +1068,15 @@ var EM={
     var f=this.F[fi],c=new THREE.Vector3();f.vi.forEach(function(vi){c.add(this.V[vi]);},this);return c.divideScalar(f.vi.length);}
 };
 
+function do3dPaint(clientX,clientY){
+  var m=getModel(state.activeId);if(!m||!m.userData.parts[paint.part])return;
+  var mesh=m.userData.parts[paint.part].mesh;
+  var r=dom.getBoundingClientRect();var mx=((clientX-r.left)/r.width)*2-1,my=-((clientY-r.top)/r.height)*2+1;
+  var ray=new THREE.Raycaster();ray.setFromCamera({x:mx,y:my},active.vs.cam);
+  var hits=ray.intersectObject(mesh,false);if(!hits.length){paint.last=null;return;}
+  var hit=hits[0];if(!hit.uv){paint.last=null;return;}
+  paintAt(hit.uv.x*1024,(1-hit.uv.y)*1024);}
+
 /* ----- Edit panel ----- */
 function panelEdit(b){
   b.appendChild(el('h2',{text:'Mesh Edit'}));
@@ -1026,13 +1107,7 @@ function panelEdit(b){
   if(selN>0)b.appendChild(el('div',{class:'card',style:'text-align:center;margin-top:8px;color:var(--pink)'},[el('span',{text:selN+' '+editState.mode+(selN>1?'s':'')+' selected'})]));
 
   b.appendChild(el('div',{class:'section-title',text:'Transform'}));
-  var isGrab=editState.tool==='grab';
-  b.appendChild(el('button',{class:(isGrab?'on ':'')+' ',style:'width:100%',
-    text:isGrab?'✓ Grabbing — drag viewport (tap to confirm)':'Grab / Move  [G]',
-    onclick:function(){
-      if(isGrab){editState.tool='select';editState.grabSnap=null;renderPanel();return;}
-      if(selN<1){toast('Select something first');return;}
-      editState.tool='grab';editState.grabSnap=EM.V.map(function(v){return v.clone();});renderPanel();toast('Drag to move — tap again to confirm');}}));
+  b.appendChild(el('p',{class:'small muted',style:'margin-bottom:6px',text:'Select elements then drag them in the 3D view to move · RotBall to orbit · two-finger to zoom/pan'}));
 
   b.appendChild(el('div',{class:'section-title',text:'Operations'}));
   b.appendChild(el('div',{class:'grid2'},[
@@ -1058,7 +1133,7 @@ function panelEdit(b){
 
   b.appendChild(el('hr',{class:'sep'}));
   b.appendChild(el('div',{class:'section-title',text:'Keyboard shortcuts (desktop)'}));
-  b.appendChild(el('p',{class:'small muted',text:'G=Grab  E=Extrude  I=Inset  S=Subdivide  X=Delete  A=Select All  6=Open this tab'}));
+  b.appendChild(el('p',{class:'small muted',text:'E=Extrude  I=Inset  S=Subdivide  X=Delete  A=Select All  drag selected → move  6=Open this tab'}));
 
   b.appendChild(el('hr',{class:'sep'}));
   b.appendChild(el('div',{class:'section-title',text:'Export to library'}));
@@ -1087,7 +1162,6 @@ window.addEventListener('keydown',function(e){var tag=(e.target&&e.target.tagNam
   else if(z==='f'){$('#btnFrame').click();}
   else if(active.view==='edit'){
     if(z==='a'){e.preventDefault();EM.selAll();}
-    else if(z==='g'){if(EM.selCount()>0){editState.tool='grab';editState.grabSnap=EM.V.map(function(v){return v.clone();});renderPanel();toast('Drag to move — click to confirm');}}
     else if(z==='e'){e.preventDefault();EM.extrude();}
     else if(z==='i'){EM.inset();}
     else if(z==='x'){EM.deleteSelected();}
@@ -1101,6 +1175,7 @@ window.addEventListener('resize',resizeActive);
 /* ---------------- init ---------------- */
 buildNav();
 Gizmo.build();
+RotBall.init();
 var donut=buildDonut();addModel(donut);setActiveModel(donut.userData.id);
 setView('viewer');updUndo();
 loop();
