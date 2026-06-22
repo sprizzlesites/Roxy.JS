@@ -781,6 +781,9 @@ function panelBuild(b){b.appendChild(el('h2',{text:'Build'}));b.appendChild(el('
     b.appendChild(slider('Scale',.1,3,sel.scale.x,.01,function(x){sel.scale.set(x,x,x);}));
     var col=el('input',{type:'color',value:'#'+sel.material.color.getHexString(),oninput:function(e){sel.material.color.set(e.target.value);}});
     b.appendChild(el('div',{class:'spread'},[el('label',{class:'fld',text:'Color'}),col]));
+    var bPresets=el('div',{class:'chiprow',style:'margin-top:8px'});Object.keys(MATPRESETS).forEach(function(pk){bPresets.appendChild(el('button',{class:'chip',text:pk,onclick:function(){applyMatPreset(sel.material,pk);renderPanel();}}));});b.appendChild(bPresets);
+    b.appendChild(slider('Roughness',0,1,sel.material.roughness,.01,function(x){sel.material.roughness=x;}));
+    b.appendChild(slider('Metalness',0,1,sel.material.metalness,.01,function(x){sel.material.metalness=x;}));
     b.appendChild(el('div',{class:'grid2'},[el('button',{text:'Duplicate',onclick:function(){var c=sel.clone();c.material=sel.material.clone();c.position.x+=.6;buildScene.userData.holder.add(c);state.selBuild=c;renderPanel();}}),
       el('button',{text:'Delete',onclick:function(){buildScene.userData.holder.remove(sel);state.selBuild=null;renderPanel();}})]));}
   b.appendChild(el('hr',{class:'sep'}));
@@ -1011,9 +1014,10 @@ var EM={
     else geo=new THREE.BoxGeometry(s,s,s,2,2,2);
     this._fromGeo(geo);geo.dispose();},
 
-  fromModel:function(m){
+  fromModel:function(m,pi){
     if(!m||!m.userData.parts.length)return;
-    this._fromGeo(m.userData.parts[0].mesh.geometry);},
+    pi=pi||0;if(pi>=m.userData.parts.length)pi=0;
+    this._fromGeo(m.userData.parts[pi].mesh.geometry);},
 
   _fromGeo:function(geo){
     this.clear();
@@ -1390,10 +1394,10 @@ function panelEdit(b){
 
   b.appendChild(el('div',{class:'section-title',text:'Start / replace mesh'}));
   var primSel=el('select',{});['Cube','Sphere','Cylinder','Cone','Torus','Plane','Icosphere','Pyramid','Prism'].forEach(function(k){primSel.appendChild(el('option',{value:k,text:k}));});
-  var fromModelSel=el('select',{});state.models.forEach(function(m){fromModelSel.appendChild(el('option',{value:m.userData.id,text:m.userData.name}));});
+  var fromModelSel=el('select',{});state.models.forEach(function(m){m.userData.parts.forEach(function(p,i){fromModelSel.appendChild(el('option',{value:m.userData.id+':'+i,text:m.userData.name+(m.userData.parts.length>1?(' · Part '+(i+1)):'')}));});});
   b.appendChild(el('div',{class:'grid2'},[
     el('div',{},[el('label',{class:'fld',text:'Primitive'}),el('div',{class:'spread'},[primSel,el('button',{text:'Load',onclick:function(){EM.fromPrim(primSel.value);frameObject(EM._meshObj,viewState.edit);renderPanel();toast('Loaded '+primSel.value);}})])]),
-    el('div',{},[el('label',{class:'fld',text:'From model'}),el('div',{class:'spread'},[fromModelSel,el('button',{text:'Load',onclick:function(){var m=getModel(fromModelSel.value);if(m){EM.fromModel(m);frameObject(EM._meshObj,viewState.edit);renderPanel();}}})])])
+    el('div',{},[el('label',{class:'fld',text:'From model'}),el('div',{class:'spread'},[fromModelSel,el('button',{text:'Load',onclick:function(){var pr=(fromModelSel.value||'').split(':'),m=getModel(pr[0]);if(m){EM.fromModel(m,+pr[1]||0);frameObject(EM._meshObj,viewState.edit);renderPanel();}}})])])
   ]));
 
   if(!EM.V.length)return;
