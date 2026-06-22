@@ -520,7 +520,11 @@ var PRIMS={
  Torus:function(p){return new THREE.TorusGeometry(p*.5,p*.2,20,48);},
  Plane:function(p){var g=new THREE.PlaneGeometry(p,p,4,4);g.rotateX(-Math.PI/2);return g;},
  Icosphere:function(p){return new THREE.IcosahedronGeometry(p*.6,2);},
- Knot:function(p){return new THREE.TorusKnotGeometry(p*.4,p*.13,80,12);}
+ Knot:function(p){return new THREE.TorusKnotGeometry(p*.4,p*.13,80,12);},
+ Pyramid:function(p){return new THREE.ConeGeometry(p*.55,p,4);},
+ Prism:function(p){return new THREE.CylinderGeometry(p*.5,p*.5,p,6);},
+ Disc:function(p){var g=new THREE.CircleGeometry(p*.5,48);g.rotateX(-Math.PI/2);return g;},
+ Tube:function(p){return new THREE.CylinderGeometry(p*.5,p*.5,p,32,1,true);}
 };
 
 /* ---------------- importers ---------------- */
@@ -983,6 +987,8 @@ var EM={
     else if(type==='Torus')geo=new THREE.TorusGeometry(s*.5,s*.2,6,10);
     else if(type==='Plane'){geo=new THREE.PlaneGeometry(s,s,4,4);geo.rotateX(-Math.PI/2);}
     else if(type==='Icosphere')geo=new THREE.IcosahedronGeometry(s*.6,1);
+    else if(type==='Pyramid')geo=new THREE.ConeGeometry(s*.55,s,4);
+    else if(type==='Prism')geo=new THREE.CylinderGeometry(s*.5,s*.5,s,6);
     else geo=new THREE.BoxGeometry(s,s,s,2,2,2);
     this._fromGeo(geo);geo.dispose();},
 
@@ -1097,6 +1103,20 @@ var EM={
     else if(mode==='edge')this.E.forEach(function(e){if(e.sel){selV.add(e.a);selV.add(e.b);}});
     else this.V.forEach(function(v,i){if(v.sel)selV.add(i);});
     selV.forEach(function(i){this.V[i].add(delta);},this);this._refresh();},
+
+  _selVertSet:function(){var mode=editState.mode,s=new Set();
+    if(mode==='face')this.F.forEach(function(f){if(f.sel)f.vi.forEach(function(v){s.add(v);});});
+    else if(mode==='edge')this.E.forEach(function(e){if(e.sel){s.add(e.a);s.add(e.b);}});
+    else this.V.forEach(function(v,i){if(v.sel)s.add(i);});return s;},
+  _selCentroid:function(set){var c=new THREE.Vector3(),n=0;set.forEach(function(i){c.add(this.V[i]);n++;},this);if(n)c.divideScalar(n);return c;},
+  _pushVertHistory:function(snap){var curr=this.V.map(function(v){return v.clone();});
+    History.push(function(){EM.V.forEach(function(v,i){v.copy(snap[i]);});EM._refresh();},function(){EM.V.forEach(function(v,i){v.copy(curr[i]);});EM._refresh();});},
+  scaleSelection:function(f){var set=this._selVertSet();if(!set.size){toast('Select something first');return;}
+    var snap=this.V.map(function(v){return v.clone();}),c=this._selCentroid(set);
+    set.forEach(function(i){this.V[i].sub(c).multiplyScalar(f).add(c);},this);this._refresh();this._pushVertHistory(snap);},
+  rotateSelection:function(axis,ang){var set=this._selVertSet();if(!set.size){toast('Select something first');return;}
+    var snap=this.V.map(function(v){return v.clone();}),c=this._selCentroid(set),ax=new THREE.Vector3(axis==='x'?1:0,axis==='y'?1:0,axis==='z'?1:0);
+    set.forEach(function(i){var p=this.V[i].clone().sub(c);p.applyAxisAngle(ax,ang);this.V[i].copy(p.add(c));},this);this._refresh();this._pushVertHistory(snap);},
 
   extrude:function(){
     var self=this,selF=this.F.filter(function(f){return f.sel;});
@@ -1350,7 +1370,7 @@ function panelEdit(b){
   b.appendChild(el('p',{class:'sub',text:info}));
 
   b.appendChild(el('div',{class:'section-title',text:'Start / replace mesh'}));
-  var primSel=el('select',{});['Cube','Sphere','Cylinder','Cone','Torus','Plane','Icosphere'].forEach(function(k){primSel.appendChild(el('option',{value:k,text:k}));});
+  var primSel=el('select',{});['Cube','Sphere','Cylinder','Cone','Torus','Plane','Icosphere','Pyramid','Prism'].forEach(function(k){primSel.appendChild(el('option',{value:k,text:k}));});
   var fromModelSel=el('select',{});state.models.forEach(function(m){fromModelSel.appendChild(el('option',{value:m.userData.id,text:m.userData.name}));});
   b.appendChild(el('div',{class:'grid2'},[
     el('div',{},[el('label',{class:'fld',text:'Primitive'}),el('div',{class:'spread'},[primSel,el('button',{text:'Load',onclick:function(){EM.fromPrim(primSel.value);frameObject(EM._meshObj,viewState.edit);renderPanel();toast('Loaded '+primSel.value);}})])]),
@@ -1396,6 +1416,8 @@ function panelEdit(b){
 
   b.appendChild(el('div',{class:'section-title',text:'Transform'}));
   b.appendChild(el('p',{class:'small muted',style:'margin-bottom:6px',text:'Select elements then drag them in the 3D view to move · RotBall to orbit · two-finger to zoom/pan'}));
+  b.appendChild(el('div',{class:'grid2'},[el('button',{text:'Scale +',onclick:function(){EM.scaleSelection(1.1);}}),el('button',{text:'Scale −',onclick:function(){EM.scaleSelection(1/1.1);}})]));
+  b.appendChild(el('div',{class:'spread',style:'margin-top:6px'},[el('button',{style:'flex:1',text:'Rot X',onclick:function(){EM.rotateSelection('x',Math.PI/12);}}),el('button',{style:'flex:1',text:'Rot Y',onclick:function(){EM.rotateSelection('y',Math.PI/12);}}),el('button',{style:'flex:1',text:'Rot Z',onclick:function(){EM.rotateSelection('z',Math.PI/12);}})]));
 
   b.appendChild(el('div',{class:'section-title',text:'Operations'}));
   b.appendChild(el('div',{class:'grid2'},[
