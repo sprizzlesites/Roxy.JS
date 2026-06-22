@@ -1134,6 +1134,9 @@ var EM={
   _selCentroid:function(set){var c=new THREE.Vector3(),n=0;set.forEach(function(i){c.add(this.V[i]);n++;},this);if(n)c.divideScalar(n);return c;},
   _pushVertHistory:function(snap){var curr=this.V.map(function(v){return v.clone();});
     History.push(function(){EM.V.forEach(function(v,i){v.copy(snap[i]);});EM._refresh();},function(){EM.V.forEach(function(v,i){v.copy(curr[i]);});EM._refresh();});},
+  _topoSnapshot:function(){return {V:this.V.map(function(v){var c=v.clone();c.sel=v.sel;return c;}),F:this.F.map(function(f){return {vi:f.vi.slice(),sel:f.sel};})};},
+  _topoRestore:function(s){this.V=s.V.map(function(v){var c=v.clone();c.sel=v.sel;return c;});this.F=s.F.map(function(f){return {vi:f.vi.slice(),sel:f.sel};});this._buildEdges();this._refresh();if(active.view==='edit')renderPanel();},
+  _pushTopo:function(before){var after=this._topoSnapshot();History.push(function(){EM._topoRestore(before);},function(){EM._topoRestore(after);});},
   scaleSelection:function(f){var set=this._selVertSet();if(!set.size){toast('Select something first');return;}
     var snap=this.V.map(function(v){return v.clone();}),c=this._selCentroid(set);
     set.forEach(function(i){this.V[i].sub(c).multiplyScalar(f).add(c);},this);this._refresh();this._pushVertHistory(snap);},
@@ -1144,35 +1147,37 @@ var EM={
   extrude:function(){
     var self=this,selF=this.F.filter(function(f){return f.sel;});
     if(!selF.length){toast('Select face(s) first (Face mode)');return;}
+    var _b=this._topoSnapshot();
     selF.forEach(function(f){
       var fi=self.F.indexOf(f),n=self._faceNormal(fi),dist=0.3,vMap={};
       f.vi.forEach(function(vi){if(vMap[vi]===undefined){var nv=self.V[vi].clone().addScaledVector(n,dist);nv.sel=false;self.V.push(nv);vMap[vi]=self.V.length-1;}});
       for(var i=0;i<f.vi.length;i++){var a=f.vi[i],b=f.vi[(i+1)%f.vi.length];self.F.push({vi:[a,b,vMap[b],vMap[a]],sel:false});}
       f.vi=f.vi.map(function(vi){return vMap[vi];});f.sel=true;});
-    this._buildEdges();this._refresh();
+    this._buildEdges();this._refresh();this._pushTopo(_b);
     renderPanel();toast('Extruded — drag the new faces to reposition');},
 
   inset:function(){
     var self=this,selF=this.F.filter(function(f){return f.sel;});
     if(!selF.length){toast('Select face(s) first (Face mode)');return;}
+    var _b=this._topoSnapshot();
     selF.forEach(function(f){
       var fi=self.F.indexOf(f),c=self._faceCenter(fi),amt=0.22,newVi=f.vi.map(function(vi){var nv=self.V[vi].clone().lerp(c,amt);nv.sel=false;self.V.push(nv);return self.V.length-1;});
       for(var i=0;i<f.vi.length;i++){var a=f.vi[i],b=f.vi[(i+1)%f.vi.length];self.F.push({vi:[a,b,newVi[(i+1)%newVi.length],newVi[i]],sel:false});}
       f.vi=newVi;f.sel=true;});
-    this._buildEdges();this._refresh();renderPanel();},
+    this._buildEdges();this._refresh();this._pushTopo(_b);renderPanel();},
 
   subdivide:function(){
-    var self=this,newF=[],eMid={},hasSel=this.F.some(function(f){return f.sel;});
+    var self=this,newF=[],eMid={},hasSel=this.F.some(function(f){return f.sel;}),_b=this._topoSnapshot();
     function getMid(a,b){var k=Math.min(a,b)+'_'+Math.max(a,b);if(!eMid[k]){var m=self.V[a].clone().add(self.V[b]).multiplyScalar(.5);m.sel=false;self.V.push(m);eMid[k]=self.V.length-1;}return eMid[k];}
     this.F.forEach(function(f){
       if(hasSel&&!f.sel){newF.push(f);return;}
       var vi=f.vi;
       if(vi.length===3){var m01=getMid(vi[0],vi[1]),m12=getMid(vi[1],vi[2]),m20=getMid(vi[2],vi[0]);newF.push({vi:[vi[0],m01,m20],sel:false},{vi:[m01,vi[1],m12],sel:false},{vi:[m12,vi[2],m20],sel:false},{vi:[m01,m12,m20],sel:false});}
       else{var c=self._faceCenter(self.F.indexOf(f));c.sel=false;self.V.push(c);var ci=self.V.length-1;for(var i=0;i<vi.length;i++){var a=vi[i],b=vi[(i+1)%vi.length],m=getMid(a,b),mp=getMid(vi[(i+vi.length-1)%vi.length],a);newF.push({vi:[a,m,ci,mp],sel:false});}}});
-    this.F=newF;this._buildEdges();this._refresh();},
+    this.F=newF;this._buildEdges();this._refresh();this._pushTopo(_b);},
 
   loopCut:function(){
-    var self=this,newF=[],hasSel=this.F.some(function(f){return f.sel;});
+    var self=this,newF=[],hasSel=this.F.some(function(f){return f.sel;}),_b=this._topoSnapshot();
     this.F.forEach(function(f){
       if(hasSel&&!f.sel){newF.push(f);return;}
       if(f.vi.length===4){
@@ -1181,19 +1186,20 @@ var EM={
         self.V.push(m01,m23);var mi=self.V.length-2,mj=self.V.length-1;
         newF.push({vi:[vi[0],mi,mj,vi[3]],sel:false},{vi:[mi,vi[1],vi[2],mj],sel:false});
       } else newF.push(f);});
-    this.F=newF;this._buildEdges();this._refresh();},
+    this.F=newF;this._buildEdges();this._refresh();this._pushTopo(_b);},
 
   bridgeEdges:function(){
     var sel=this.E.filter(function(e){return e.sel;});
     if(sel.length!==2){toast('Select exactly 2 edges (Edge mode)');return;}
+    var _b=this._topoSnapshot();
     var e1=sel[0],e2=sel[1],a1=e1.a,b1=e1.b,a2=e2.a,b2=e2.b;
     var d1=this.V[a1].distanceTo(this.V[a2])+this.V[b1].distanceTo(this.V[b2]);
     var d2=this.V[a1].distanceTo(this.V[b2])+this.V[b1].distanceTo(this.V[a2]);
     this.F.push({vi:(d1<=d2?[a1,b1,b2,a2]:[a1,b1,a2,b2]),sel:false});
-    this.clearSel();this._buildEdges();this._refresh();toast('Bridged');},
+    this.clearSel();this._buildEdges();this._refresh();this._pushTopo(_b);toast('Bridged');},
 
   deleteSelected:function(){
-    var mode=editState.mode;
+    var mode=editState.mode,_b=this._topoSnapshot();
     if(mode==='face'){this.F=this.F.filter(function(f){return !f.sel;});}
     else if(mode==='vert'){
       var delV=new Set();for(var i=0;i<this.V.length;i++)if(this.V[i].sel)delV.add(i);
@@ -1204,11 +1210,12 @@ var EM={
     else{
       var delFi=new Set();this.E.forEach(function(e){if(e.sel)e.fi.forEach(function(fi){delFi.add(fi);});});
       this.F=this.F.filter(function(f,fi){return !delFi.has(fi);});}
-    this._buildEdges();this._refresh();renderPanel();},
+    this._buildEdges();this._refresh();this._pushTopo(_b);renderPanel();},
 
   mergeSelected:function(){
     var selI=[];for(var i=0;i<this.V.length;i++)if(this.V[i].sel)selI.push(i);
     if(selI.length<2){toast('Select 2+ vertices (Vert mode)');return;}
+    var _b=this._topoSnapshot();
     var c=new THREE.Vector3();selI.forEach(function(i){c.add(this.V[i]);},this);c.divideScalar(selI.length);
     var target=selI[0];this.V[target].copy(c);
     var delS=new Set(selI.slice(1)),nV=[],remap=new Array(this.V.length);
@@ -1216,17 +1223,17 @@ var EM={
     for(var i=0;i<this.V.length;i++)if(delS.has(i))remap[i]=remap[target];
     this.V=nV;this.F.forEach(function(f){f.vi=f.vi.map(function(v){return remap[v];});});
     this.F=this.F.filter(function(f){var s={},ok=true;for(var i=0;i<f.vi.length;i++){if(s[f.vi[i]]){ok=false;break;}s[f.vi[i]]=true;}return ok&&f.vi.length>=3;});
-    this._buildEdges();this._refresh();renderPanel();},
+    this._buildEdges();this._refresh();this._pushTopo(_b);renderPanel();},
 
-  weldClose:function(){this._weld(0.05);this._buildEdges();this._refresh();toast('Welded nearby verts');},
+  weldClose:function(){var _b=this._topoSnapshot();this._weld(0.05);this._buildEdges();this._refresh();this._pushTopo(_b);toast('Welded nearby verts');},
 
   flipNormals:function(){
-    var hasSel=this.F.some(function(f){return f.sel;});
+    var _b=this._topoSnapshot(),hasSel=this.F.some(function(f){return f.sel;});
     this.F.forEach(function(f){if(!hasSel||f.sel)f.vi.reverse();});
-    this._refresh();},
+    this._refresh();this._pushTopo(_b);},
 
   smoothVerts:function(){
-    var self=this,newPos=this.V.map(function(v){return v.clone();});
+    var self=this,snap=this.V.map(function(v){return v.clone();}),newPos=this.V.map(function(v){return v.clone();});
     var count=new Array(this.V.length).fill(0),sum=this.V.map(function(){return new THREE.Vector3();});
     this.E.forEach(function(e){sum[e.a].add(self.V[e.b]);sum[e.b].add(self.V[e.a]);count[e.a]++;count[e.b]++;});
     var hasSel=this.V.some(function(v){return v.sel;});
@@ -1234,7 +1241,7 @@ var EM={
       if(hasSel&&!this.V[i].sel)continue;
       if(count[i]>0)newPos[i].lerp(sum[i].divideScalar(count[i]),.5);}
     for(var i=0;i<this.V.length;i++){this.V[i].copy(newPos[i]);}
-    this._refresh();},
+    this._refresh();this._pushVertHistory(snap);},
 
   exportToModel:function(){
     var geo=this._toExportGeo(),mat=makeMaterial({color:0xcdb7a4,rough:.55});
