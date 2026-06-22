@@ -103,6 +103,7 @@ canvas{display:block;touch-action:none}
   #rail{display:none}
   .view[data-view=paint].on{grid-template-columns:1fr;grid-template-rows:1fr}
   .paint-prev{display:none}
+  .view[data-view=paint].on.mode3d .paint-prev{display:block}
   #panel{position:fixed;left:0;right:0;bottom:0;top:auto;height:62vh;border-left:none;border-top:1px solid var(--line);
     border-radius:18px 18px 0 0;transform:translateY(calc(100% - 42px));transition:transform .26s cubic-bezier(.2,.8,.2,1);z-index:20;
     box-shadow:0 -16px 40px rgba(0,0,0,.5)}
@@ -386,7 +387,7 @@ function loop(){requestAnimationFrame(loop);updateCam();if(Gizmo.group)Gizmo.upd
   if(RotBall.el&&RotBall.el.style.display!=='none')RotBall.draw();}
 
 /* ---------------- model system ---------------- */
-var state={models:[],activeId:null,selBuild:null,selScene:null,selLight:null,renderCam:null};
+var state={models:[],activeId:null,selBuild:null,selScene:null,selLight:null,renderCam:null,viewerPart:0};
 var idc=1;function uid(){return 'm'+(idc++);}
 
 function makeMaterial(opts){opts=opts||{};return new THREE.MeshStandardMaterial({color:opts.color!=null?opts.color:0xcfcfcf,
@@ -608,13 +609,14 @@ function panelViewer(b){var m=getModel(state.activeId);
   b.appendChild(el('div',{class:'section-title',text:'Material'}));
   if(m&&m.userData.parts.length){
     var pSel=el('select',{});m.userData.parts.forEach(function(p,i){pSel.appendChild(el('option',{value:i,text:'Part '+(i+1)}));});
+    pSel.value=Math.min(state.viewerPart,m.userData.parts.length-1);
     b.appendChild(el('label',{class:'fld',text:'Edit part'}));b.appendChild(pSel);
     function curMat(){return m.userData.parts[+pSel.value].mat;}
     var colIn=el('input',{type:'color',value:'#'+curMat().color.getHexString(),oninput:function(e){curMat().color.set(e.target.value);if(curMat().map){curMat().map=null;curMat().needsUpdate=true;}}});
     b.appendChild(el('div',{class:'spread'},[el('label',{class:'fld',text:'Base color'}),colIn]));
     b.appendChild(slider('Roughness',0,1,curMat().roughness,.01,function(x){curMat().roughness=x;}));
     b.appendChild(slider('Metalness',0,1,curMat().metalness,.01,function(x){curMat().metalness=x;}));
-    pSel.addEventListener('change',function(){renderPanel();});
+    pSel.addEventListener('change',function(){state.viewerPart=+pSel.value;renderPanel();});
   }
   b.appendChild(el('div',{class:'section-title',text:'Modifiers'}));
   var search=el('input',{type:'text',placeholder:'Search modifiers… (twist, scatter, array)'});
@@ -641,7 +643,7 @@ function panelPaint(b){var m=getModel(state.activeId);b.appendChild(el('h2',{tex
   var m3Btn=el('button',{class:paint.mode3d?'on':'',text:paint.mode3d?'✓ Paint on 3D surface':'Paint on 3D surface',
     onclick:function(){paint.mode3d=!paint.mode3d;paint.last=null;
       $('[data-view=paint]').classList.toggle('mode3d',paint.mode3d);
-      setTimeout(resizeActive,10);
+      setTimeout(function(){resizeActive();invalidate(6);},30);
       m3Btn.className=paint.mode3d?'on':'';m3Btn.textContent=paint.mode3d?'✓ Paint on 3D surface':'Paint on 3D surface';
       toast(paint.mode3d?'Drag on 3D preview to paint · RotBall to orbit':'Back to 2D canvas painting');}});
   b.appendChild(el('div',{style:'margin-bottom:10px'},[m3Btn]));
