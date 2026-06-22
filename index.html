@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"/>
-<title>Blaster Studio — a tiny 3D editor</title>
+<title>ROXY.JS — 3D Design</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,600;1,9..144,500&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -37,8 +37,7 @@ hr.sep{border:none;border-top:1px solid var(--line);margin:12px 0}
   grid-template-areas:"bar bar bar" "rail stage panel";}
 #bar{grid-area:bar;display:flex;align-items:center;gap:10px;padding:0 12px;border-bottom:1px solid var(--line);
   background:var(--panel);backdrop-filter:blur(12px);z-index:5}
-#bar .logo{font:600 15px/1 "Fraunces",serif;letter-spacing:.01em}
-#bar .dot{width:9px;height:9px;border-radius:50%;background:var(--pink);box-shadow:0 0 10px var(--pink)}
+#bar .logo{font:600 14px/1 "Space Grotesk",sans-serif;letter-spacing:.08em;text-transform:uppercase}
 #bar .vtitle{font-size:12px;color:var(--muted);letter-spacing:.16em;text-transform:uppercase}
 #bar .sp{flex:1}
 #bar .act{padding:7px 9px;font-size:12px}
@@ -149,7 +148,7 @@ canvas{display:block;touch-action:none}
 
 <div id="app" aria-hidden="false">
   <header id="bar">
-    <span class="dot"></span><span class="logo">Blaster Studio</span>
+    <span class="logo">ROXY.JS</span>
     <span class="vtitle" id="vtitle">Viewer</span>
     <span class="small muted desktop-only" id="stat" style="margin-left:6px"></span>
     <span class="sp"></span>
@@ -605,7 +604,7 @@ function importGLB(buf){ // node transforms, interleaved buffers, embedded baseC
 
 /* ---------------- GLB export (general, embeds .map) ---------------- */
 function exportGLB(root,name){root.updateWorldMatrix(true,true);var rootInv=new THREE.Matrix4().copy(root.matrixWorld).invert();
- var json={asset:{version:"2.0",generator:"blaster-studio"},scene:0,scenes:[{nodes:[]}],nodes:[],meshes:[],materials:[],accessors:[],bufferViews:[],buffers:[],images:[],textures:[],samplers:[]};
+ var json={asset:{version:"2.0",generator:"roxy-js"},scene:0,scenes:[{nodes:[]}],nodes:[],meshes:[],materials:[],accessors:[],bufferViews:[],buffers:[],images:[],textures:[],samplers:[]};
  var bin=[],offset=0,ext={};function useExt(n){ext[n]=1;}
  function push(b){var pad=(4-(offset%4))%4;if(pad){bin.push(new Uint8Array(pad));offset+=pad;}var o=offset;bin.push(b);offset+=b.byteLength;return o;}
  function addView(ta,target){var b=new Uint8Array(ta.buffer.slice(ta.byteOffset,ta.byteOffset+ta.byteLength));var o=push(b);json.bufferViews.push({buffer:0,byteOffset:o,byteLength:b.byteLength,target:target});return json.bufferViews.length-1;}
@@ -638,7 +637,7 @@ function exportGLB(root,name){root.updateWorldMatrix(true,true);var rootInv=new 
 
 /* ---------------- OBJ export (geometry only) ---------------- */
 function exportOBJ(root,name){root.updateWorldMatrix(true,true);var rootInv=new THREE.Matrix4().copy(root.matrixWorld).invert();
-  var lines=['# Blaster Studio export'],vOff=0,tmp=new THREE.Vector3(),rel=new THREE.Matrix4();
+  var lines=['# ROXY.JS export'],vOff=0,tmp=new THREE.Vector3(),rel=new THREE.Matrix4();
   root.traverse(function(o){if(!(o.isMesh&&o.geometry))return;var g=o.geometry,pos=g.attributes.position;if(!pos)return;
     rel.multiplyMatrices(rootInv,o.matrixWorld);var norm=new THREE.Matrix3().getNormalMatrix(rel);var hasN=g.attributes.normal;
     for(var i=0;i<pos.count;i++){tmp.fromBufferAttribute(pos,i).applyMatrix4(rel);lines.push('v '+tmp.x.toFixed(5)+' '+tmp.y.toFixed(5)+' '+tmp.z.toFixed(5));}
