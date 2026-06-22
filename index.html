@@ -432,6 +432,15 @@ function rebuildModel(model){var ud=model.userData;
   while(ud.extras.children.length)ud.extras.remove(ud.extras.children[0]);
   ud.mods.forEach(function(m){var def=MODDB[m.def];if(def&&def.kind==='gen'&&m.on){var o=def.apply(model,m.val);if(o)ud.extras.add(o);}});invalidate();}
 
+/* bake deform modifiers into the base geometry (keeps generators like sprinkles) */
+function applyModifiers(m){if(!m)return;
+  var prevBase=m.userData.parts.map(function(p){return p.baseGeo;}),prevMods=m.userData.mods.slice();
+  var newBase=m.userData.parts.map(function(p){return p.mesh.geometry.clone();});
+  var bakedMods=prevMods.filter(function(mod){return !(MODDB[mod.def]&&MODDB[mod.def].kind==='deform');});
+  m.userData.parts.forEach(function(p,i){p.baseGeo=newBase[i];});m.userData.mods=bakedMods.slice();rebuildModel(m);renderPanel();toast('Deform modifiers baked into mesh');
+  History.push(function(){m.userData.parts.forEach(function(p,i){p.baseGeo=prevBase[i];});m.userData.mods=prevMods.slice();rebuildModel(m);renderPanel();},
+               function(){m.userData.parts.forEach(function(p,i){p.baseGeo=newBase[i];});m.userData.mods=bakedMods.slice();rebuildModel(m);renderPanel();});}
+
 function setActiveModel(id){state.activeId=id;var holder=viewerScene.userData.modelHolder;while(holder.children.length)holder.remove(holder.children[0]);
   var m=getModel(id);if(m){holder.add(m);frameObject(m,viewState.viewer);}invalidate();if(active.view==='viewer'||active.view==='paint')renderPanel();}
 function getModel(id){for(var i=0;i<state.models.length;i++)if(state.models[i].userData.id===id)return state.models[i];return null;}
@@ -735,6 +744,7 @@ function panelViewer(b){var m=getModel(state.activeId);
   function addMod(id){if(!m)return;var mod={def:id,val:MODDB[id].param.def,on:true};m.userData.mods.push(mod);rebuildModel(m);renderStack();
     History.push(function(){var ix=m.userData.mods.indexOf(mod);if(ix>=0)m.userData.mods.splice(ix,1);rebuildModel(m);},function(){m.userData.mods.push(mod);rebuildModel(m);});}
   renderStack();b.appendChild(stack);
+  if(m&&m.userData.mods.length)b.appendChild(el('button',{style:'width:100%;margin-top:8px',text:'Apply (bake) deform modifiers',onclick:function(){applyModifiers(m);}}));
   b.appendChild(el('hr',{class:'sep'}));
   b.appendChild(el('div',{class:'section-title',text:'Export model'}));
   b.appendChild(el('div',{class:'grid2'},[el('button',{class:'pri',text:'Export .glb',onclick:function(){if(m)exportGLB(m,(m.userData.name||'model')+'.glb');}}),
