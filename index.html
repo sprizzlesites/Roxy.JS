@@ -121,6 +121,19 @@ canvas{display:block;touch-action:none}
 }
 @media (max-width:820px){ .desktop-only{display:none} }
 @media (min-width:821px){ .mobile-only{display:none} }
+
+/* ---------- edit HUD ---------- */
+#editHud{position:absolute;left:0;right:0;bottom:16px;display:none;flex-direction:column;align-items:center;gap:8px;z-index:7;pointer-events:none}
+#editHud.on{display:flex}
+.hud-row{display:flex;gap:6px;pointer-events:auto;flex-wrap:wrap;justify-content:center}
+.hud-btn{font-family:inherit;background:rgba(18,14,10,.85);border:1px solid rgba(255,255,255,.15);color:var(--ink);
+  border-radius:10px;padding:10px 14px;font-size:13px;cursor:pointer;backdrop-filter:blur(10px);
+  touch-action:manipulation;-webkit-tap-highlight-color:transparent;transition:background .12s,border-color .12s,transform .06s}
+.hud-btn.on{background:rgba(255,143,177,.22);border-color:rgba(255,143,177,.5);color:#ffd4e2}
+.hud-btn:active{transform:scale(.93)}
+.hud-sel{font-size:11.5px;color:rgba(255,212,226,.85);background:rgba(18,14,10,.78);padding:4px 12px;
+  border-radius:999px;border:1px solid rgba(255,143,177,.28);pointer-events:none;backdrop-filter:blur(8px)}
+@media(max-width:820px){#editHud{bottom:72px}}
 #rotBall{position:absolute;right:12px;top:12px;width:80px;height:80px;cursor:grab;display:none;z-index:8;touch-action:none;border-radius:50%}
 </style>
 </head>
@@ -151,7 +164,7 @@ canvas{display:block;touch-action:none}
     <section class="view" data-view="build"><div class="gl-slot" id="slot-build"></div><button class="fab" id="fabBuild">+</button></section>
     <section class="view" data-view="scene"><div class="gl-slot" id="slot-scene"></div><button class="fab" id="fabScene">+</button></section>
     <section class="view" data-view="assets"><div class="assets-body" id="assetsBody"></div></section>
-    <section class="view" data-view="edit"><div class="gl-slot" id="slot-edit"></div></section>
+    <section class="view" data-view="edit"><div class="gl-slot" id="slot-edit"></div><div id="editHud"></div></section>
     <canvas id="rotBall" width="80" height="80"></canvas>
   </main>
 
@@ -568,6 +581,7 @@ function setView(v){active.view=v;active.scene=(v==='build')?buildScene:(v==='sc
   var slot=curSlot();if(slot){slot.appendChild(dom);}
   if(v==='paint'){paintInit();$('[data-view=paint]').classList.toggle('mode3d',paint.mode3d);}if(v==='scene')syncSceneFromModels();if(v==='assets')renderAssets();
   if(v==='edit'&&!EM.V.length){EM.fromPrim('Cube');frameObject(EM._meshObj,viewState.edit);}
+  if(v==='edit')renderEditHud();
   RotBall.show(v==='paint'||v==='edit');if(v==='paint'||v==='edit')RotBall.draw();
   renderPanel();setTimeout(resizeActive,30);}
 
@@ -895,7 +909,7 @@ var EM={
     var sp=[],si=[],sb=0;
     for(var fi=0;fi<this.F.length;fi++){if(!this.F[fi].sel)continue;var vi2=this.F[fi].vi;for(var j=0;j<vi2.length;j++)sp.push(this.V[vi2[j]].x,this.V[vi2[j]].y,this.V[vi2[j]].z);for(var t2=1;t2<vi2.length-1;t2++){si.push(sb,sb+t2,sb+t2+1);}sb+=vi2.length;}
     if(si.length){var sg=new THREE.BufferGeometry();sg.setAttribute('position',new THREE.Float32BufferAttribute(sp,3));sg.setIndex(si);this._selObj=new THREE.Mesh(sg,this._selMat);this._selObj.renderOrder=11;editScene.add(this._selObj);}
-    invalidate(4);},
+    invalidate(4);if(active.view==='edit')renderEditHud();},
 
   // ─── Selection ──────────────────────────────────────────────
 
@@ -928,12 +942,12 @@ var EM={
     if(!hits.length)return -1;var fi=hits[0].faceIndex;return(fi>=0&&this._triMap[fi]!=null)?this._triMap[fi]:-1;},
 
   _pickVert:function(sx,sy,cam,W,H){
-    var best=-1,bestD=26;
+    var best=-1,bestD=44;
     for(var i=0;i<this.V.length;i++){var p=this.V[i].clone().project(cam);if(p.z>1)continue;var d=Math.hypot((p.x+1)/2*W-sx,(-p.y+1)/2*H-sy);if(d<bestD){bestD=d;best=i;}}
     return best;},
 
   _pickEdge:function(sx,sy,cam,W,H){
-    var best=-1,bestD=18;
+    var best=-1,bestD=32;
     for(var i=0;i<this.E.length;i++){var e=this.E[i];var pa=this.V[e.a].clone().project(cam),pb=this.V[e.b].clone().project(cam);if(pa.z>1&&pb.z>1)continue;
       var d=distSeg2D(sx,sy,(pa.x+1)/2*W,(-pa.y+1)/2*H,(pb.x+1)/2*W,(-pb.y+1)/2*H);if(d<bestD){bestD=d;best=i;}}
     return best;},
@@ -1081,6 +1095,49 @@ function do3dPaint(clientX,clientY){
   var hits=ray.intersectObject(mesh,false);if(!hits.length){paint.last=null;return;}
   var hit=hits[0];if(!hit.uv){paint.last=null;return;}
   paintAt(hit.uv.x*1024,(1-hit.uv.y)*1024);}
+
+/* ----- Edit HUD (always-visible in-viewport toolbar) ----- */
+function renderEditHud(){
+  var hud=$('#editHud');if(!hud)return;
+  hud.innerHTML='';
+  var has=EM.V.length>0;
+  hud.classList.toggle('on',has);
+  if(!has)return;
+  var selN=EM.selCount(),mode=editState.mode;
+
+  if(selN>0)
+    hud.appendChild(el('div',{class:'hud-sel',text:selN+' '+mode+(selN>1?'s':'')+' selected · drag to move'}));
+
+  /* mode row */
+  var mr=el('div',{class:'hud-row'});
+  ['face','vert','edge'].forEach(function(m){
+    mr.appendChild(el('button',{class:'hud-btn'+(mode===m?' on':''),text:m[0].toUpperCase()+m.slice(1),
+      onclick:function(){editState.mode=m;EM.clearSel();EM._refresh();renderPanel();}}));});
+  mr.appendChild(el('button',{class:'hud-btn',text:'All',onclick:function(){EM.selAll();}}));
+  mr.appendChild(el('button',{class:'hud-btn',text:'None',onclick:function(){EM.clearSel();EM._refresh();renderPanel();}}));
+  hud.appendChild(mr);
+
+  /* ops row — context-sensitive */
+  if(selN>0){
+    var or=el('div',{class:'hud-row'});
+    if(mode==='face'){
+      or.appendChild(el('button',{class:'hud-btn',text:'Extrude',onclick:function(){EM.extrude();}}));
+      or.appendChild(el('button',{class:'hud-btn',text:'Inset',onclick:function(){EM.inset();}}));
+    }
+    if(mode==='vert'){
+      or.appendChild(el('button',{class:'hud-btn',text:'Merge',onclick:function(){EM.mergeSelected();}}));
+      or.appendChild(el('button',{class:'hud-btn',text:'Smooth',onclick:function(){EM.smoothVerts();renderPanel();}}));
+    }
+    or.appendChild(el('button',{class:'hud-btn',text:'Subdivide',onclick:function(){EM.subdivide();renderPanel();}}));
+    or.appendChild(el('button',{class:'hud-btn',text:'Delete',onclick:function(){EM.deleteSelected();}}));
+    or.appendChild(el('button',{class:'hud-btn',text:'Flip',onclick:function(){EM.flipNormals();}}));
+    hud.appendChild(or);
+  }
+
+  /* export shortcut */
+  var er=el('div',{class:'hud-row'});
+  er.appendChild(el('button',{class:'hud-btn',text:'Save as model →',onclick:function(){EM.exportToModel();}}));
+  hud.appendChild(er);}
 
 /* ----- Edit panel ----- */
 function panelEdit(b){
