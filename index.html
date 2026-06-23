@@ -12,7 +12,7 @@
   --panel:rgba(24,19,15,.86);--card:rgba(255,255,255,.045);--pink:#ff8fb1;--pink2:#ff6f9c;--ok:#9be0b0;--err:#ff9b9b;
   --rail:64px;--side:320px;--bar:48px;
 }
-*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}
 html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--ink);
   font-family:"Space Grotesk",system-ui,sans-serif;font-size:14px}
 button{font-family:inherit;color:var(--ink);cursor:pointer;border:1px solid var(--line);background:var(--card);
@@ -49,7 +49,7 @@ hr.sep{border:none;border-top:1px solid var(--line);margin:12px 0}
 #rail .tab.on{color:var(--ink);background:var(--card)}
 #rail .tab.on .ic{filter:drop-shadow(0 0 6px rgba(255,143,177,.5))}
 
-#stage{grid-area:stage;position:relative;overflow:hidden;background:
+#stage{grid-area:stage;position:relative;overflow:hidden;-webkit-touch-callout:none;background:
   radial-gradient(120% 120% at 50% 20%, #241b14 0%, #160f0b 60%, #0e0a07 100%)}
 .view{position:absolute;inset:0;display:none}
 .view.on{display:block}
