@@ -371,7 +371,7 @@ dom.addEventListener('pointermove',function(e){
   else if(ptrs.size===2){var v=Array.from(ptrs.values());var d=Math.hypot(v[0].x-v[1].x,v[0].y-v[1].y);var mid={x:(v[0].x+v[1].x)/2,y:(v[0].y+v[1].y)/2};
     if(lastDist&&active.view!=='paint'&&active.view!=='edit')vs.rad=clamp(vs.rad*(lastDist/d),.6,60);lastDist=d;
     if(lastMid){var sp=Math.sin(vs.ph);var rightx=Math.cos(vs.th+Math.PI/2),rightz=Math.sin(vs.th+Math.PI/2);var k=vs.rad*.0016;
-      vs.tx-=(mid.x-lastMid.x)*k*rightx;vs.tz-=(mid.x-lastMid.x)*k*rightz;vs.ty+=(mid.y-lastMid.y)*k;}lastMid=mid;clickStart=null;}
+      vs.tx+=(mid.x-lastMid.x)*k*rightx;vs.tz+=(mid.x-lastMid.x)*k*rightz;vs.ty+=(mid.y-lastMid.y)*k;}lastMid=mid;clickStart=null;}
   invalidate();});
 function endPtr(e){
   if(gizmoDrag===e.pointerId){Gizmo.end();gizmoDrag=null;invalidate();return;}
