@@ -357,7 +357,7 @@ dom.addEventListener('pointermove',function(e){
         editDirect.prevX=e.clientX;editDirect.prevY=e.clientY;EM.grab(screenDeltaToWorld(ddx,ddy));}}
     invalidate();return;}
   if(ptrs.size===1){
-    if(active.view!=='paint'&&active.view!=='edit'){vs.th-=dx*.005;vs.ph=clamp(vs.ph-dy*.005,.1,1.5);}
+    if(active.view!=='paint'&&active.view!=='edit'){vs.th+=dx*.005;vs.ph=clamp(vs.ph-dy*.005,.1,1.5);}
     if(clickStart&&Math.hypot(e.clientX-clickStart.x,e.clientY-clickStart.y)>6)clickStart=null;}
   else if(ptrs.size===2){var v=Array.from(ptrs.values());var d=Math.hypot(v[0].x-v[1].x,v[0].y-v[1].y);var mid={x:(v[0].x+v[1].x)/2,y:(v[0].y+v[1].y)/2};
     if(lastDist)vs.rad=clamp(vs.rad*(lastDist/d),.6,60);lastDist=d;
@@ -994,7 +994,7 @@ var RotBall={
     this.el.addEventListener('pointermove',function(e){
       if(self._px==null)return;
       var dx=e.clientX-self._px,dy=e.clientY-self._py;self._px=e.clientX;self._py=e.clientY;
-      active.vs.th-=dx*.013;active.vs.ph=clamp(active.vs.ph-dy*.013,.1,1.5);
+      active.vs.th+=dx*.013;active.vs.ph=clamp(active.vs.ph-dy*.013,.1,1.5);
       updateCam();self.draw();invalidate();});
     this.el.addEventListener('pointerup',function(){self._px=self._py=null;});
     this.el.addEventListener('pointercancel',function(){self._px=self._py=null;});},
