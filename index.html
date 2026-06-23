@@ -659,8 +659,10 @@ function exportOBJ(root,name){root.updateWorldMatrix(true,true);var rootInv=new 
 /* ---------------- paint ---------------- */
 var paint={cv:$('#paintCanvas'),ctx:null,part:0,color:'#d8466a',size:38,soft:0,erase:false,drawing:false,last:null,tex:null,mode3d:false,_3dSnap:null,_lastFaceIdx:-1};
 paint.ctx=paint.cv.getContext('2d');
-function paintInit(){var m=getModel(state.activeId);paint.ctx.fillStyle='#ffffff';paint.ctx.fillRect(0,0,1024,1024);
-  if(m&&m.userData.parts[paint.part]){var mat=m.userData.parts[paint.part].mat;if(mat.map&&mat.map.image){try{paint.ctx.drawImage(mat.map.image,0,0,1024,1024);}catch(e){}}}
+function paintInit(){var m=getModel(state.activeId);var part=m&&m.userData.parts[paint.part];var mat=part&&part.mat;
+  if(paint.tex&&mat&&mat.map===paint.tex){applyPaintTex();return;}
+  paint.ctx.fillStyle='#ffffff';paint.ctx.fillRect(0,0,1024,1024);
+  if(mat&&mat.map&&mat.map.image&&mat.map.image!==paint.cv){try{paint.ctx.drawImage(mat.map.image,0,0,1024,1024);}catch(e){}}
   paint.tex=tex(paint.cv,true,[1,1]);applyPaintTex();}
 function applyPaintTex(){var m=getModel(state.activeId);if(m&&m.userData.parts[paint.part]){var mat=m.userData.parts[paint.part].mat;mat.map=paint.tex;mat.color.setHex(0xffffff);mat.needsUpdate=true;}}
 function paintAt(x,y){var c=paint.ctx;c.globalCompositeOperation=paint.erase?'destination-out':'source-over';c.strokeStyle=paint.color;c.fillStyle=paint.color;c.lineWidth=paint.size;c.lineCap='round';c.lineJoin='round';
