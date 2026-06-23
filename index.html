@@ -141,6 +141,10 @@ canvas{display:block;touch-action:none}
 .hud-compact::-webkit-scrollbar{display:none}
 @media(max-width:820px){#editHud{top:8px;bottom:auto;gap:5px;left:0;right:90px;align-items:flex-start;padding-left:8px}.hud-btn{font-size:11px;padding:6px 10px}.hud-range{width:110px}}
 #rotBall{position:absolute;right:12px;top:12px;width:80px;height:80px;cursor:grab;display:none;z-index:8;touch-action:none;border-radius:50%}
+#zoomKnob{position:absolute;right:18px;top:100px;display:none;flex-direction:column;align-items:center;gap:3px;z-index:8;width:28px}
+#zoomKnob.on{display:flex}
+.zk-btn{width:26px;height:26px;border-radius:8px;background:rgba(18,14,10,.72);border:1px solid rgba(255,255,255,.13);color:rgba(255,255,255,.8);font-size:17px;cursor:pointer;display:flex;align-items:center;justify-content:center;touch-action:manipulation;line-height:1;padding:0;font-family:inherit}
+#zkSlider{writing-mode:vertical-lr;direction:rtl;width:26px;height:80px;cursor:ns-resize;accent-color:rgba(255,143,177,.8);touch-action:none}
 </style>
 </head>
 <body>
@@ -172,6 +176,11 @@ canvas{display:block;touch-action:none}
     <section class="view" data-view="assets"><div class="assets-body" id="assetsBody"></div></section>
     <section class="view" data-view="edit"><div class="gl-slot" id="slot-edit"></div><div id="editHud"></div></section>
     <canvas id="rotBall" width="80" height="80"></canvas>
+    <div id="zoomKnob">
+      <button class="zk-btn" id="zkIn" title="Zoom in">+</button>
+      <input id="zkSlider" type="range" min="1" max="100" value="50">
+      <button class="zk-btn" id="zkOut" title="Zoom out">−</button>
+    </div>
   </main>
 
   <aside id="panel">
@@ -357,10 +366,10 @@ dom.addEventListener('pointermove',function(e){
         editDirect.prevX=e.clientX;editDirect.prevY=e.clientY;EM.grab(screenDeltaToWorld(ddx,ddy));}}
     invalidate();return;}
   if(ptrs.size===1){
-    if(active.view!=='paint'&&active.view!=='edit'){vs.th-=dx*.005;vs.ph=clamp(vs.ph-dy*.005,.1,1.5);}
+    if(active.view!=='paint'&&active.view!=='edit'){vs.th+=dx*.005;vs.ph=clamp(vs.ph-dy*.005,.1,1.5);}
     if(clickStart&&Math.hypot(e.clientX-clickStart.x,e.clientY-clickStart.y)>6)clickStart=null;}
   else if(ptrs.size===2){var v=Array.from(ptrs.values());var d=Math.hypot(v[0].x-v[1].x,v[0].y-v[1].y);var mid={x:(v[0].x+v[1].x)/2,y:(v[0].y+v[1].y)/2};
-    if(lastDist)vs.rad=clamp(vs.rad*(lastDist/d),.6,60);lastDist=d;
+    if(lastDist&&active.view!=='paint'&&active.view!=='edit')vs.rad=clamp(vs.rad*(lastDist/d),.6,60);lastDist=d;
     if(lastMid){var sp=Math.sin(vs.ph);var rightx=Math.cos(vs.th+Math.PI/2),rightz=Math.sin(vs.th+Math.PI/2);var k=vs.rad*.0016;
       vs.tx-=(mid.x-lastMid.x)*k*rightx;vs.tz-=(mid.x-lastMid.x)*k*rightz;vs.ty+=(mid.y-lastMid.y)*k;}lastMid=mid;clickStart=null;}
   invalidate();});
@@ -381,7 +390,7 @@ function endPtr(e){
   ptrs.delete(e.pointerId);lastDist=0;lastMid=null;
   if(clickStart&&clickStart.id===e.pointerId&&Date.now()-clickStart.t<350&&Math.hypot(e.clientX-clickStart.x,e.clientY-clickStart.y)<6){onViewportTap(e);}clickStart=null;}
 dom.addEventListener('pointerup',endPtr);dom.addEventListener('pointercancel',endPtr);
-dom.addEventListener('wheel',function(e){e.preventDefault();active.vs.rad=clamp(active.vs.rad*(1+e.deltaY*.0012),.6,60);invalidate();},{passive:false});
+dom.addEventListener('wheel',function(e){e.preventDefault();active.vs.rad=clamp(active.vs.rad*(1+e.deltaY*.0012),.6,60);syncZoomKnob();invalidate();},{passive:false});
 
 function updateCam(){var vs=active.vs,c=vs.cam,sp=Math.sin(vs.ph);
   c.position.set(vs.tx+vs.rad*sp*Math.cos(vs.th),vs.ty+vs.rad*Math.cos(vs.ph),vs.tz+vs.rad*sp*Math.sin(vs.th));c.lookAt(vs.tx,vs.ty,vs.tz);}
@@ -688,7 +697,8 @@ function setView(v){active.view=v;active.scene=(v==='build')?buildScene:(v==='sc
   if(v==='paint'){paintInit();$('[data-view=paint]').classList.toggle('mode3d',paint.mode3d);}if(v==='scene')syncSceneFromModels();if(v==='assets')renderAssets();
   if(v==='edit'&&!EM.V.length){EM.fromPrim('Cube');frameObject(EM._meshObj,viewState.edit);viewState.edit.rad=4;}
   if(v==='edit')renderEditHud();
-  RotBall.show(v==='paint'||v==='edit');if(v==='paint'||v==='edit')RotBall.draw();
+  RotBall.show(v==='paint'||v==='edit');if(v==='paint'||v==='edit'){RotBall.draw();syncZoomKnob();}
+  var zk=$('#zoomKnob');if(zk)zk.classList.toggle('on',v==='paint'||v==='edit');
   renderPanel();setTimeout(resizeActive,30);}
 
 function slider(label,min,max,val,step,on){var out=el('span',{class:'muted small',text:(+val).toFixed(2)});var startV=null;
@@ -994,7 +1004,7 @@ var RotBall={
     this.el.addEventListener('pointermove',function(e){
       if(self._px==null)return;
       var dx=e.clientX-self._px,dy=e.clientY-self._py;self._px=e.clientX;self._py=e.clientY;
-      active.vs.th-=dx*.013;active.vs.ph=clamp(active.vs.ph-dy*.013,.1,1.5);
+      active.vs.th+=dx*.013;active.vs.ph=clamp(active.vs.ph-dy*.013,.1,1.5);
       updateCam();self.draw();invalidate();});
     this.el.addEventListener('pointerup',function(){self._px=self._py=null;});
     this.el.addEventListener('pointercancel',function(){self._px=self._py=null;});},
@@ -1677,6 +1687,17 @@ window.addEventListener('resize',resizeActive);
 /* ---------------- init ---------------- */
 buildNav();
 Gizmo.build();
+function syncZoomKnob(){
+  var sl=$('#zkSlider');if(!sl||!active||!active.vs)return;
+  var t=Math.log(active.vs.rad/0.6)/Math.log(100);
+  sl.value=Math.round(100-clamp(t,0,1)*99);}
+(function(){
+  var sl=$('#zkSlider'),zi=$('#zkIn'),zo=$('#zkOut');if(!sl)return;
+  function radFromSlider(v){var t=(100-+v)/99;return 0.6*Math.pow(100,t);}
+  sl.addEventListener('input',function(){if(!active||!active.vs)return;active.vs.rad=clamp(radFromSlider(this.value),.6,60);updateCam();invalidate();});
+  zi.addEventListener('click',function(){if(!active||!active.vs)return;active.vs.rad=clamp(active.vs.rad*.82,.6,60);updateCam();syncZoomKnob();invalidate();});
+  zo.addEventListener('click',function(){if(!active||!active.vs)return;active.vs.rad=clamp(active.vs.rad/0.82,.6,60);updateCam();syncZoomKnob();invalidate();});
+})();
 RotBall.init();
 setView('edit');updUndo();
 loop();
