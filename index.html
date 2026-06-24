@@ -340,7 +340,7 @@ dom.addEventListener('pointerdown',function(e){
   dom.setPointerCapture(e.pointerId);ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY});
   clickStart={x:e.clientX,y:e.clientY,t:Date.now(),id:e.pointerId};
   if(active.view==='paint'&&paint.mode3d&&ptrs.size===1){
-    paint.drawing=true;paint.last=null;paint._3dSnap=paint.ctx.getImageData(0,0,1024,1024);
+    paint.drawing=true;paint.last=null;paint._last3d=null;paint._3dSnap=paint.ctx.getImageData(0,0,1024,1024);
     do3dPaint(e.clientX,e.clientY);}
   else if(active.view==='edit'&&ptrs.size===1){
     if(editState.tool==='sculpt'&&EM._meshObj){Sculpt.down(e);}
@@ -383,7 +383,7 @@ function endPtr(e){
                    function(){EM.V.forEach(function(v,i){v.copy(curr[i]);});EM._refresh();});}
     editDirect.ptId=null;editDirect.pending=false;editDirect.active=false;editDirect.snap=null;}
   if(active.view==='paint'&&paint.mode3d&&paint.drawing){
-    paint.drawing=false;paint.last=null;
+    paint.drawing=false;paint.last=null;paint._last3d=null;
     var bef=paint._3dSnap,aft=paint.ctx.getImageData(0,0,1024,1024),tx=paint.tex;
     if(bef){History.push(function(){paint.ctx.putImageData(bef,0,0);tx.needsUpdate=true;invalidate();},function(){paint.ctx.putImageData(aft,0,0);tx.needsUpdate=true;invalidate();});}
     paint._3dSnap=null;}
@@ -657,7 +657,7 @@ function exportOBJ(root,name){root.updateWorldMatrix(true,true);var rootInv=new 
   download(new Blob([lines.join('\n')],{type:'text/plain'}),name);toast('Exported '+name);}
 
 /* ---------------- paint ---------------- */
-var paint={cv:$('#paintCanvas'),ctx:null,part:0,color:'#d8466a',size:38,soft:0,erase:false,drawing:false,last:null,tex:null,mode3d:false,_3dSnap:null,_lastFaceIdx:-1};
+var paint={cv:$('#paintCanvas'),ctx:null,part:0,color:'#d8466a',size:38,soft:0,erase:false,drawing:false,last:null,tex:null,mode3d:false,_3dSnap:null,_lastFaceIdx:-1,_last3d:null};
 paint.ctx=paint.cv.getContext('2d');
 function paintInit(){var m=getModel(state.activeId);var part=m&&m.userData.parts[paint.part];var mat=part&&part.mat;
   if(paint.tex&&mat&&mat.map===paint.tex){applyPaintTex();return;}
@@ -774,7 +774,7 @@ function panelViewer(b){var m=getModel(state.activeId);
 /* ----- Paint panel ----- */
 function panelPaint(b){var m=getModel(state.activeId);b.appendChild(el('h2',{text:'Texture Paint'}));b.appendChild(el('p',{class:'sub',text:'Paint maps onto '+(m?m.userData.name:'—')+' live.'}));
   var m3Btn=el('button',{class:paint.mode3d?'on':'',text:paint.mode3d?'✓ Paint on 3D surface':'Paint on 3D surface',
-    onclick:function(){paint.mode3d=!paint.mode3d;paint.last=null;paint._lastFaceIdx=-1;
+    onclick:function(){paint.mode3d=!paint.mode3d;paint.last=null;paint._lastFaceIdx=-1;paint._last3d=null;
       $('[data-view=paint]').classList.toggle('mode3d',paint.mode3d);
       if(paint.mode3d){var _pm=getModel(state.activeId);if(_pm)ensureAtlasUVs(_pm,paint.part);}
       setTimeout(function(){resizeActive();invalidate(6);},30);
@@ -1414,34 +1414,66 @@ function ensureAtlasUVs(m,pi){
   paint.ctx.fillStyle='#ffffff';paint.ctx.fillRect(0,0,1024,1024);
   if(paint.tex)paint.tex.needsUpdate=true;invalidate();}
 
+// Project a world-space point to dom-local screen pixels
+function projLocal(w,cam,r){var p=w.clone().project(cam);return{x:(p.x*.5+.5)*r.width,y:(1-(p.y*.5+.5))*r.height};}
+
+// Blender-style projection painting: discover every face under the brush and
+// paint the brush's screen-space footprint into each face's atlas tile via a
+// per-face affine transform. Adjacent faces meet exactly at shared 3D edges,
+// so strokes stay continuous across faces and across high-poly meshes.
 function do3dPaint(clientX,clientY){
   var m=getModel(state.activeId);if(!m||!m.userData.parts[paint.part])return;
   ensureAtlasUVs(m,paint.part); // ensure per-face atlas UVs on any mesh type
-  var mesh=m.userData.parts[paint.part].mesh;
-  var r=dom.getBoundingClientRect();var mx=((clientX-r.left)/r.width)*2-1,my=-((clientY-r.top)/r.height)*2+1;
-  var ray=new THREE.Raycaster();ray.setFromCamera({x:mx,y:my},active.vs.cam);
-  var hits=ray.intersectObject(mesh,false);if(!hits.length){paint.last=null;return;}
-  var hit=hits[0];if(!hit.uv){paint.last=null;return;}
-  // Reset stroke continuity when crossing to a different face to prevent brush bleeding between tiles
-  var fi=hit.faceIndex;if(fi!==paint._lastFaceIdx){paint.last=null;paint._lastFaceIdx=fi;}
-  // Determine canvas-space bounding rect of this face's UV atlas tile (V axis is flipped)
-  var uvAttr=mesh.geometry.attributes.uv,base=fi*3;
-  var u0=uvAttr.getX(base),v0=uvAttr.getY(base);
-  var u1=uvAttr.getX(base+1),v1=uvAttr.getY(base+1);
-  var u2=uvAttr.getX(base+2),v2=uvAttr.getY(base+2);
-  var tmnX=Math.min(u0,u1,u2)*1024-1, tmxX=Math.max(u0,u1,u2)*1024+1;
-  var tmnY=(1-Math.max(v0,v1,v2))*1024-1, tmxY=(1-Math.min(v0,v1,v2))*1024+1;
-  var px=hit.uv.x*1024,py=(1-hit.uv.y)*1024;
-  // Paint clipped to exactly this face's tile — no bleed into adjacent tiles possible
-  var c=paint.ctx;c.save();
-  c.beginPath();c.rect(tmnX,tmnY,tmxX-tmnX,tmxY-tmnY);c.clip();
-  c.globalCompositeOperation=paint.erase?'destination-out':'source-over';
-  c.strokeStyle=paint.color;c.fillStyle=paint.color;c.lineWidth=paint.size;c.lineCap='round';c.lineJoin='round';
-  if(paint.soft>0){c.shadowBlur=paint.soft*paint.size*.9;c.shadowColor=paint.erase?'rgba(0,0,0,1)':paint.color;}else c.shadowBlur=0;
-  if(paint.last){c.beginPath();c.moveTo(paint.last.x,paint.last.y);c.lineTo(px,py);c.stroke();}
-  else{c.beginPath();c.arc(px,py,paint.size/2,0,7);c.fill();}
-  c.shadowBlur=0;c.restore();
-  paint.last={x:px,y:py};paint.tex.needsUpdate=true;invalidate();}
+  var mesh=m.userData.parts[paint.part].mesh,geo=mesh.geometry;
+  var posAttr=geo.attributes.position,uvAttr=geo.attributes.uv;if(!uvAttr)return;
+  var cam=active.vs.cam;cam.updateMatrixWorld();cam.matrixWorldInverse.copy(cam.matrixWorld).invert();
+  mesh.updateMatrixWorld();
+  var r=dom.getBoundingClientRect();
+  var Cx=clientX-r.left,Cy=clientY-r.top,R=Math.max(2,paint.size*.5);
+  var ray=new THREE.Raycaster(),faces={},hitAny=false;
+  function cast(sx,sy){
+    ray.setFromCamera({x:(sx/r.width)*2-1,y:-(sy/r.height)*2+1},cam);
+    var hits=ray.intersectObject(mesh,false);
+    if(hits.length&&hits[0].faceIndex!=null){faces[hits[0].faceIndex]=true;hitAny=true;}}
+  // Faces under the brush at the current position (rings handle occlusion via nearest-hit)
+  cast(Cx,Cy);
+  [[.55*R,6],[1.0*R,12]].forEach(function(rg){for(var i=0;i<rg[1];i++){var a=i/rg[1]*Math.PI*2;cast(Cx+Math.cos(a)*rg[0],Cy+Math.sin(a)*rg[0]);}});
+  // Faces swept since the last sample (center-cast along the path)
+  var pf=paint._last3d;
+  if(pf){var sdx=Cx-pf.x,sdy=Cy-pf.y,sl=Math.hypot(sdx,sdy),steps=Math.max(1,Math.ceil(sl/(R*.5)));
+    for(var s=1;s<steps;s++)cast(pf.x+sdx*s/steps,pf.y+sdy*s/steps);}
+  if(!hitAny){paint._last3d=null;return;}
+  var c=paint.ctx,mw=mesh.matrixWorld;
+  Object.keys(faces).forEach(function(fk){
+    var fi=+fk,base=fi*3;
+    var w0=new THREE.Vector3().fromBufferAttribute(posAttr,base).applyMatrix4(mw);
+    var w1=new THREE.Vector3().fromBufferAttribute(posAttr,base+1).applyMatrix4(mw);
+    var w2=new THREE.Vector3().fromBufferAttribute(posAttr,base+2).applyMatrix4(mw);
+    var s0=projLocal(w0,cam,r),s1=projLocal(w1,cam,r),s2=projLocal(w2,cam,r);
+    var t0x=uvAttr.getX(base)*1024,t0y=(1-uvAttr.getY(base))*1024;
+    var t1x=uvAttr.getX(base+1)*1024,t1y=(1-uvAttr.getY(base+1))*1024;
+    var t2x=uvAttr.getX(base+2)*1024,t2y=(1-uvAttr.getY(base+2))*1024;
+    // Affine map screen->texture for this triangle
+    var M00=s1.x-s0.x,M01=s2.x-s0.x,M10=s1.y-s0.y,M11=s2.y-s0.y;
+    var det=M00*M11-M01*M10;if(Math.abs(det)<1e-6)return;
+    var iM00=M11/det,iM01=-M01/det,iM10=-M10/det,iM11=M00/det;
+    var e1x=t1x-t0x,e1y=t1y-t0y,e2x=t2x-t0x,e2y=t2y-t0y;
+    var J00=e1x*iM00+e2x*iM10,J01=e1x*iM01+e2x*iM11;
+    var J10=e1y*iM00+e2y*iM10,J11=e1y*iM01+e2y*iM11;
+    var ex=t0x-(J00*s0.x+J01*s0.y),ey=t0y-(J10*s0.x+J11*s0.y);
+    var bx0=Math.min(t0x,t1x,t2x)-1,bx1=Math.max(t0x,t1x,t2x)+1;
+    var by0=Math.min(t0y,t1y,t2y)-1,by1=Math.max(t0y,t1y,t2y)+1;
+    c.save();
+    c.beginPath();c.rect(bx0,by0,bx1-bx0,by1-by0);c.clip();
+    c.setTransform(J00,J10,J01,J11,ex,ey);
+    c.globalCompositeOperation=paint.erase?'destination-out':'source-over';
+    c.strokeStyle=paint.color;c.fillStyle=paint.color;c.lineCap='round';c.lineJoin='round';
+    if(paint.soft>0){c.shadowBlur=paint.soft*R*.9;c.shadowColor=paint.erase?'rgba(0,0,0,1)':paint.color;}else c.shadowBlur=0;
+    if(pf){c.lineWidth=R*2;c.beginPath();c.moveTo(pf.x,pf.y);c.lineTo(Cx,Cy);c.stroke();}
+    else{c.beginPath();c.arc(Cx,Cy,R,0,7);c.fill();}
+    c.restore();
+  });
+  paint._last3d={x:Cx,y:Cy};paint.tex.needsUpdate=true;invalidate();}
 
 /* ----- Edit HUD (always-visible in-viewport toolbar) ----- */
 function hudSlider(label,min,max,val,step,on){
