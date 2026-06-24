@@ -952,7 +952,7 @@ var editDirect={ptId:null,pending:false,active:false,startX:0,startY:0,prevX:0,p
 /* ─── Sculpt brush (push/pull verts on the surface, Blender-like) ─── */
 function falloff(d,R){var t=1-d/R;return t<=0?0:t*t*(3-2*t);}
 var Sculpt={painting:false,ptId:null,brush:'draw',radius:.32,strength:.5,symmetry:0,
-  _snap:null,_norm:null,_adj:null,_grab:null,_prevX:0,_prevY:0,
+  _snap:null,_norm:null,_adj:null,_grab:null,_prevX:0,_prevY:0,_lastDab:null,
   hit:function(e){if(!EM._meshObj)return null;var r=dom.getBoundingClientRect();
     var ray=new THREE.Raycaster();ray.setFromCamera({x:((e.clientX-r.left)/r.width)*2-1,y:-((e.clientY-r.top)/r.height)*2+1},active.vs.cam);
     return ray.intersectObject(EM._meshObj,false)[0]||null;},
@@ -964,20 +964,35 @@ var Sculpt={painting:false,ptId:null,brush:'draw',radius:.32,strength:.5,symmetr
     r.visible=true;r.position.copy(h.point);var n=h.face?h.face.normal.clone():new THREE.Vector3(0,1,0);
     r.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,1),n.normalize());r.scale.setScalar(this.radius);invalidate(2);},
   down:function(e){this.painting=true;this.ptId=e.pointerId;this._prevX=e.clientX;this._prevY=e.clientY;clickStart=null;
-    this._snap=EM.V.map(function(v){return v.clone();});this._norm=EM._vertNormals();this._adj=EM._adjacency();
+    this._snap=EM.V.map(function(v){return v.clone();});this._adj=EM._adjacency();this._lastDab=null;
     var h=this.hit(e);this.ring(h);
     if(this.brush==='grab'){this._grab=[];if(h){var c=h.point,R=this.radius;for(var i=0;i<EM.V.length;i++){var d=EM.V[i].distanceTo(c);if(d<R)this._grab.push({i:i,w:falloff(d,R)});}}}
-    else if(h)this.apply(h.point);},
+    else if(h){this.apply(h.point,h.face?h.face.normal.clone().normalize():null);this._lastDab=h.point.clone();}},
   move:function(e){if(!this.painting)return;
     if(this.brush==='grab'){var dx=e.clientX-this._prevX,dy=e.clientY-this._prevY;this._prevX=e.clientX;this._prevY=e.clientY;
       var mv=screenDeltaToWorld(dx,dy),g=this._grab||[];for(var k=0;k<g.length;k++)EM.V[g[k].i].addScaledVector(mv,g[k].w);EM._syncPositions();return;}
-    this._prevX=e.clientX;this._prevY=e.clientY;var h=this.hit(e);this.ring(h);if(h)this.apply(h.point);},
-  apply:function(c){this._dab(c);
-    if(this.symmetry){var m=c.clone();m.setComponent(this.symmetry-1,-m.getComponent(this.symmetry-1));this._dab(m);}
+    this._prevX=e.clientX;this._prevY=e.clientY;var h=this.hit(e);this.ring(h);if(!h)return;
+    var refN=h.face?h.face.normal.clone().normalize():null;
+    // Dab spacing: depth follows distance travelled, not pointer-event frequency (like Blender)
+    var sp=Math.max(1e-3,this.radius*.25),last=this._lastDab;
+    if(!last){this.apply(h.point,refN);this._lastDab=h.point.clone();return;}
+    var d=last.distanceTo(h.point);if(d<sp)return;
+    var steps=Math.min(8,Math.max(1,Math.floor(d/sp)));
+    for(var s=1;s<=steps;s++)this.apply(last.clone().lerp(h.point,s/steps),refN);
+    this._lastDab=h.point.clone();},
+  apply:function(c,refN){this._dab(c,refN);
+    if(this.symmetry){var ax=this.symmetry-1,m=c.clone();m.setComponent(ax,-m.getComponent(ax));
+      var rn=refN?refN.clone():null;if(rn)rn.setComponent(ax,-rn.getComponent(ax));this._dab(m,rn);}
     EM._syncPositions();},
-  _dab:function(c){
-    var V=EM.V,N=this._norm,adj=this._adj,br=this.brush,R=this.radius,st=this.strength;
-    var hits=[];for(var i=0;i<V.length;i++){var d=V[i].distanceTo(c);if(d<R)hits.push({i:i,w:falloff(d,R)});}
+  _dab:function(c,refN){
+    var V=EM.V,adj=this._adj,br=this.brush,R=this.radius,st=this.strength;
+    var N=EM._liveNormals(); // recomputed each dab from current geometry — stays valid as the surface deforms
+    var chisel=(br==='draw'||br==='carve');
+    var hits=[];for(var i=0;i<V.length;i++){var d=V[i].distanceTo(c);if(d>=R)continue;
+      // For draw/carve, only affect vertices facing the same way as the brush so the
+      // chisel stays on the front face instead of wrapping around edges into other faces.
+      if(chisel&&refN&&N[i].dot(refN)<.15)continue;
+      hits.push({i:i,w:falloff(d,R)});}
     if(!hits.length)return;
     if(br==='smooth'){
       var moves=hits.map(function(o){var nb=adj[o.i];if(!nb.length)return null;var s=new THREE.Vector3();for(var j=0;j<nb.length;j++)s.add(V[nb[j]]);s.divideScalar(nb.length);return {i:o.i,t:s,w:o.w};});
@@ -987,11 +1002,13 @@ var Sculpt={painting:false,ptId:null,brush:'draw',radius:.32,strength:.5,symmetr
       hits.forEach(function(o){var diff=V[o.i].clone().sub(c).dot(an);V[o.i].addScaledVector(an,-diff*o.w*st);});
     }else if(br==='pinch'){
       hits.forEach(function(o){var dir=c.clone().sub(V[o.i]);V[o.i].addScaledVector(dir,o.w*st*.35);});
-    }else{ // draw (out) / carve (in) along surface normal
-      var sign=(br==='carve')?-1:1,amt=st*R*.18;
-      hits.forEach(function(o){V[o.i].addScaledVector(N[o.i],amt*o.w*sign);});
+    }else{ // draw (out) / carve (in): push the whole patch along ONE coherent normal so it cuts cleanly
+      var an=new THREE.Vector3();hits.forEach(function(o){an.addScaledVector(N[o.i],o.w);});
+      if(an.lengthSq()<1e-9){if(refN)an.copy(refN);else an.set(0,1,0);}an.normalize();
+      var sign=(br==='carve')?-1:1,amt=st*R*.12;
+      hits.forEach(function(o){V[o.i].addScaledVector(an,amt*o.w*sign);});
     }},
-  up:function(){if(!this.painting)return;this.painting=false;this.ptId=null;this.ring(null);
+  up:function(){if(!this.painting)return;this.painting=false;this.ptId=null;this.ring(null);this._lastDab=null;
     var snap=this._snap,curr=EM.V.map(function(v){return v.clone();});EM._refresh();
     History.push(function(){EM.V.forEach(function(v,i){v.copy(snap[i]);});EM._refresh();},function(){EM.V.forEach(function(v,i){v.copy(curr[i]);});EM._refresh();});
     this._snap=this._norm=this._adj=this._grab=null;}};
@@ -1348,6 +1365,15 @@ var EM={
     var N=this.V.map(function(){return new THREE.Vector3();});
     for(var fi=0;fi<this.F.length;fi++){var f=this.F[fi],n=this._faceNormal(fi);for(var i=0;i<f.vi.length;i++)N[f.vi[i]].add(n);}
     N.forEach(function(n){if(n.lengthSq()>1e-12)n.normalize();else n.set(0,1,0);});return N;},
+
+  // Per-vertex normals read from the live render geometry (aligned 1:1 to V via _toGeo),
+  // so they reflect the current deformed shape during a sculpt stroke.
+  _liveNormals:function(){
+    var g=this._meshObj&&this._meshObj.geometry,na=g&&g.attributes.normal;
+    if(!na||na.count<this.V.length)return this._vertNormals();
+    var out=new Array(this.V.length);
+    for(var i=0;i<this.V.length;i++)out[i]=new THREE.Vector3(na.getX(i),na.getY(i),na.getZ(i));
+    return out;},
 
   // Adjacency list (vertex → neighbor verts) from current edges
   _adjacency:function(){var adj=this.V.map(function(){return [];});this.E.forEach(function(e){adj[e.a].push(e.b);adj[e.b].push(e.a);});return adj;},
