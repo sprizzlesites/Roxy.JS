@@ -986,28 +986,41 @@ var Sculpt={painting:false,ptId:null,brush:'draw',radius:.32,strength:.5,symmetr
     EM._syncPositions();},
   _dab:function(c,refN){
     var V=EM.V,adj=this._adj,br=this.brush,R=this.radius,st=this.strength;
-    var N=EM._liveNormals(); // recomputed each dab from current geometry — stays valid as the surface deforms
+    var N=EM._liveNormals();
     var chisel=(br==='draw'||br==='carve');
-    var hits=[];for(var i=0;i<V.length;i++){var d=V[i].distanceTo(c);if(d>=R)continue;
-      // For draw/carve, only affect vertices facing the same way as the brush so the
-      // chisel stays on the front face instead of wrapping around edges into other faces.
-      if(chisel&&refN&&N[i].dot(refN)<.15)continue;
-      hits.push({i:i,w:falloff(d,R)});}
+    var hits=[];
+    for(var i=0;i<V.length;i++){
+      var toV=new THREE.Vector3().subVectors(V[i],c),d=toV.length();if(d>=R)continue;
+      if(chisel&&refN){
+        // Measure distance on the hit-face plane (2D) not in 3D Euclidean space.
+        // A vertex around a corner is geometrically close in 3D but projects far from
+        // the brush centre when flattened onto the face plane → gets excluded.
+        var dp=toV.dot(refN); // signed depth relative to hit face
+        if(dp>R*.5||dp<-R*1.5)continue; // outside the depth band
+        var pd=Math.sqrt(Math.max(0,d*d-dp*dp)); // 2D distance on face plane
+        if(pd>=R)continue;
+        hits.push({i:i,w:falloff(pd,R)});
+      }else hits.push({i:i,w:falloff(d,R)});}
     if(!hits.length)return;
     if(br==='smooth'){
       var moves=hits.map(function(o){var nb=adj[o.i];if(!nb.length)return null;var s=new THREE.Vector3();for(var j=0;j<nb.length;j++)s.add(V[nb[j]]);s.divideScalar(nb.length);return {i:o.i,t:s,w:o.w};});
       moves.forEach(function(m){if(m)V[m.i].lerp(m.t,m.w*st*.6);});
     }else if(br==='flatten'){
-      var an=new THREE.Vector3();hits.forEach(function(o){an.add(N[o.i]);});if(an.lengthSq()<1e-9)an.set(0,1,0);an.normalize();
-      hits.forEach(function(o){var diff=V[o.i].clone().sub(c).dot(an);V[o.i].addScaledVector(an,-diff*o.w*st);});
+      var fn=new THREE.Vector3();hits.forEach(function(o){fn.add(N[o.i]);});if(fn.lengthSq()<1e-9)fn.set(0,1,0);fn.normalize();
+      hits.forEach(function(o){var diff=V[o.i].clone().sub(c).dot(fn);V[o.i].addScaledVector(fn,-diff*o.w*st);});
     }else if(br==='pinch'){
       hits.forEach(function(o){var dir=c.clone().sub(V[o.i]);V[o.i].addScaledVector(dir,o.w*st*.35);});
-    }else{ // draw (out) / carve (in): push the whole patch along ONE coherent normal so it cuts cleanly
-      var an=new THREE.Vector3();hits.forEach(function(o){an.addScaledVector(N[o.i],o.w);});
-      if(an.lengthSq()<1e-9){if(refN)an.copy(refN);else an.set(0,1,0);}an.normalize();
+    }else{
+      // Push direction: exact hit face normal when available; fall back to weighted patch average.
+      // Per-vertex: scale by N·pushDir so edge/corner vertices (facing sideways) get proportionally
+      // less displacement even if the planar filter admits them near the brush boundary.
+      var pn=refN?refN.clone():new THREE.Vector3();
+      if(!refN){hits.forEach(function(o){pn.addScaledVector(N[o.i],o.w);});if(pn.lengthSq()<1e-9)pn.set(0,1,0);pn.normalize();}
       var sign=(br==='carve')?-1:1,amt=st*R*.12;
-      hits.forEach(function(o){V[o.i].addScaledVector(an,amt*o.w*sign);});
-    }},
+      hits.forEach(function(o){
+        var align=Math.max(0,N[o.i].dot(pn));
+        V[o.i].addScaledVector(pn,amt*o.w*align*sign);
+      });}},
   up:function(){if(!this.painting)return;this.painting=false;this.ptId=null;this.ring(null);this._lastDab=null;
     var snap=this._snap,curr=EM.V.map(function(v){return v.clone();});EM._refresh();
     History.push(function(){EM.V.forEach(function(v,i){v.copy(snap[i]);});EM._refresh();},function(){EM.V.forEach(function(v,i){v.copy(curr[i]);});EM._refresh();});
