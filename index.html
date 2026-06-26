@@ -432,7 +432,7 @@ function applyMatPreset(mat,name){var p=MATPRESETS[name];if(!p)return;
 function makeModel(name,parts){var g=new THREE.Group();g.name=name;var extras=new THREE.Group();extras.name='__extras';
   g.userData={id:uid(),name:name,parts:[],mods:[],extras:extras};
   parts.forEach(function(p){var mesh=new THREE.Mesh(p.geo.clone(),p.mat);mesh.castShadow=true;mesh.receiveShadow=true;mesh.userData.part=true;
-    g.add(mesh);g.userData.parts.push({baseGeo:p.geo.clone(),mesh:mesh,mat:p.mat});});
+    g.add(mesh);g.userData.parts.push({baseGeo:p.geo.clone(),mesh:mesh,mat:p.mat,_hasProperUVs:!!p._hasProperUVs});});
   g.add(extras);return g;}
 
 function rebuildModel(model){var ud=model.userData;
@@ -605,7 +605,7 @@ function importGLB(buf){ // node transforms, interleaved buffers, embedded baseC
      if(pr.attributes.TEXCOORD_0!=null)g.setAttribute('uv',new THREE.BufferAttribute(readAcc(pr.attributes.TEXCOORD_0),2));
      if(pr.indices!=null)g.setIndex(new THREE.BufferAttribute(readAcc(pr.indices),1));
      g.applyMatrix4(nm.m);if(!g.attributes.normal)g.computeVertexNormals();
-     parts.push({geo:g,mat:matFor(pr.material)});});});
+     var _p={geo:g,mat:matFor(pr.material)};if(pr.attributes.TEXCOORD_0!=null)_p._hasProperUVs=true;parts.push(_p);});});
  if(!parts.length)throw new Error('no meshes');
  var tmp=makeModel('imp',parts);var box=new THREE.Box3().setFromObject(tmp);var c=new THREE.Vector3();box.getCenter(c);
  var sz=new THREE.Vector3();box.getSize(sz);var maxd=Math.max(sz.x,sz.y,sz.z)||1;var k=maxd>6?3/maxd:1;
@@ -989,21 +989,31 @@ var Sculpt={painting:false,ptId:null,brush:'draw',radius:.32,strength:.5,symmetr
     var N=EM._liveNormals();
     var chisel=(br==='draw'||br==='carve');
     var hits=[];
-    for(var i=0;i<V.length;i++){
-      var toV=new THREE.Vector3().subVectors(V[i],c),d=toV.length();if(d>=R)continue;
-      if(chisel&&refN){
-        // Measure distance on the hit-face plane (2D) not in 3D Euclidean space.
-        // A vertex around a corner is geometrically close in 3D but projects far from
-        // the brush centre when flattened onto the face plane → gets excluded.
-        var dp=toV.dot(refN); // signed depth relative to hit face
-        if(dp>R*.5||dp<-R*1.5)continue; // outside the depth band
-        var pd=Math.sqrt(Math.max(0,d*d-dp*dp)); // 2D distance on face plane
-        if(pd>=R)continue;
-        hits.push({i:i,w:falloff(pd,R)});
-      }else hits.push({i:i,w:falloff(d,R)});}
+    if(chisel&&refN){
+      // Screen-space selection: project every candidate vertex onto the screen and select
+      // within a pixel-radius circle derived from the world-space brush radius at this depth.
+      // A vertex around a corner appears far from the brush centre on screen regardless of
+      // how close it is in 3D — so dense-mesh corner bleed is eliminated at the source.
+      var cam=active.vs.cam,rect=dom.getBoundingClientRect();
+      var cN=c.clone().project(cam);
+      var scx=(cN.x*.5+.5)*rect.width,scy=(1-(cN.y*.5+.5))*rect.height;
+      var cRN=c.clone().addScaledVector(new THREE.Vector3().setFromMatrixColumn(cam.matrix,0),R).project(cam);
+      var Rpx=Math.max(8,Math.abs(cRN.x-cN.x)*.5*rect.width);
+      var Rcull=R*2.5,Rcull2=Rcull*Rcull;
+      for(var i=0;i<V.length;i++){
+        if(V[i].distanceToSquared(c)>Rcull2)continue; // fast 3D cull — avoids projecting most vertices
+        if(N[i].dot(refN)<0)continue;                 // skip back-facing
+        var vn=V[i].clone().project(cam);
+        var sd=Math.hypot((vn.x*.5+.5)*rect.width-scx,(1-(vn.y*.5+.5))*rect.height-scy);
+        if(sd>=Rpx)continue;
+        hits.push({i:i,w:falloff(sd,Rpx)});
+      }
+    }else{
+      for(var i=0;i<V.length;i++){var d=V[i].distanceTo(c);if(d<R)hits.push({i:i,w:falloff(d,R)});}
+    }
     if(!hits.length)return;
     if(br==='smooth'){
-      var moves=hits.map(function(o){var nb=adj[o.i];if(!nb.length)return null;var s=new THREE.Vector3();for(var j=0;j<nb.length;j++)s.add(V[nb[j]]);s.divideScalar(nb.length);return {i:o.i,t:s,w:o.w};});
+      var moves=hits.map(function(o){var nb=adj[o.i];if(!nb.length)return null;var s=new THREE.Vector3();for(var j=0;j<nb.length;j++)s.add(V[nb[j]]);s.divideScalar(nb.length);return{i:o.i,t:s,w:o.w};});
       moves.forEach(function(m){if(m)V[m.i].lerp(m.t,m.w*st*.6);});
     }else if(br==='flatten'){
       var fn=new THREE.Vector3();hits.forEach(function(o){fn.add(N[o.i]);});if(fn.lengthSq()<1e-9)fn.set(0,1,0);fn.normalize();
@@ -1011,16 +1021,11 @@ var Sculpt={painting:false,ptId:null,brush:'draw',radius:.32,strength:.5,symmetr
     }else if(br==='pinch'){
       hits.forEach(function(o){var dir=c.clone().sub(V[o.i]);V[o.i].addScaledVector(dir,o.w*st*.35);});
     }else{
-      // Push direction: exact hit face normal when available; fall back to weighted patch average.
-      // Per-vertex: scale by N·pushDir so edge/corner vertices (facing sideways) get proportionally
-      // less displacement even if the planar filter admits them near the brush boundary.
-      var pn=refN?refN.clone():new THREE.Vector3();
-      if(!refN){hits.forEach(function(o){pn.addScaledVector(N[o.i],o.w);});if(pn.lengthSq()<1e-9)pn.set(0,1,0);pn.normalize();}
-      var sign=(br==='carve')?-1:1,amt=st*R*.12;
-      hits.forEach(function(o){
-        var align=Math.max(0,N[o.i].dot(pn));
-        V[o.i].addScaledVector(pn,amt*o.w*align*sign);
-      });}},
+      // Push along the exact hit-face normal; scale per-vertex by N·refN so any
+      // edge vertex that sneaks in due to screen projection still gets less displacement.
+      var pn=refN.clone(),sign=(br==='carve')?-1:1,amt=st*R*.12;
+      hits.forEach(function(o){V[o.i].addScaledVector(pn,amt*o.w*Math.max(0,N[o.i].dot(pn))*sign);});
+    }},
   up:function(){if(!this.painting)return;this.painting=false;this.ptId=null;this.ring(null);this._lastDab=null;
     var snap=this._snap,curr=EM.V.map(function(v){return v.clone();});EM._refresh();
     History.push(function(){EM.V.forEach(function(v,i){v.copy(snap[i]);});EM._refresh();},function(){EM.V.forEach(function(v,i){v.copy(curr[i]);});EM._refresh();});
@@ -1061,18 +1066,20 @@ var RotBall={
       if(front){c.fillStyle='rgba(0,0,0,.8)';c.font='bold 9px sans-serif';c.textAlign='center';c.textBaseline='middle';c.fillText(it.l,it.x,it.y);}});}};
 
 var EM={
-  V:[],F:[],E:[],_triMap:[],
-  _meshObj:null,_edgeObj:null,_vertObj:null,_selObj:null,
+  V:[],F:[],E:[],_triMap:[],_srcTex:null,
+  _meshObj:null,_edgeObj:null,_vertObj:null,_selObj:null,_overlayObj:null,
   _mat:new THREE.MeshStandardMaterial({color:0xbba898,roughness:.55,side:THREE.DoubleSide}),
   _selMat:new THREE.MeshBasicMaterial({color:0xff8fb1,transparent:true,opacity:.42,side:THREE.DoubleSide,depthTest:false}),
 
   clear:function(){
     var self=this;
     [this._meshObj,this._edgeObj,this._vertObj,this._selObj].forEach(function(o){if(o){editScene.remove(o);if(o.geometry)o.geometry.dispose();}});
+    if(this._overlayObj){editScene.remove(this._overlayObj);this._overlayObj=null;}
     this._meshObj=this._edgeObj=this._vertObj=this._selObj=null;
     this.V=[];this.F=[];this.E=[];this._triMap=[];},
 
   fromPrim:function(type){
+    EM._srcTex=null;
     var s=1,geo;
     if(type==='Cube')geo=new THREE.BoxGeometry(s,s,s,2,2,2);
     else if(type==='Sphere')geo=new THREE.SphereGeometry(s*.6,8,6);
@@ -1089,7 +1096,14 @@ var EM={
   fromModel:function(m,pi){
     if(!m||!m.userData.parts.length)return;
     pi=pi||0;if(pi>=m.userData.parts.length)pi=0;
-    this._fromGeo(m.userData.parts[pi].mesh.geometry);},
+    var pt=m.userData.parts[pi];
+    EM._srcTex=pt.mat&&pt.mat.map&&pt.mat.map.image?pt.mat.map:null;
+    this._fromGeo(pt.mesh.geometry); // calls clear() which removes old _overlayObj
+    // Texture overlay: ghost of original mesh at 30% opacity (created AFTER _fromGeo survives clear)
+    if(EM._srcTex){
+      var oMat=new THREE.MeshStandardMaterial({map:EM._srcTex,transparent:true,opacity:.30,side:THREE.FrontSide,depthWrite:false});
+      EM._overlayObj=new THREE.Mesh(pt.mesh.geometry,oMat);
+      EM._overlayObj.renderOrder=1;editScene.add(EM._overlayObj);}},
 
   _fromGeo:function(geo){
     this.clear();
@@ -1316,7 +1330,8 @@ var EM={
     this._refresh();this._pushVertHistory(snap);},
 
   exportToModel:function(){
-    var geo=this._toExportGeo(),mat=makeMaterial({color:0xcdb7a4,rough:.55});
+    var geo=this._toExportGeo(),mat=makeMaterial({color:EM._srcTex?0xffffff:0xcdb7a4,rough:.55});
+    if(EM._srcTex){mat.map=EM._srcTex;mat.needsUpdate=true;}
     var name='Mesh '+(state.models.length+1);var m=makeModel(name,[{geo:geo,mat:mat}]);
     addModel(m);setActiveModel(m.userData.id);toast('"'+name+'" added — open Viewer');renderPanel();},
 
@@ -1415,6 +1430,7 @@ var EM={
 function ensureAtlasUVs(m,pi){
   var part=m&&m.userData.parts[pi];if(!part||part._atlasUVs)return;
   var geo=part.mesh.geometry,posAttr=geo.attributes.position,norAttr=geo.attributes.normal,idxAttr=geo.index;
+  var origUVAttr=geo.attributes.uv; // save original UVs before rebuild
   var triCount=idxAttr?idxAttr.count/3:posAttr.count/3;
   var faceData=[],pos=[],nor=[],uv=[];
   for(var fi=0;fi<triCount;fi++){
@@ -1435,7 +1451,7 @@ function ensureAtlasUVs(m,pi){
     var mnU=pts[0].u,mxU=pts[0].u,mnV=pts[0].v,mxV=pts[0].v;
     for(var k=1;k<3;k++){if(pts[k].u<mnU)mnU=pts[k].u;if(pts[k].u>mxU)mxU=pts[k].u;if(pts[k].v<mnV)mnV=pts[k].v;if(pts[k].v>mxV)mxV=pts[k].v;}
     var szU=mxU-mnU,szV=mxV-mnV;if(szU<1e-5)szU=1e-5;if(szV<1e-5)szV=1e-5;
-    faceData.push({verts:verts,vns:vns,uvs:pts.map(function(p){return[(p.u-mnU)/szU,(p.v-mnV)/szV];})});
+    faceData.push({verts:verts,vns:vns,uvs:pts.map(function(p){return[(p.u-mnU)/szU,(p.v-mnV)/szV];}),oi:[i0,i1,i2]});
   }
   var nf=faceData.length,cols=Math.max(1,Math.ceil(Math.sqrt(nf))),rows=Math.max(1,Math.ceil(nf/cols));
   var tw=1/cols,th=1/rows,pad=0.02;
@@ -1450,7 +1466,45 @@ function ensureAtlasUVs(m,pi){
   newGeo.setAttribute('normal',new THREE.Float32BufferAttribute(nor,3));
   newGeo.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));
   part.mesh.geometry.dispose();part.mesh.geometry=newGeo;part._atlasUVs=true;
-  paint.ctx.fillStyle='#ffffff';paint.ctx.fillRect(0,0,1024,1024);
+  // Bake existing canvas content into new atlas tiles instead of wiping to white
+  if(origUVAttr&&paint.tex){
+    // Copy current canvas to temp so we can read from it while writing to paint.cv
+    var tmpCv=document.createElement('canvas');tmpCv.width=tmpCv.height=1024;
+    tmpCv.getContext('2d').drawImage(paint.cv,0,0);
+    paint.ctx.fillStyle='#ffffff';paint.ctx.fillRect(0,0,1024,1024);
+    // GLB textures were placed on canvas with drawImage (v=0 at top, i.e. y=v*1024).
+    // User paint strokes follow the flipY=true convention (v=0 at bottom, y=(1-v)*1024).
+    var glbSrc=!!part._hasProperUVs;
+    for(var bi=0;bi<nf;bi++){
+      var bfd=faceData[bi],boi=bfd.oi,buvs=bfd.uvs;
+      var atx=(bi%cols)*tw,aty=Math.floor(bi/cols)*th;
+      // Source canvas positions (original UV → canvas, convention depends on source type)
+      var S0x=origUVAttr.getX(boi[0])*1024;
+      var S0y=glbSrc?origUVAttr.getY(boi[0])*1024:(1-origUVAttr.getY(boi[0]))*1024;
+      var S1x=origUVAttr.getX(boi[1])*1024;
+      var S1y=glbSrc?origUVAttr.getY(boi[1])*1024:(1-origUVAttr.getY(boi[1]))*1024;
+      var S2x=origUVAttr.getX(boi[2])*1024;
+      var S2y=glbSrc?origUVAttr.getY(boi[2])*1024:(1-origUVAttr.getY(boi[2]))*1024;
+      // Destination canvas positions (new atlas UV → canvas, do3dPaint convention)
+      var D0x=(atx+pad*tw+buvs[0][0]*tw*(1-2*pad))*1024,D0y=(1-(aty+pad*th+buvs[0][1]*th*(1-2*pad)))*1024;
+      var D1x=(atx+pad*tw+buvs[1][0]*tw*(1-2*pad))*1024,D1y=(1-(aty+pad*th+buvs[1][1]*th*(1-2*pad)))*1024;
+      var D2x=(atx+pad*tw+buvs[2][0]*tw*(1-2*pad))*1024,D2y=(1-(aty+pad*th+buvs[2][1]*th*(1-2*pad)))*1024;
+      // Affine transform M such that D = M*S + offset (source image → dest canvas)
+      var ss1x=S1x-S0x,ss1y=S1y-S0y,ss2x=S2x-S0x,ss2y=S2y-S0y;
+      var ds1x=D1x-D0x,ds1y=D1y-D0y,ds2x=D2x-D0x,ds2y=D2y-D0y;
+      var det=ss1x*ss2y-ss2x*ss1y;if(Math.abs(det)<1e-6)continue;
+      var inv00=ss2y/det,inv01=-ss2x/det,inv10=-ss1y/det,inv11=ss1x/det;
+      var M00=ds1x*inv00+ds2x*inv10,M01=ds1x*inv01+ds2x*inv11;
+      var M10=ds1y*inv00+ds2y*inv10,M11=ds1y*inv01+ds2y*inv11;
+      var bex=D0x-(M00*S0x+M01*S0y),bey=D0y-(M10*S0x+M11*S0y);
+      paint.ctx.save();
+      paint.ctx.beginPath();paint.ctx.moveTo(D0x,D0y);paint.ctx.lineTo(D1x,D1y);paint.ctx.lineTo(D2x,D2y);
+      paint.ctx.closePath();paint.ctx.clip();
+      paint.ctx.setTransform(M00,M10,M01,M11,bex,bey);
+      paint.ctx.drawImage(tmpCv,0,0,1024,1024);
+      paint.ctx.restore();}
+  }else{
+    paint.ctx.fillStyle='#ffffff';paint.ctx.fillRect(0,0,1024,1024);}
   if(paint.tex)paint.tex.needsUpdate=true;invalidate();}
 
 // Project a world-space point to dom-local screen pixels
