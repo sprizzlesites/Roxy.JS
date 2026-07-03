@@ -1468,6 +1468,29 @@ var EM={
       } else newF.push(f);});
     this.F=newF;this._buildEdges();this._refresh();this._pushTopo(_b);},
 
+  // Extend selection along edge loops: through each adjacent quad, continue
+  // to the edge on the opposite side (Blender-style loop select).
+  selectLoops:function(){
+    var sel=this.E.filter(function(e){return e.sel;});
+    if(!sel.length){toast('Select an edge first (Edge mode)');return;}
+    var self=this,eMap={};
+    this.E.forEach(function(e,i){eMap[e.a+'_'+e.b]=i;});
+    function edgeIdx(a,b){return eMap[Math.min(a,b)+'_'+Math.max(a,b)];}
+    var queue=[],seen={};
+    sel.forEach(function(e){var i=self.E.indexOf(e);queue.push(i);seen[i]=1;});
+    var added=0;
+    while(queue.length){
+      var e=self.E[queue.pop()];
+      e.fi.forEach(function(fi){
+        var f=self.F[fi];if(!f||f.vi.length!==4)return;
+        var rest=f.vi.filter(function(v){return v!==e.a&&v!==e.b;});
+        if(rest.length!==2)return;
+        var oi=edgeIdx(rest[0],rest[1]);
+        if(oi==null||seen[oi])return;
+        seen[oi]=1;self.E[oi].sel=true;queue.push(oi);added++;});}
+    this._refresh();renderPanel();
+    toast(added?'Loop selected (+'+added+' edges)':'No quad loop continues from here');},
+
   bridgeEdges:function(){
     var sel=this.E.filter(function(e){return e.sel;});
     if(sel.length!==2){toast('Select exactly 2 edges (Edge mode)');return;}
@@ -1865,7 +1888,7 @@ function renderEditHud(){
         if(selN>0){
           if(mode==='face'){mr2.appendChild(el('button',{class:'hud-btn',text:'Extrude',onclick:function(){EM.extrude();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Inset',onclick:function(){EM.inset();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Separate',onclick:function(){EM.separateSelection();}}));}
           if(mode==='vert'){mr2.appendChild(el('button',{class:'hud-btn',text:'Merge',onclick:function(){EM.mergeSelected();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Smooth',onclick:function(){EM.smoothVerts();renderPanel();}}));}
-          if(mode==='edge'){mr2.appendChild(el('button',{class:'hud-btn',text:'Bevel',onclick:function(){EM.bevelEdges();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Bridge',onclick:function(){EM.bridgeEdges();renderPanel();}}));}
+          if(mode==='edge'){mr2.appendChild(el('button',{class:'hud-btn',text:'Loop',onclick:function(){EM.selectLoops();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Bevel',onclick:function(){EM.bevelEdges();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Bridge',onclick:function(){EM.bridgeEdges();renderPanel();}}));}
           mr2.appendChild(el('button',{class:'hud-btn',text:'Subdiv',onclick:function(){EM.subdivide();renderPanel();}}));
           mr2.appendChild(el('button',{class:'hud-btn',text:'Delete',onclick:function(){EM.deleteSelected();}}));
           mr2.appendChild(el('button',{class:'hud-btn',text:'Flip',onclick:function(){EM.flipNormals();}}));
@@ -1878,7 +1901,7 @@ function renderEditHud(){
       var qr=el('div',{class:'hud-row hud-compact'});
       if(mode==='face'){qr.appendChild(el('button',{class:'hud-btn',text:'Extrude',onclick:function(){EM.extrude();}}));qr.appendChild(el('button',{class:'hud-btn',text:'Inset',onclick:function(){EM.inset();}}));}
       if(mode==='vert'){qr.appendChild(el('button',{class:'hud-btn',text:'Merge',onclick:function(){EM.mergeSelected();}}));qr.appendChild(el('button',{class:'hud-btn',text:'Smooth',onclick:function(){EM.smoothVerts();renderPanel();}}));}
-      if(mode==='edge'){qr.appendChild(el('button',{class:'hud-btn',text:'Bevel',onclick:function(){EM.bevelEdges();}}));}
+      if(mode==='edge'){qr.appendChild(el('button',{class:'hud-btn',text:'Loop',onclick:function(){EM.selectLoops();}}));qr.appendChild(el('button',{class:'hud-btn',text:'Bevel',onclick:function(){EM.bevelEdges();}}));}
       qr.appendChild(el('button',{class:'hud-btn',text:'Del',onclick:function(){EM.deleteSelected();}}));
       hud.appendChild(qr);
     }
@@ -1934,6 +1957,7 @@ function renderEditHud(){
       or.appendChild(el('button',{class:'hud-btn',text:'Smooth',onclick:function(){EM.smoothVerts();renderPanel();}}));
     }
     if(mode==='edge'){
+      or.appendChild(el('button',{class:'hud-btn',text:'Loop',onclick:function(){EM.selectLoops();}}));
       or.appendChild(el('button',{class:'hud-btn',text:'Bevel',onclick:function(){EM.bevelEdges();}}));
       or.appendChild(el('button',{class:'hud-btn',text:'Bridge',onclick:function(){EM.bridgeEdges();renderPanel();}}));
     }
@@ -2040,10 +2064,11 @@ function panelEdit(b){
     el('button',{text:'Weld Close',onclick:function(){EM.weldClose();renderPanel();}}),
     el('button',{text:'Bevel Edges  [B]',onclick:function(){EM.bevelEdges();}})
   ]));
+  b.appendChild(el('button',{style:'width:100%;margin-top:6px',text:'Select Edge Loop  [L]',onclick:function(){EM.selectLoops();}}));
 
   b.appendChild(el('hr',{class:'sep'}));
   b.appendChild(el('div',{class:'section-title',text:'Keyboard shortcuts (desktop)'}));
-  b.appendChild(el('p',{class:'small muted',text:'E=Extrude  I=Inset  S=Subdivide  B=Bevel  X=Delete  A=Select All  drag selected → move  6=Open this tab'}));
+  b.appendChild(el('p',{class:'small muted',text:'E=Extrude  I=Inset  S=Subdivide  B=Bevel  L=Loop Select  X=Delete  A=Select All  drag selected → move  6=Open this tab'}));
 
   b.appendChild(el('hr',{class:'sep'}));
   b.appendChild(el('div',{class:'section-title',text:'Export to library'}));
@@ -2100,6 +2125,7 @@ window.addEventListener('keydown',function(e){var tag=(e.target&&e.target.tagNam
     else if(z==='e'){e.preventDefault();EM.extrude();}
     else if(z==='i'){EM.inset();}
     else if(z==='b'){EM.bevelEdges();}
+    else if(z==='l'){EM.selectLoops();}
     else if(z==='x'){EM.deleteSelected();}
     else if(z==='s'&&!e.ctrlKey&&!e.metaKey){EM.subdivide();renderPanel();}
   }});
