@@ -81,6 +81,8 @@ canvas{display:block;touch-action:none}
 .assets-body{position:absolute;inset:0;overflow:auto;padding:18px}
 .thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-top:10px}
 .thumb{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:8px}
+.thumb-img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:10px;border:1px solid var(--line);
+  background:radial-gradient(120% 120% at 50% 20%,#2a2018 0%,#17110c 100%)}
 .thumb .nm{font-weight:600}.thumb .mt{font-size:11px;color:var(--muted)}
 .modlist{display:flex;flex-direction:column;gap:8px;margin-top:8px}
 .modrow{background:var(--card);border:1px solid var(--line);border-radius:11px;padding:9px 10px}
@@ -1042,12 +1044,44 @@ function panelAssets(b){b.appendChild(el('h2',{text:'Assets'}));b.appendChild(el
   b.appendChild(el('button',{style:'width:100%',text:'Save project (.json)',onclick:saveProject}));
   b.appendChild(el('button',{style:'width:100%;margin-top:8px',text:'Open project (.json)',onclick:function(){$('#fileProj').click();}}));
   b.appendChild(el('button',{style:'width:100%;margin-top:8px',text:'Load sample: Donut',onclick:function(){var d=buildDonut();addModel(d);setActiveModel(d.userData.id);toast('Donut added');renderAssets();}}));}
+/* tiny offscreen renderer for library thumbnails (lazy; shares geometry/materials) */
+var thumbGL=null,thumbScene=null,thumbCam=null;
+function modelThumb(m){
+  try{
+    if(!thumbGL){
+      thumbGL=new THREE.WebGLRenderer({antialias:true,alpha:true,preserveDrawingBuffer:true});
+      thumbGL.setSize(160,160);thumbGL.outputEncoding=THREE.sRGBEncoding;
+      thumbScene=new THREE.Scene();
+      var d1=new THREE.DirectionalLight(0xfff2e2,1.1);d1.position.set(2,3,2);thumbScene.add(d1);
+      var d2=new THREE.DirectionalLight(0xbcd4ff,.45);d2.position.set(-2,1,-2);thumbScene.add(d2);
+      thumbScene.add(new THREE.AmbientLight(0xffffff,.35));
+      thumbCam=new THREE.PerspectiveCamera(35,1,.01,100);}
+    thumbScene.environment=viewerScene.environment||null;
+    var grp=new THREE.Group();
+    m.userData.parts.forEach(function(p){grp.add(new THREE.Mesh(p.mesh.geometry,p.mat));});
+    thumbScene.add(grp);
+    var box=new THREE.Box3().setFromObject(grp);
+    if(box.isEmpty()){thumbScene.remove(grp);return null;}
+    var c=new THREE.Vector3();box.getCenter(c);var s=new THREE.Vector3();box.getSize(s);
+    var r=Math.max(s.x,s.y,s.z)*.5||1;
+    thumbCam.position.set(c.x+r*1.9,c.y+r*1.5,c.z+r*2.4);thumbCam.lookAt(c);
+    thumbGL.render(thumbScene,thumbCam);
+    var url=thumbGL.domElement.toDataURL('image/png');
+    thumbScene.remove(grp);
+    return url;
+  }catch(e){return null;}}
+
 function renderAssets(){var body=$('#assetsBody');body.innerHTML='';body.appendChild(el('h2',{style:'font:600 18px/1 \"Fraunces\",serif;margin:0 0 4px',text:'Project Library'}));
   body.appendChild(el('p',{class:'muted small',text:state.models.length+' model'+(state.models.length===1?'':'s')+' · static, no server, exports to your device'}));
   var grid=el('div',{class:'thumbs'});state.models.forEach(function(m){var parts=m.userData.parts.length;
-    grid.appendChild(el('div',{class:'thumb'},[el('div',{class:'nm',text:m.userData.name}),el('div',{class:'mt',text:parts+' part'+(parts===1?'':'s')+' · '+m.userData.mods.length+' modifier'+(m.userData.mods.length===1?'':'s')}),
-      el('div',{class:'grid2'},[el('button',{text:'Open',onclick:function(){setActiveModel(m.userData.id);setView('viewer');}}),el('button',{text:'To Scene',onclick:function(){addPlacement(m.userData.id);toast('Added to scene');}})]),
-      el('div',{class:'grid2'},[el('button',{text:'Export .glb',onclick:function(){exportGLB(m,m.userData.name+'.glb');}}),el('button',{text:'Export .obj',onclick:function(){exportOBJ(m,m.userData.name+'.obj');}})])]));});
+    var card=el('div',{class:'thumb'});
+    var url=modelThumb(m);
+    if(url)card.appendChild(el('img',{class:'thumb-img',src:url,alt:m.userData.name}));
+    card.appendChild(el('div',{class:'nm',text:m.userData.name}));
+    card.appendChild(el('div',{class:'mt',text:parts+' part'+(parts===1?'':'s')+' · '+m.userData.mods.length+' modifier'+(m.userData.mods.length===1?'':'s')}));
+    card.appendChild(el('div',{class:'grid2'},[el('button',{text:'Open',onclick:function(){setActiveModel(m.userData.id);setView('viewer');}}),el('button',{text:'To Scene',onclick:function(){addPlacement(m.userData.id);toast('Added to scene');}})]));
+    card.appendChild(el('div',{class:'grid2'},[el('button',{text:'Export .glb',onclick:function(){exportGLB(m,m.userData.name+'.glb');}}),el('button',{text:'Export .obj',onclick:function(){exportOBJ(m,m.userData.name+'.obj');}})]));
+    grid.appendChild(card);});
   body.appendChild(grid);}
 
 /* ----- file inputs ----- */
