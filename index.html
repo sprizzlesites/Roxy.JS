@@ -1416,6 +1416,14 @@ var EM={
   _topoSnapshot:function(){return {V:this.V.map(function(v){var c=v.clone();c.sel=v.sel;return c;}),F:this.F.map(function(f){return {vi:f.vi.slice(),sel:f.sel};})};},
   _topoRestore:function(s){this.V=s.V.map(function(v){var c=v.clone();c.sel=v.sel;return c;});this.F=s.F.map(function(f){return {vi:f.vi.slice(),sel:f.sel};});this._buildEdges();this._refresh();if(active.view==='edit')renderPanel();},
   _pushTopo:function(before){var after=this._topoSnapshot();History.push(function(){EM._topoRestore(before);},function(){EM._topoRestore(after);});},
+  // Flatten selected verts onto their average plane along one axis (0=X 1=Y 2=Z)
+  alignSelection:function(ax){var set=this._selVertSet();if(!set.size){toast('Select something first');return;}
+    var snap=this.V.map(function(v){return v.clone();});
+    var sum=0;set.forEach(function(i){sum+=this.V[i].getComponent(ax);},this);
+    var avg=sum/set.size;
+    set.forEach(function(i){this.V[i].setComponent(ax,avg);},this);
+    this._refresh();this._pushVertHistory(snap);
+    toast('Aligned selection on '+'XYZ'[ax]);},
   scaleSelection:function(f){var set=this._selVertSet();if(!set.size){toast('Select something first');return;}
     var snap=this.V.map(function(v){return v.clone();}),c=this._selCentroid(set);
     set.forEach(function(i){this.V[i].sub(c).multiplyScalar(f).add(c);},this);this._refresh();this._pushVertHistory(snap);},
@@ -2046,6 +2054,7 @@ function panelEdit(b){
   b.appendChild(el('p',{class:'small muted',style:'margin-bottom:6px',text:'Select elements then drag them in the 3D view to move · RotBall to orbit · two-finger to zoom/pan'}));
   b.appendChild(el('div',{class:'grid2'},[el('button',{text:'Scale +',onclick:function(){EM.scaleSelection(1.1);}}),el('button',{text:'Scale −',onclick:function(){EM.scaleSelection(1/1.1);}})]));
   b.appendChild(el('div',{class:'spread',style:'margin-top:6px'},[el('button',{style:'flex:1',text:'Rot X',onclick:function(){EM.rotateSelection('x',Math.PI/12);}}),el('button',{style:'flex:1',text:'Rot Y',onclick:function(){EM.rotateSelection('y',Math.PI/12);}}),el('button',{style:'flex:1',text:'Rot Z',onclick:function(){EM.rotateSelection('z',Math.PI/12);}})]));
+  b.appendChild(el('div',{class:'spread',style:'margin-top:6px'},[el('button',{style:'flex:1',title:'Flatten selection to its average X plane',text:'Align X',onclick:function(){EM.alignSelection(0);}}),el('button',{style:'flex:1',title:'Flatten selection to its average Y plane',text:'Align Y',onclick:function(){EM.alignSelection(1);}}),el('button',{style:'flex:1',title:'Flatten selection to its average Z plane',text:'Align Z',onclick:function(){EM.alignSelection(2);}})]));
   b.appendChild(el('div',{style:'margin-top:6px'},[el('button',{class:editState.prop?'on':'',style:'width:100%',
     text:editState.prop?'✓ Proportional edit (soft falloff)':'Proportional edit (soft falloff)',
     onclick:function(){editState.prop=!editState.prop;EM._propW=null;renderPanel();renderEditHud();
