@@ -1193,6 +1193,7 @@ var EM={
 
   fromPrim:function(type){
     EM._srcTex=null;
+    var mt=this._mat;mt.map=null;mt.color.setHex(0xbba898);mt.transparent=false;mt.opacity=1;mt.needsUpdate=true;
     var s=1,geo;
     if(type==='Cube')geo=new THREE.BoxGeometry(s,s,s,2,2,2);
     else if(type==='Sphere')geo=new THREE.SphereGeometry(s*.6,8,6);
@@ -1211,17 +1212,19 @@ var EM={
     pi=pi||0;if(pi>=m.userData.parts.length)pi=0;
     var pt=m.userData.parts[pi];
     EM._srcTex=pt.mat&&pt.mat.map&&pt.mat.map.image?pt.mat.map:null;
-    this._fromGeo(pt.mesh.geometry); // calls clear() which removes old _overlayObj
-    // Texture overlay: ghost of original mesh at 30% opacity (created AFTER _fromGeo survives clear)
-    if(EM._srcTex){
-      var oMat=new THREE.MeshStandardMaterial({map:EM._srcTex,transparent:true,opacity:.30,side:THREE.FrontSide,depthWrite:false});
-      EM._overlayObj=new THREE.Mesh(pt.mesh.geometry,oMat);
-      EM._overlayObj.renderOrder=1;editScene.add(EM._overlayObj);}},
+    // Texture the live edit mesh (per-vertex UVs carried in _fromGeo) so the artist
+    // sees the wrapping deform while sculpting; slight transparency keeps depth readable.
+    var mt=this._mat;
+    if(EM._srcTex){mt.map=EM._srcTex;mt.color.setHex(0xffffff);mt.transparent=true;mt.opacity=.92;}
+    else{mt.map=null;mt.color.setHex(0xbba898);mt.transparent=false;mt.opacity=1;}
+    mt.needsUpdate=true;
+    this._fromGeo(pt.mesh.geometry);},
 
   _fromGeo:function(geo){
     this.clear();
-    var pos=geo.attributes.position,idx=geo.index;
-    for(var i=0;i<pos.count;i++){var v=new THREE.Vector3().fromBufferAttribute(pos,i);v.sel=false;this.V.push(v);}
+    var pos=geo.attributes.position,idx=geo.index,uvA=geo.attributes.uv;
+    for(var i=0;i<pos.count;i++){var v=new THREE.Vector3().fromBufferAttribute(pos,i);v.sel=false;
+      if(uvA){v.u0=uvA.getX(i);v.v0=uvA.getY(i);}this.V.push(v);}
     if(idx){for(var i=0;i<idx.count;i+=3)this.F.push({vi:[idx.getX(i),idx.getX(i+1),idx.getX(i+2)],sel:false});}
     else{for(var i=0;i<pos.count;i+=3)this.F.push({vi:[i,i+1,i+2],sel:false});}
     this._weld(1e-4);this._buildEdges();this._refresh();},
@@ -1242,11 +1245,13 @@ var EM={
       if(!m[k]){var e={a:Math.min(a,b),b:Math.max(a,b),sel:false,fi:[fi]};this.E.push(e);m[k]=e;}else m[k].fi.push(fi);}}},
 
   _toGeo:function(){
-    var pos=[],idx=[];
-    for(var i=0;i<this.V.length;i++)pos.push(this.V[i].x,this.V[i].y,this.V[i].z);
+    var pos=[],idx=[],uv=[],hasUV=false;
+    for(var i=0;i<this.V.length;i++){var v=this.V[i];pos.push(v.x,v.y,v.z);uv.push(v.u0||0,v.v0||0);if(v.u0!==undefined)hasUV=true;}
     this._triMap=[];
     for(var fi=0;fi<this.F.length;fi++){var vi=this.F[fi].vi;for(var t=1;t<vi.length-1;t++){idx.push(vi[0],vi[t],vi[t+1]);this._triMap.push(fi);}}
-    var g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));g.setIndex(idx);g.computeVertexNormals();return g;},
+    var g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+    if(hasUV)g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));
+    g.setIndex(idx);g.computeVertexNormals();return g;},
 
   _refresh:function(){
     // Main mesh
@@ -1356,6 +1361,11 @@ var EM={
         if(Math.abs(vj.x+vi.x)<eps&&Math.abs(vj.y-vi.y)<eps&&Math.abs(vj.z-vi.z)<eps){map[i]=j;break;}}}
     return map;},
 
+  // Interpolate carried UVs (u0/v0) from verts ia→ib onto new vert nv (t=0 copies ia's)
+  _uvMix:function(nv,ia,ib,t){var A=this.V[ia],B=this.V[ib];
+    if(A&&A.u0!==undefined&&B&&B.u0!==undefined){nv.u0=A.u0+(B.u0-A.u0)*t;nv.v0=A.v0+(B.v0-A.v0)*t;}
+    else if(A&&A.u0!==undefined){nv.u0=A.u0;nv.v0=A.v0;}},
+
   // Smoothstep falloff from the selection out to editState.propR (world units)
   _propW:null,
   _propWeights:function(selV){
@@ -1391,7 +1401,7 @@ var EM={
     var _b=this._topoSnapshot();
     selF.forEach(function(f){
       var fi=self.F.indexOf(f),n=self._faceNormal(fi),dist=0.3,vMap={};
-      f.vi.forEach(function(vi){if(vMap[vi]===undefined){var nv=self.V[vi].clone().addScaledVector(n,dist);nv.sel=false;self.V.push(nv);vMap[vi]=self.V.length-1;}});
+      f.vi.forEach(function(vi){if(vMap[vi]===undefined){var nv=self.V[vi].clone().addScaledVector(n,dist);nv.sel=false;self._uvMix(nv,vi,vi,0);self.V.push(nv);vMap[vi]=self.V.length-1;}});
       for(var i=0;i<f.vi.length;i++){var a=f.vi[i],b=f.vi[(i+1)%f.vi.length];self.F.push({vi:[a,b,vMap[b],vMap[a]],sel:false});}
       f.vi=f.vi.map(function(vi){return vMap[vi];});f.sel=true;});
     this._buildEdges();this._refresh();this._pushTopo(_b);
@@ -1402,19 +1412,22 @@ var EM={
     if(!selF.length){toast('Select face(s) first (Face mode)');return;}
     var _b=this._topoSnapshot();
     selF.forEach(function(f){
-      var fi=self.F.indexOf(f),c=self._faceCenter(fi),amt=0.22,newVi=f.vi.map(function(vi){var nv=self.V[vi].clone().lerp(c,amt);nv.sel=false;self.V.push(nv);return self.V.length-1;});
+      var fi=self.F.indexOf(f),c=self._faceCenter(fi),amt=0.22,newVi=f.vi.map(function(vi){var nv=self.V[vi].clone().lerp(c,amt);nv.sel=false;self._uvMix(nv,vi,vi,0);self.V.push(nv);return self.V.length-1;});
       for(var i=0;i<f.vi.length;i++){var a=f.vi[i],b=f.vi[(i+1)%f.vi.length];self.F.push({vi:[a,b,newVi[(i+1)%newVi.length],newVi[i]],sel:false});}
       f.vi=newVi;f.sel=true;});
     this._buildEdges();this._refresh();this._pushTopo(_b);renderPanel();},
 
   subdivide:function(){
     var self=this,newF=[],eMid={},hasSel=this.F.some(function(f){return f.sel;}),_b=this._topoSnapshot();
-    function getMid(a,b){var k=Math.min(a,b)+'_'+Math.max(a,b);if(!eMid[k]){var m=self.V[a].clone().add(self.V[b]).multiplyScalar(.5);m.sel=false;self.V.push(m);eMid[k]=self.V.length-1;}return eMid[k];}
+    function getMid(a,b){var k=Math.min(a,b)+'_'+Math.max(a,b);if(!eMid[k]){var m=self.V[a].clone().add(self.V[b]).multiplyScalar(.5);m.sel=false;self._uvMix(m,a,b,.5);self.V.push(m);eMid[k]=self.V.length-1;}return eMid[k];}
     this.F.forEach(function(f){
       if(hasSel&&!f.sel){newF.push(f);return;}
       var vi=f.vi;
       if(vi.length===3){var m01=getMid(vi[0],vi[1]),m12=getMid(vi[1],vi[2]),m20=getMid(vi[2],vi[0]);newF.push({vi:[vi[0],m01,m20],sel:false},{vi:[m01,vi[1],m12],sel:false},{vi:[m12,vi[2],m20],sel:false},{vi:[m01,m12,m20],sel:false});}
-      else{var c=self._faceCenter(self.F.indexOf(f));c.sel=false;self.V.push(c);var ci=self.V.length-1;for(var i=0;i<vi.length;i++){var a=vi[i],b=vi[(i+1)%vi.length],m=getMid(a,b),mp=getMid(vi[(i+vi.length-1)%vi.length],a);newF.push({vi:[a,m,ci,mp],sel:false});}}});
+      else{var c=self._faceCenter(self.F.indexOf(f));c.sel=false;
+        var us=0,vs=0,un=0;vi.forEach(function(x){if(self.V[x].u0!==undefined){us+=self.V[x].u0;vs+=self.V[x].v0;un++;}});
+        if(un===vi.length){c.u0=us/un;c.v0=vs/un;}
+        self.V.push(c);var ci=self.V.length-1;for(var i=0;i<vi.length;i++){var a=vi[i],b=vi[(i+1)%vi.length],m=getMid(a,b),mp=getMid(vi[(i+vi.length-1)%vi.length],a);newF.push({vi:[a,m,ci,mp],sel:false});}}});
     this.F=newF;this._buildEdges();this._refresh();this._pushTopo(_b);},
 
   loopCut:function(){
@@ -1422,8 +1435,8 @@ var EM={
     this.F.forEach(function(f){
       if(hasSel&&!f.sel){newF.push(f);return;}
       if(f.vi.length===4){
-        var vi=f.vi,m01=self.V[vi[0]].clone().add(self.V[vi[1]]).multiplyScalar(.5);m01.sel=true;
-        var m23=self.V[vi[2]].clone().add(self.V[vi[3]]).multiplyScalar(.5);m23.sel=true;
+        var vi=f.vi,m01=self.V[vi[0]].clone().add(self.V[vi[1]]).multiplyScalar(.5);m01.sel=true;self._uvMix(m01,vi[0],vi[1],.5);
+        var m23=self.V[vi[2]].clone().add(self.V[vi[3]]).multiplyScalar(.5);m23.sel=true;self._uvMix(m23,vi[2],vi[3],.5);
         self.V.push(m01,m23);var mi=self.V.length-2,mj=self.V.length-1;
         newF.push({vi:[vi[0],mi,mj,vi[3]],sel:false},{vi:[mi,vi[1],vi[2],mj],sel:false});
       } else newF.push(f);});
@@ -1454,7 +1467,7 @@ var EM={
       var na1=nbr(f1,e.a,e.b),nb1=nbr(f1,e.b,e.a),na2=nbr(f2,e.a,e.b),nb2=nbr(f2,e.b,e.a);
       if(na1<0||nb1<0||na2<0||nb2<0)return;
       var nsum=self._faceNormal(e.fi[0]).add(self._faceNormal(e.fi[1]));
-      function mk(v,to){var nv=self.V[v].clone().lerp(self.V[to],t);nv.sel=false;self.V.push(nv);return self.V.length-1;}
+      function mk(v,to){var nv=self.V[v].clone().lerp(self.V[to],t);nv.sel=false;self._uvMix(nv,v,to,t);self.V.push(nv);return self.V.length-1;}
       var A1=mk(e.a,na1),B1=mk(e.b,nb1),A2=mk(e.a,na2),B2=mk(e.b,nb2);
       var ia=f1.vi.indexOf(e.a);
       var aThenB=f1.vi[(ia+1)%f1.vi.length]===e.b;
@@ -1519,10 +1532,31 @@ var EM={
     this._refresh();this._pushVertHistory(snap);},
 
   exportToModel:function(){
-    var geo=this._toExportGeo(),mat=makeMaterial({color:EM._srcTex?0xffffff:0xcdb7a4,rough:.55});
+    // With a source texture, export using the carried per-vertex UVs so the original
+    // wrapping survives the edit session; otherwise use the unique per-face atlas.
+    var keepUV=!!(EM._srcTex&&this.V.some(function(v){return v.u0!==undefined;}));
+    var geo=keepUV?this._facesToGeoKeepUV(this.F):this._toExportGeo();
+    var mat=makeMaterial({color:EM._srcTex?0xffffff:0xcdb7a4,rough:.55});
     if(EM._srcTex){mat.map=EM._srcTex;mat.needsUpdate=true;}
     var name='Mesh '+(state.models.length+1);var m=makeModel(name,[{geo:geo,mat:mat}]);
+    if(keepUV)m.userData.parts[0]._hasProperUVs=(EM._srcTex.flipY===false);
     addModel(m);setActiveModel(m.userData.id);toast('"'+name+'" added — open Viewer');renderPanel();},
+
+  // Unindexed triangles keeping each vertex's carried u0/v0 (flat per-face normals)
+  _facesToGeoKeepUV:function(faces){
+    var self=this,pos=[],nor=[],uv=[];
+    for(var q=0;q<faces.length;q++){
+      var f=faces[q],fi=this.F.indexOf(f),n=this._faceNormal(fi),vi=f.vi;
+      for(var t=1;t<vi.length-1;t++){
+        [0,t,t+1].forEach(function(k){
+          var v=self.V[vi[k]];
+          pos.push(v.x,v.y,v.z);nor.push(n.x,n.y,n.z);
+          uv.push(v.u0||0,v.v0||0);});}}
+    var g=new THREE.BufferGeometry();
+    g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+    g.setAttribute('normal',new THREE.Float32BufferAttribute(nor,3));
+    g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));
+    return g;},
 
   // Separate selected faces into a brand-new model (e.g. icing off a donut top)
   separateSelection:function(){
