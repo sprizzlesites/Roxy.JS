@@ -1074,7 +1074,7 @@ var Sculpt={painting:false,ptId:null,brush:'draw',radius:.32,strength:.5,symmetr
   _dab:function(c,refN){
     var V=EM.V,adj=this._adj,br=this.brush,R=this.radius,st=this.strength;
     var N=EM._liveNormals();
-    var chisel=(br==='draw'||br==='carve');
+    var chisel=(br==='draw'||br==='carve'||br==='crease');
     var hits=[];
     if(chisel&&refN){
       // Screen-space selection: project every candidate vertex onto the screen and select
@@ -1107,6 +1107,17 @@ var Sculpt={painting:false,ptId:null,brush:'draw',radius:.32,strength:.5,symmetr
       hits.forEach(function(o){var diff=V[o.i].clone().sub(c).dot(fn);V[o.i].addScaledVector(fn,-diff*o.w*st);});
     }else if(br==='pinch'){
       hits.forEach(function(o){var dir=c.clone().sub(V[o.i]);V[o.i].addScaledVector(dir,o.w*st*.35);});
+    }else if(br==='inflate'){
+      // each vertex moves along its own live normal — puffs the surface outward
+      var iamt=st*R*.1;
+      hits.forEach(function(o){V[o.i].addScaledVector(N[o.i],iamt*o.w);});
+    }else if(br==='crease'){
+      // pinch toward the stroke line while depressing along the hit normal — sharp grooves
+      var cn=refN?refN.clone():(function(){var f=new THREE.Vector3();hits.forEach(function(o){f.add(N[o.i]);});return f.lengthSq()>1e-9?f.normalize():f.set(0,1,0);})();
+      var camt=st*R*.08;
+      hits.forEach(function(o){
+        V[o.i].addScaledVector(c.clone().sub(V[o.i]),o.w*st*.25);
+        V[o.i].addScaledVector(cn,-camt*o.w*Math.max(0,N[o.i].dot(cn)));});
     }else{
       // Push along the exact hit-face normal; scale per-vertex by N·refN so any
       // edge vertex that sneaks in due to screen projection still gets less displacement.
@@ -1728,7 +1739,7 @@ function renderEditHud(){
     r1.appendChild(el('button',{class:'hud-btn'+(!sculpting?' on':''),text:'Sel',onclick:function(){editState.tool='select';renderEditHud();renderPanel();}}));
     r1.appendChild(el('button',{class:'hud-btn'+(sculpting?' on':''),text:'Sculpt',onclick:function(){editState.tool='sculpt';EM.clearSel();EM._refresh();renderEditHud();renderPanel();}}));
     if(sculpting){
-      [['draw','Draw'],['carve','Carve'],['smooth','Smooth'],['grab','Grab'],['flatten','Flatten'],['pinch','Pinch']].forEach(function(p){
+      [['draw','Draw'],['carve','Carve'],['crease','Crease'],['inflate','Inflate'],['smooth','Smooth'],['grab','Grab'],['flatten','Flatten'],['pinch','Pinch']].forEach(function(p){
         r1.appendChild(el('button',{class:'hud-btn'+(Sculpt.brush===p[0]?' on':''),text:p[1],onclick:function(){Sculpt.brush=p[0];renderEditHud();}}));});
     }else{
       ['face','vert','edge'].forEach(function(m){
@@ -1783,7 +1794,7 @@ function renderEditHud(){
   if(sculpting){
     hud.appendChild(el('div',{class:'hud-sel',text:'Drag on the surface to sculpt · RotBall to orbit'}));
     var brow=el('div',{class:'hud-row'});
-    [['draw','Draw'],['carve','Carve'],['smooth','Smooth'],['grab','Grab'],['flatten','Flatten'],['pinch','Pinch']].forEach(function(p){
+    [['draw','Draw'],['carve','Carve'],['crease','Crease'],['inflate','Inflate'],['smooth','Smooth'],['grab','Grab'],['flatten','Flatten'],['pinch','Pinch']].forEach(function(p){
       brow.appendChild(el('button',{class:'hud-btn'+(Sculpt.brush===p[0]?' on':''),text:p[1],onclick:function(){Sculpt.brush=p[0];renderEditHud();}}));});
     hud.appendChild(brow);
     var symrow=el('div',{class:'hud-row'});
@@ -1859,7 +1870,7 @@ function panelEdit(b){
   if(editState.tool==='sculpt'){
     b.appendChild(el('p',{class:'small muted',style:'margin:6px 0',text:'Drag on the surface to sculpt. RotBall orbits, two fingers zoom/pan.'}));
     var bRow=el('div',{class:'chiprow'});
-    [['draw','Draw'],['carve','Carve'],['smooth','Smooth'],['grab','Grab'],['flatten','Flatten'],['pinch','Pinch']].forEach(function(p){
+    [['draw','Draw'],['carve','Carve'],['crease','Crease'],['inflate','Inflate'],['smooth','Smooth'],['grab','Grab'],['flatten','Flatten'],['pinch','Pinch']].forEach(function(p){
       bRow.appendChild(el('button',{class:'chip'+(Sculpt.brush===p[0]?' on':''),text:p[1],onclick:function(){Sculpt.brush=p[0];renderEditHud();renderPanel();}}));});
     b.appendChild(bRow);
     var symRow=el('div',{class:'chiprow',style:'margin-top:6px'});
