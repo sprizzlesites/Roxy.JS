@@ -444,6 +444,11 @@ function endPtr(e){
   if(active.view==='edit'&&Sculpt.painting&&Sculpt.ptId===e.pointerId){Sculpt.up();}
   if(active.view==='edit'&&editDirect.ptId===e.pointerId){
     if(editDirect.active){
+      // Grid snap (top-bar Snap toggle): settle the verts this drag moved onto a 0.1 grid
+      if(Gizmo.snap){var gs=.1;
+        EM.V.forEach(function(v,i){var o=editDirect.snap[i];if(!o||v.equals(o))return;
+          v.set(Math.round(v.x/gs)*gs,Math.round(v.y/gs)*gs,Math.round(v.z/gs)*gs);});
+        EM._refresh();}
       var snap=editDirect.snap,curr=EM.V.map(function(v){return v.clone();});
       History.push(function(){EM.V.forEach(function(v,i){v.copy(snap[i]);});EM._refresh();},
                    function(){EM.V.forEach(function(v,i){v.copy(curr[i]);});EM._refresh();});}
