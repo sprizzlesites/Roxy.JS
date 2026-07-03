@@ -422,7 +422,7 @@ function endPtr(e){
       var snap=editDirect.snap,curr=EM.V.map(function(v){return v.clone();});
       History.push(function(){EM.V.forEach(function(v,i){v.copy(snap[i]);});EM._refresh();},
                    function(){EM.V.forEach(function(v,i){v.copy(curr[i]);});EM._refresh();});}
-    editDirect.ptId=null;editDirect.pending=false;editDirect.active=false;editDirect.snap=null;EM._propW=null;}
+    editDirect.ptId=null;editDirect.pending=false;editDirect.active=false;editDirect.snap=null;EM._propW=null;EM._mirMap=null;}
   if(active.view==='paint'&&paint.mode3d&&paint.drawing){
     paint.drawing=false;paint.last=null;paint._last3d=null;
     var bef=paint._3dSnap,aft=paint.ctx.getImageData(0,0,1024,1024),tx=paint.tex;
@@ -1023,7 +1023,7 @@ function onViewportTap(e){var slot=curSlot();if(!slot)return;var r=dom.getBoundi
    MESH EDIT MODE
    ═══════════════════════════════════════════════════════ */
 
-var editState={mode:'face',tool:'select',grabActive:false,grabPtId:null,grabPrevX:0,grabPrevY:0,grabSnap:null,multiSel:false,hudExpanded:false,prop:false,propR:.8};
+var editState={mode:'face',tool:'select',grabActive:false,grabPtId:null,grabPrevX:0,grabPrevY:0,grabSnap:null,multiSel:false,hudExpanded:false,prop:false,propR:.8,mirror:false};
 
 function screenDeltaToWorld(dx,dy){
   var cam=active.vs.cam,rad=active.vs.rad;
@@ -1309,13 +1309,37 @@ var EM={
     if(mode==='face')this.F.forEach(function(f){if(f.sel)f.vi.forEach(function(vi){selV.add(vi);});});
     else if(mode==='edge')this.E.forEach(function(e){if(e.sel){selV.add(e.a);selV.add(e.b);}});
     else this.V.forEach(function(v,i){if(v.sel)selV.add(i);});
+    var w=null;
     if(editState.prop&&editState.propR>0&&selV.size){
       // weights cached for the duration of one drag (cleared on pointer-up)
       if(!this._propW||this._propW.length!==this.V.length)this._propW=this._propWeights(selV);
-      var w=this._propW;
+      w=this._propW;
       for(var i=0;i<this.V.length;i++)if(w[i]>0)this.V[i].addScaledVector(delta,w[i]);
     }else selV.forEach(function(i){this.V[i].add(delta);},this);
+    if(editState.mirror&&selV.size){
+      // map built from pre-drag positions on the first grab of a drag; cleared on pointer-up
+      if(!this._mirMap||this._mirMap.length!==this.V.length)this._mirMap=this._mirrorMap();
+      var mm=this._mirMap,self=this;
+      function wt(i){return w?w[i]:(selV.has(i)?1:0);}
+      for(var i=0;i<this.V.length;i++){
+        var wi=wt(i);if(wi<=0)continue;
+        var j=mm[i];if(j<0)continue;
+        if(j===i){this.V[i].x=0;continue;}          // on-plane verts stay on the plane
+        var wj=wt(j);
+        if(wj>wi||(wj===wi&&j<i))continue;          // stronger (or first) side drives the pair
+        this.V[j].set(-this.V[i].x,this.V[i].y,this.V[i].z);}}
     this._refresh();},
+
+  // Vertex → X-mirrored counterpart (-1 when none; own index when on the plane)
+  _mirMap:null,
+  _mirrorMap:function(){
+    var n=this.V.length,map=new Int32Array(n),eps=5e-3;
+    for(var i=0;i<n;i++){
+      map[i]=-1;var vi=this.V[i];
+      if(Math.abs(vi.x)<eps){map[i]=i;continue;}
+      for(var j=0;j<n;j++){var vj=this.V[j];
+        if(Math.abs(vj.x+vi.x)<eps&&Math.abs(vj.y-vi.y)<eps&&Math.abs(vj.z-vi.z)<eps){map[i]=j;break;}}}
+    return map;},
 
   // Smoothstep falloff from the selection out to editState.propR (world units)
   _propW:null,
@@ -1762,6 +1786,7 @@ function renderEditHud(){
         mr2.appendChild(el('button',{class:'hud-btn',text:'All',onclick:function(){EM.selAll();}}));
         mr2.appendChild(el('button',{class:'hud-btn',text:'None',onclick:function(){EM.clearSel();EM._refresh();renderPanel();}}));
         mr2.appendChild(el('button',{class:'hud-btn'+(editState.prop?' on':''),text:'Soft',onclick:function(){editState.prop=!editState.prop;EM._propW=null;renderEditHud();renderPanel();}}));
+        mr2.appendChild(el('button',{class:'hud-btn'+(editState.mirror?' on':''),text:'Mirror',onclick:function(){editState.mirror=!editState.mirror;EM._mirMap=null;renderEditHud();renderPanel();}}));
         if(selN>0){
           if(mode==='face'){mr2.appendChild(el('button',{class:'hud-btn',text:'Extrude',onclick:function(){EM.extrude();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Inset',onclick:function(){EM.inset();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Separate',onclick:function(){EM.separateSelection();}}));}
           if(mode==='vert'){mr2.appendChild(el('button',{class:'hud-btn',text:'Merge',onclick:function(){EM.mergeSelected();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Smooth',onclick:function(){EM.smoothVerts();renderPanel();}}));}
@@ -1819,6 +1844,7 @@ function renderEditHud(){
   mr.appendChild(el('button',{class:'hud-btn',text:'None',onclick:function(){EM.clearSel();EM._refresh();renderPanel();}}));
   mr.appendChild(el('button',{class:'hud-btn'+(editState.multiSel?' on':''),title:'Multi-select (additive tap)',text:'Multi',onclick:function(){editState.multiSel=!editState.multiSel;renderEditHud();}}));
   mr.appendChild(el('button',{class:'hud-btn'+(editState.prop?' on':''),title:'Proportional edit (soft falloff)',text:'Soft',onclick:function(){editState.prop=!editState.prop;EM._propW=null;renderEditHud();renderPanel();}}));
+  mr.appendChild(el('button',{class:'hud-btn'+(editState.mirror?' on':''),title:'X-mirror moves across the YZ plane',text:'Mirror',onclick:function(){editState.mirror=!editState.mirror;EM._mirMap=null;renderEditHud();renderPanel();}}));
   hud.appendChild(mr);
 
   if(selN>0){
@@ -1909,6 +1935,10 @@ function panelEdit(b){
     b.appendChild(el('label',{class:'fld',style:'margin-top:6px',text:'Falloff radius'}));
     b.appendChild(el('input',{type:'range',min:.1,max:3,step:.05,value:editState.propR,
       oninput:function(e){editState.propR=+e.target.value;EM._propW=null;}}));}
+  b.appendChild(el('div',{style:'margin-top:6px'},[el('button',{class:editState.mirror?'on':'',style:'width:100%',
+    text:editState.mirror?'✓ X-Mirror (moves reflect across YZ)':'X-Mirror (moves reflect across YZ)',
+    onclick:function(){editState.mirror=!editState.mirror;EM._mirMap=null;renderPanel();renderEditHud();
+      toast(editState.mirror?'Drag-moves now mirror to matching verts across X':'X-Mirror off');}})]));
 
   b.appendChild(el('div',{class:'section-title',text:'Operations'}));
   b.appendChild(el('div',{class:'grid2'},[
