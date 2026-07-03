@@ -644,17 +644,46 @@ function exportGLB(root,name){root.updateWorldMatrix(true,true);var rootInv=new 
  d.setUint32(0,0x46546C67,true);d.setUint32(4,2,true);d.setUint32(8,total,true);P=12;d.setUint32(P,jc.byteLength,true);d.setUint32(P+4,0x4E4F534A,true);P+=8;u8.set(jc,P);P+=jc.byteLength;d.setUint32(P,bc.byteLength,true);d.setUint32(P+4,0x004E4942,true);P+=8;u8.set(bc,P);
  download(new Blob([out],{type:'model/gltf-binary'}),name);}
 
-/* ---------------- OBJ export (geometry only) ---------------- */
+/* ---------------- OBJ export (positions + UVs + normals, companion .mtl/.png when textured) ---------------- */
 function exportOBJ(root,name){root.updateWorldMatrix(true,true);var rootInv=new THREE.Matrix4().copy(root.matrixWorld).invert();
-  var lines=['# ROXY.JS export'],vOff=0,tmp=new THREE.Vector3(),rel=new THREE.Matrix4();
+  var base=name.replace(/\.obj$/i,'');
+  var lines=['# ROXY.JS export'],vOff=0,vtOff=0,vnOff=0,tmp=new THREE.Vector3(),rel=new THREE.Matrix4();
+  var mats=[],matIdx=new Map();
   root.traverse(function(o){if(!(o.isMesh&&o.geometry))return;var g=o.geometry,pos=g.attributes.position;if(!pos)return;
-    rel.multiplyMatrices(rootInv,o.matrixWorld);var norm=new THREE.Matrix3().getNormalMatrix(rel);var hasN=g.attributes.normal;
+    rel.multiplyMatrices(rootInv,o.matrixWorld);var norm=new THREE.Matrix3().getNormalMatrix(rel);
+    var hasN=g.attributes.normal,hasT=g.attributes.uv;
+    var mat=Array.isArray(o.material)?o.material[0]:o.material;
+    if(mat&&!matIdx.has(mat)){matIdx.set(mat,mats.length);mats.push(mat);}
+    // OBJ convention: vt v=0 at image bottom. flipY=false textures (GLB) store v=0 at
+    // image top, so flip their v here and export the image itself untouched.
+    var vFlip=!!(mat&&mat.map&&mat.map.image&&mat.map.flipY===false);
     for(var i=0;i<pos.count;i++){tmp.fromBufferAttribute(pos,i).applyMatrix4(rel);lines.push('v '+tmp.x.toFixed(5)+' '+tmp.y.toFixed(5)+' '+tmp.z.toFixed(5));}
+    if(hasT)for(var i=0;i<hasT.count;i++){var tv=hasT.getY(i);lines.push('vt '+hasT.getX(i).toFixed(6)+' '+(vFlip?1-tv:tv).toFixed(6));}
     if(hasN){for(var i=0;i<hasN.count;i++){tmp.fromBufferAttribute(hasN,i).applyMatrix3(norm).normalize();lines.push('vn '+tmp.x.toFixed(5)+' '+tmp.y.toFixed(5)+' '+tmp.z.toFixed(5));}}
-    function fc(a,b,c){a+=1+vOff;b+=1+vOff;c+=1+vOff;lines.push(hasN?('f '+a+'//'+a+' '+b+'//'+b+' '+c+'//'+c):('f '+a+' '+b+' '+c));}
+    if(mat)lines.push('usemtl mat'+matIdx.get(mat));
+    function ref(i){
+      if(hasT&&hasN)return (i+1+vOff)+'/'+(i+1+vtOff)+'/'+(i+1+vnOff);
+      if(hasT)return (i+1+vOff)+'/'+(i+1+vtOff);
+      if(hasN)return (i+1+vOff)+'//'+(i+1+vnOff);
+      return ''+(i+1+vOff);}
+    function fc(a,b,c){lines.push('f '+ref(a)+' '+ref(b)+' '+ref(c));}
     var idx=g.index;if(idx){for(var i=0;i<idx.count;i+=3)fc(idx.getX(i),idx.getX(i+1),idx.getX(i+2));}else{for(var i=0;i<pos.count;i+=3)fc(i,i+1,i+2);}
-    vOff+=pos.count;});
-  download(new Blob([lines.join('\n')],{type:'text/plain'}),name);toast('Exported '+name);}
+    vOff+=pos.count;if(hasT)vtOff+=hasT.count;if(hasN)vnOff+=hasN.count;});
+  var texFiles=[];
+  if(mats.length){
+    lines.splice(1,0,'mtllib '+base+'.mtl');
+    var mtl=['# ROXY.JS materials'];
+    mats.forEach(function(m,i){mtl.push('newmtl mat'+i);
+      var c=m.color||new THREE.Color(1,1,1);
+      mtl.push('Kd '+c.r.toFixed(4)+' '+c.g.toFixed(4)+' '+c.b.toFixed(4));
+      if(m.map&&m.map.image){var fn=base+'_tex'+i+'.png';mtl.push('map_Kd '+fn);texFiles.push({t:m.map,fn:fn});}});
+    download(new Blob([mtl.join('\n')],{type:'text/plain'}),base+'.mtl');
+    texFiles.forEach(function(tf){var img=tf.t.image,cv;
+      if(img instanceof HTMLCanvasElement)cv=img;
+      else{cv=el('canvas');cv.width=img.width||512;cv.height=img.height||512;cv.getContext('2d').drawImage(img,0,0);}
+      cv.toBlob(function(bl){if(bl)download(bl,tf.fn);},'image/png');});}
+  download(new Blob([lines.join('\n')],{type:'text/plain'}),name);
+  toast('Exported '+name+(texFiles.length?' + .mtl + texture png':''));}
 
 /* ---------------- paint ---------------- */
 var paint={cv:$('#paintCanvas'),ctx:null,part:0,color:'#d8466a',size:38,soft:0,erase:false,drawing:false,last:null,tex:null,mode3d:false,_3dSnap:null,_lastFaceIdx:-1,_last3d:null};
