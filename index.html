@@ -107,7 +107,9 @@ canvas{display:block;touch-action:none}
   #rail{display:none}
   /* finger-sized touch targets */
   button{min-height:42px;font-size:13.5px}
-  #bar .act{min-height:38px;padding:8px 12px}
+  #bar{gap:6px;padding:0 8px}
+  #bar .vtitle{display:none} /* active tab in the dock already names the view */
+  #bar .act{min-height:38px;padding:8px 10px}
   .chip{min-height:36px}
   .hud-btn{min-height:36px}
   input[type=text],input[type=number],select{min-height:42px;font-size:14px}
