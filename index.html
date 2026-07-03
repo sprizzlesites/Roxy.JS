@@ -408,7 +408,7 @@ function endPtr(e){
       var snap=editDirect.snap,curr=EM.V.map(function(v){return v.clone();});
       History.push(function(){EM.V.forEach(function(v,i){v.copy(snap[i]);});EM._refresh();},
                    function(){EM.V.forEach(function(v,i){v.copy(curr[i]);});EM._refresh();});}
-    editDirect.ptId=null;editDirect.pending=false;editDirect.active=false;editDirect.snap=null;}
+    editDirect.ptId=null;editDirect.pending=false;editDirect.active=false;editDirect.snap=null;EM._propW=null;}
   if(active.view==='paint'&&paint.mode3d&&paint.drawing){
     paint.drawing=false;paint.last=null;paint._last3d=null;
     var bef=paint._3dSnap,aft=paint.ctx.getImageData(0,0,1024,1024),tx=paint.tex;
@@ -997,7 +997,7 @@ function onViewportTap(e){var slot=curSlot();if(!slot)return;var r=dom.getBoundi
    MESH EDIT MODE
    ═══════════════════════════════════════════════════════ */
 
-var editState={mode:'face',tool:'select',grabActive:false,grabPtId:null,grabPrevX:0,grabPrevY:0,grabSnap:null,multiSel:false,hudExpanded:false};
+var editState={mode:'face',tool:'select',grabActive:false,grabPtId:null,grabPrevX:0,grabPrevY:0,grabSnap:null,multiSel:false,hudExpanded:false,prop:false,propR:.8};
 
 function screenDeltaToWorld(dx,dy){
   var cam=active.vs.cam,rad=active.vs.rad;
@@ -1272,7 +1272,25 @@ var EM={
     if(mode==='face')this.F.forEach(function(f){if(f.sel)f.vi.forEach(function(vi){selV.add(vi);});});
     else if(mode==='edge')this.E.forEach(function(e){if(e.sel){selV.add(e.a);selV.add(e.b);}});
     else this.V.forEach(function(v,i){if(v.sel)selV.add(i);});
-    selV.forEach(function(i){this.V[i].add(delta);},this);this._refresh();},
+    if(editState.prop&&editState.propR>0&&selV.size){
+      // weights cached for the duration of one drag (cleared on pointer-up)
+      if(!this._propW||this._propW.length!==this.V.length)this._propW=this._propWeights(selV);
+      var w=this._propW;
+      for(var i=0;i<this.V.length;i++)if(w[i]>0)this.V[i].addScaledVector(delta,w[i]);
+    }else selV.forEach(function(i){this.V[i].add(delta);},this);
+    this._refresh();},
+
+  // Smoothstep falloff from the selection out to editState.propR (world units)
+  _propW:null,
+  _propWeights:function(selV){
+    var R=editState.propR,w=new Float32Array(this.V.length),sel=[];
+    selV.forEach(function(i){w[i]=1;sel.push(i);});
+    for(var i=0;i<this.V.length;i++){
+      if(w[i])continue;
+      var dmin=Infinity;
+      for(var j=0;j<sel.length;j++){var d=this.V[i].distanceToSquared(this.V[sel[j]]);if(d<dmin)dmin=d;}
+      w[i]=falloff(Math.sqrt(dmin),R);}
+    return w;},
 
   _selVertSet:function(){var mode=editState.mode,s=new Set();
     if(mode==='face')this.F.forEach(function(f){if(f.sel)f.vi.forEach(function(v){s.add(v);});});
@@ -1706,6 +1724,7 @@ function renderEditHud(){
         var mr2=el('div',{class:'hud-row hud-compact'});
         mr2.appendChild(el('button',{class:'hud-btn',text:'All',onclick:function(){EM.selAll();}}));
         mr2.appendChild(el('button',{class:'hud-btn',text:'None',onclick:function(){EM.clearSel();EM._refresh();renderPanel();}}));
+        mr2.appendChild(el('button',{class:'hud-btn'+(editState.prop?' on':''),text:'Soft',onclick:function(){editState.prop=!editState.prop;EM._propW=null;renderEditHud();renderPanel();}}));
         if(selN>0){
           if(mode==='face'){mr2.appendChild(el('button',{class:'hud-btn',text:'Extrude',onclick:function(){EM.extrude();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Inset',onclick:function(){EM.inset();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Separate',onclick:function(){EM.separateSelection();}}));}
           if(mode==='vert'){mr2.appendChild(el('button',{class:'hud-btn',text:'Merge',onclick:function(){EM.mergeSelected();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Smooth',onclick:function(){EM.smoothVerts();renderPanel();}}));}
@@ -1762,6 +1781,7 @@ function renderEditHud(){
   mr.appendChild(el('button',{class:'hud-btn',text:'All',onclick:function(){EM.selAll();}}));
   mr.appendChild(el('button',{class:'hud-btn',text:'None',onclick:function(){EM.clearSel();EM._refresh();renderPanel();}}));
   mr.appendChild(el('button',{class:'hud-btn'+(editState.multiSel?' on':''),title:'Multi-select (additive tap)',text:'Multi',onclick:function(){editState.multiSel=!editState.multiSel;renderEditHud();}}));
+  mr.appendChild(el('button',{class:'hud-btn'+(editState.prop?' on':''),title:'Proportional edit (soft falloff)',text:'Soft',onclick:function(){editState.prop=!editState.prop;EM._propW=null;renderEditHud();renderPanel();}}));
   hud.appendChild(mr);
 
   if(selN>0){
@@ -1844,6 +1864,14 @@ function panelEdit(b){
   b.appendChild(el('p',{class:'small muted',style:'margin-bottom:6px',text:'Select elements then drag them in the 3D view to move · RotBall to orbit · two-finger to zoom/pan'}));
   b.appendChild(el('div',{class:'grid2'},[el('button',{text:'Scale +',onclick:function(){EM.scaleSelection(1.1);}}),el('button',{text:'Scale −',onclick:function(){EM.scaleSelection(1/1.1);}})]));
   b.appendChild(el('div',{class:'spread',style:'margin-top:6px'},[el('button',{style:'flex:1',text:'Rot X',onclick:function(){EM.rotateSelection('x',Math.PI/12);}}),el('button',{style:'flex:1',text:'Rot Y',onclick:function(){EM.rotateSelection('y',Math.PI/12);}}),el('button',{style:'flex:1',text:'Rot Z',onclick:function(){EM.rotateSelection('z',Math.PI/12);}})]));
+  b.appendChild(el('div',{style:'margin-top:6px'},[el('button',{class:editState.prop?'on':'',style:'width:100%',
+    text:editState.prop?'✓ Proportional edit (soft falloff)':'Proportional edit (soft falloff)',
+    onclick:function(){editState.prop=!editState.prop;EM._propW=null;renderPanel();renderEditHud();
+      toast(editState.prop?'Nearby verts follow your drag with smooth falloff':'Proportional editing off');}})]));
+  if(editState.prop){
+    b.appendChild(el('label',{class:'fld',style:'margin-top:6px',text:'Falloff radius'}));
+    b.appendChild(el('input',{type:'range',min:.1,max:3,step:.05,value:editState.propR,
+      oninput:function(e){editState.propR=+e.target.value;EM._propW=null;}}));}
 
   b.appendChild(el('div',{class:'section-title',text:'Operations'}));
   b.appendChild(el('div',{class:'grid2'},[
