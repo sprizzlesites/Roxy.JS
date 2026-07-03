@@ -1468,6 +1468,23 @@ var EM={
       } else newF.push(f);});
     this.F=newF;this._buildEdges();this._refresh();this._pushTopo(_b);},
 
+  // Copy selected faces as detached geometry; the copy becomes the selection
+  // so an immediate drag moves it into place (Blender's Shift+D flow).
+  duplicateSelection:function(){
+    var sel=this.F.filter(function(f){return f.sel;});
+    if(!sel.length){toast('Select face(s) first (Face mode)');return;}
+    var self=this,_b=this._topoSnapshot(),vMap={};
+    this.clearSel();
+    sel.forEach(function(f){
+      var nvi=f.vi.map(function(vi){
+        if(vMap[vi]===undefined){
+          var nv=self.V[vi].clone();nv.sel=true;self._uvMix(nv,vi,vi,0);
+          self.V.push(nv);vMap[vi]=self.V.length-1;}
+        return vMap[vi];});
+      self.F.push({vi:nvi,sel:true});});
+    this._buildEdges();this._refresh();this._pushTopo(_b);
+    renderPanel();toast('Duplicated '+sel.length+' face'+(sel.length>1?'s':'')+' — drag to move the copy');},
+
   // Extend selection along edge loops: through each adjacent quad, continue
   // to the edge on the opposite side (Blender-style loop select).
   selectLoops:function(){
@@ -1886,7 +1903,7 @@ function renderEditHud(){
         mr2.appendChild(el('button',{class:'hud-btn'+(editState.prop?' on':''),text:'Soft',onclick:function(){editState.prop=!editState.prop;EM._propW=null;renderEditHud();renderPanel();}}));
         mr2.appendChild(el('button',{class:'hud-btn'+(editState.mirror?' on':''),text:'Mirror',onclick:function(){editState.mirror=!editState.mirror;EM._mirMap=null;renderEditHud();renderPanel();}}));
         if(selN>0){
-          if(mode==='face'){mr2.appendChild(el('button',{class:'hud-btn',text:'Extrude',onclick:function(){EM.extrude();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Inset',onclick:function(){EM.inset();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Separate',onclick:function(){EM.separateSelection();}}));}
+          if(mode==='face'){mr2.appendChild(el('button',{class:'hud-btn',text:'Extrude',onclick:function(){EM.extrude();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Inset',onclick:function(){EM.inset();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Dup',onclick:function(){EM.duplicateSelection();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Separate',onclick:function(){EM.separateSelection();}}));}
           if(mode==='vert'){mr2.appendChild(el('button',{class:'hud-btn',text:'Merge',onclick:function(){EM.mergeSelected();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Smooth',onclick:function(){EM.smoothVerts();renderPanel();}}));}
           if(mode==='edge'){mr2.appendChild(el('button',{class:'hud-btn',text:'Loop',onclick:function(){EM.selectLoops();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Bevel',onclick:function(){EM.bevelEdges();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Bridge',onclick:function(){EM.bridgeEdges();renderPanel();}}));}
           mr2.appendChild(el('button',{class:'hud-btn',text:'Subdiv',onclick:function(){EM.subdivide();renderPanel();}}));
@@ -1950,6 +1967,7 @@ function renderEditHud(){
     if(mode==='face'){
       or.appendChild(el('button',{class:'hud-btn',text:'Extrude',onclick:function(){EM.extrude();}}));
       or.appendChild(el('button',{class:'hud-btn',text:'Inset',onclick:function(){EM.inset();}}));
+      or.appendChild(el('button',{class:'hud-btn',text:'Dup',onclick:function(){EM.duplicateSelection();}}));
       or.appendChild(el('button',{class:'hud-btn',text:'Separate',onclick:function(){EM.separateSelection();}}));
     }
     if(mode==='vert'){
@@ -2064,11 +2082,14 @@ function panelEdit(b){
     el('button',{text:'Weld Close',onclick:function(){EM.weldClose();renderPanel();}}),
     el('button',{text:'Bevel Edges  [B]',onclick:function(){EM.bevelEdges();}})
   ]));
-  b.appendChild(el('button',{style:'width:100%;margin-top:6px',text:'Select Edge Loop  [L]',onclick:function(){EM.selectLoops();}}));
+  b.appendChild(el('div',{class:'grid2',style:'margin-top:6px'},[
+    el('button',{text:'Select Loop  [L]',onclick:function(){EM.selectLoops();}}),
+    el('button',{text:'Duplicate  [D]',onclick:function(){EM.duplicateSelection();}})
+  ]));
 
   b.appendChild(el('hr',{class:'sep'}));
   b.appendChild(el('div',{class:'section-title',text:'Keyboard shortcuts (desktop)'}));
-  b.appendChild(el('p',{class:'small muted',text:'E=Extrude  I=Inset  S=Subdivide  B=Bevel  L=Loop Select  X=Delete  A=Select All  drag selected → move  6=Open this tab'}));
+  b.appendChild(el('p',{class:'small muted',text:'E=Extrude  I=Inset  S=Subdivide  B=Bevel  L=Loop Select  D=Duplicate  X=Delete  A=Select All  drag selected → move  6=Open this tab'}));
 
   b.appendChild(el('hr',{class:'sep'}));
   b.appendChild(el('div',{class:'section-title',text:'Export to library'}));
@@ -2126,6 +2147,7 @@ window.addEventListener('keydown',function(e){var tag=(e.target&&e.target.tagNam
     else if(z==='i'){EM.inset();}
     else if(z==='b'){EM.bevelEdges();}
     else if(z==='l'){EM.selectLoops();}
+    else if(z==='d'&&!e.ctrlKey&&!e.metaKey){e.preventDefault();EM.duplicateSelection();}
     else if(z==='x'){EM.deleteSelected();}
     else if(z==='s'&&!e.ctrlKey&&!e.metaKey){EM.subdivide();renderPanel();}
   }});
