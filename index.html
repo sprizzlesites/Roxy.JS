@@ -1345,6 +1345,40 @@ var EM={
     this.F.push({vi:(d1<=d2?[a1,b1,b2,a2]:[a1,b1,a2,b2]),sel:false});
     this.clearSel();this._buildEdges();this._refresh();this._pushTopo(_b);toast('Bridged');},
 
+  // Chamfer-bevel selected interior edges: each edge splits into a flat strip.
+  // Edges sharing a vertex with an already-beveled edge are skipped this pass.
+  bevelEdges:function(){
+    var sel=this.E.filter(function(e){return e.sel;});
+    if(!sel.length){toast('Select edge(s) first (Edge mode)');return;}
+    var self=this,_b=this._topoSnapshot(),t=0.25,done=0,used={};
+    sel.forEach(function(e){
+      if(e.fi.length!==2||used[e.a]||used[e.b])return;
+      var f1=self.F[e.fi[0]],f2=self.F[e.fi[1]];if(!f1||!f2)return;
+      function nbr(f,v,other){var L=f.vi,i=L.indexOf(v);if(i<0)return -1;
+        var p=L[(i+L.length-1)%L.length],n=L[(i+1)%L.length];
+        return p===other?n:(n===other?p:n);}
+      var na1=nbr(f1,e.a,e.b),nb1=nbr(f1,e.b,e.a),na2=nbr(f2,e.a,e.b),nb2=nbr(f2,e.b,e.a);
+      if(na1<0||nb1<0||na2<0||nb2<0)return;
+      var nsum=self._faceNormal(e.fi[0]).add(self._faceNormal(e.fi[1]));
+      function mk(v,to){var nv=self.V[v].clone().lerp(self.V[to],t);nv.sel=false;self.V.push(nv);return self.V.length-1;}
+      var A1=mk(e.a,na1),B1=mk(e.b,nb1),A2=mk(e.a,na2),B2=mk(e.b,nb2);
+      var ia=f1.vi.indexOf(e.a);
+      var aThenB=f1.vi[(ia+1)%f1.vi.length]===e.b;
+      f1.vi=f1.vi.map(function(v){return v===e.a?A1:(v===e.b?B1:v);});
+      f2.vi=f2.vi.map(function(v){return v===e.a?A2:(v===e.b?B2:v);});
+      self.F.push({vi:aThenB?[B1,A1,A2,B2]:[A1,B1,B2,A2],sel:false});
+      function pushTri(p,q,r){
+        var n=new THREE.Vector3().crossVectors(
+          new THREE.Vector3().subVectors(self.V[q],self.V[p]),
+          new THREE.Vector3().subVectors(self.V[r],self.V[p]));
+        self.F.push({vi:n.dot(nsum)>=0?[p,q,r]:[p,r,q],sel:false});}
+      if(self.F.some(function(f){return f.vi.indexOf(e.a)>=0;}))pushTri(e.a,A1,A2);
+      if(self.F.some(function(f){return f.vi.indexOf(e.b)>=0;}))pushTri(e.b,B1,B2);
+      used[e.a]=used[e.b]=1;done++;});
+    if(!done){toast('Bevel needs interior edges (2 faces each)');return;}
+    this.clearSel();this._buildEdges();this._refresh();this._pushTopo(_b);
+    renderPanel();toast('Beveled '+done+' edge'+(done>1?'s':''));},
+
   deleteSelected:function(){
     var mode=editState.mode,_b=this._topoSnapshot();
     if(mode==='face'){this.F=this.F.filter(function(f){return !f.sel;});}
@@ -1675,6 +1709,7 @@ function renderEditHud(){
         if(selN>0){
           if(mode==='face'){mr2.appendChild(el('button',{class:'hud-btn',text:'Extrude',onclick:function(){EM.extrude();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Inset',onclick:function(){EM.inset();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Separate',onclick:function(){EM.separateSelection();}}));}
           if(mode==='vert'){mr2.appendChild(el('button',{class:'hud-btn',text:'Merge',onclick:function(){EM.mergeSelected();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Smooth',onclick:function(){EM.smoothVerts();renderPanel();}}));}
+          if(mode==='edge'){mr2.appendChild(el('button',{class:'hud-btn',text:'Bevel',onclick:function(){EM.bevelEdges();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Bridge',onclick:function(){EM.bridgeEdges();renderPanel();}}));}
           mr2.appendChild(el('button',{class:'hud-btn',text:'Subdiv',onclick:function(){EM.subdivide();renderPanel();}}));
           mr2.appendChild(el('button',{class:'hud-btn',text:'Delete',onclick:function(){EM.deleteSelected();}}));
           mr2.appendChild(el('button',{class:'hud-btn',text:'Flip',onclick:function(){EM.flipNormals();}}));
@@ -1687,6 +1722,7 @@ function renderEditHud(){
       var qr=el('div',{class:'hud-row hud-compact'});
       if(mode==='face'){qr.appendChild(el('button',{class:'hud-btn',text:'Extrude',onclick:function(){EM.extrude();}}));qr.appendChild(el('button',{class:'hud-btn',text:'Inset',onclick:function(){EM.inset();}}));}
       if(mode==='vert'){qr.appendChild(el('button',{class:'hud-btn',text:'Merge',onclick:function(){EM.mergeSelected();}}));qr.appendChild(el('button',{class:'hud-btn',text:'Smooth',onclick:function(){EM.smoothVerts();renderPanel();}}));}
+      if(mode==='edge'){qr.appendChild(el('button',{class:'hud-btn',text:'Bevel',onclick:function(){EM.bevelEdges();}}));}
       qr.appendChild(el('button',{class:'hud-btn',text:'Del',onclick:function(){EM.deleteSelected();}}));
       hud.appendChild(qr);
     }
@@ -1738,6 +1774,10 @@ function renderEditHud(){
     if(mode==='vert'){
       or.appendChild(el('button',{class:'hud-btn',text:'Merge',onclick:function(){EM.mergeSelected();}}));
       or.appendChild(el('button',{class:'hud-btn',text:'Smooth',onclick:function(){EM.smoothVerts();renderPanel();}}));
+    }
+    if(mode==='edge'){
+      or.appendChild(el('button',{class:'hud-btn',text:'Bevel',onclick:function(){EM.bevelEdges();}}));
+      or.appendChild(el('button',{class:'hud-btn',text:'Bridge',onclick:function(){EM.bridgeEdges();renderPanel();}}));
     }
     or.appendChild(el('button',{class:'hud-btn',text:'Subdivide',onclick:function(){EM.subdivide();renderPanel();}}));
     or.appendChild(el('button',{class:'hud-btn',text:'Delete',onclick:function(){EM.deleteSelected();}}));
@@ -1828,12 +1868,12 @@ function panelEdit(b){
   ]));
   b.appendChild(el('div',{class:'grid2',style:'margin-top:6px'},[
     el('button',{text:'Weld Close',onclick:function(){EM.weldClose();renderPanel();}}),
-    el('button',{text:'Select All  [A]',onclick:function(){EM.selAll();}})
+    el('button',{text:'Bevel Edges  [B]',onclick:function(){EM.bevelEdges();}})
   ]));
 
   b.appendChild(el('hr',{class:'sep'}));
   b.appendChild(el('div',{class:'section-title',text:'Keyboard shortcuts (desktop)'}));
-  b.appendChild(el('p',{class:'small muted',text:'E=Extrude  I=Inset  S=Subdivide  X=Delete  A=Select All  drag selected → move  6=Open this tab'}));
+  b.appendChild(el('p',{class:'small muted',text:'E=Extrude  I=Inset  S=Subdivide  B=Bevel  X=Delete  A=Select All  drag selected → move  6=Open this tab'}));
 
   b.appendChild(el('hr',{class:'sep'}));
   b.appendChild(el('div',{class:'section-title',text:'Export to library'}));
@@ -1887,6 +1927,7 @@ window.addEventListener('keydown',function(e){var tag=(e.target&&e.target.tagNam
     if(z==='a'){e.preventDefault();EM.selAll();}
     else if(z==='e'){e.preventDefault();EM.extrude();}
     else if(z==='i'){EM.inset();}
+    else if(z==='b'){EM.bevelEdges();}
     else if(z==='x'){EM.deleteSelected();}
     else if(z==='s'&&!e.ctrlKey&&!e.metaKey){EM.subdivide();renderPanel();}
   }});
