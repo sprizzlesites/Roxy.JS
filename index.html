@@ -1857,6 +1857,24 @@ var EM={
     this._refresh();renderPanel();
     toast(added?'Loop selected (+'+added+' edges)':'No quad loop continues from here');},
 
+  // Grow the selection to the whole connected mesh island(s) it touches — verts that
+  // share a face are "linked". Handy after Duplicate/Separate or importing a multi-part
+  // mesh, where one EM holds several disconnected pieces (Blender's "Select Linked").
+  selectLinked:function(){
+    var self=this,n=this.V.length,parent=new Array(n);
+    for(var i=0;i<n;i++)parent[i]=i;
+    function find(x){while(parent[x]!==x){parent[x]=parent[parent[x]];x=parent[x];}return x;}
+    this.F.forEach(function(f){for(var i=1;i<f.vi.length;i++){var ra=find(f.vi[0]),rb=find(f.vi[i]);if(ra!==rb)parent[ra]=rb;}});
+    var seeds=this._selVertSet();
+    if(!seeds.size){toast('Select something first');return;}
+    var comps={};seeds.forEach(function(i){comps[find(i)]=1;});
+    var mode=editState.mode,added=0;
+    if(mode==='face')this.F.forEach(function(f){if(!f.sel&&f.vi.some(function(v){return comps[find(v)];})){f.sel=true;added++;}});
+    else if(mode==='edge')this.E.forEach(function(e){if(!e.sel&&(comps[find(e.a)]||comps[find(e.b)])){e.sel=true;added++;}});
+    else this.V.forEach(function(v,i){if(!v.sel&&comps[find(i)]){v.sel=true;added++;}});
+    this._refresh();renderPanel();
+    toast(added?'Selected linked (+'+added+')':'Island already fully selected');},
+
   bridgeEdges:function(){
     var sel=this.E.filter(function(e){return e.sel;});
     if(sel.length!==2){toast('Select exactly 2 edges (Edge mode)');return;}
@@ -2295,6 +2313,7 @@ function renderEditHud(){
         mr2.appendChild(el('button',{class:'hud-btn'+(editState.mirror?' on':''),text:'Mirror',onclick:function(){editState.mirror=!editState.mirror;EM._mirMap=null;EM._refresh();renderEditHud();renderPanel();}}));
         if(editState.mirror)mr2.appendChild(el('button',{class:'hud-btn',title:'Bake the mirrored half into real geometry',text:'Apply Mirror',onclick:function(){EM.applyMirror();}}));
         if(selN>0){
+          mr2.appendChild(el('button',{class:'hud-btn',title:'Grow to the whole connected island',text:'Linked',onclick:function(){EM.selectLinked();}}));
           if(mode==='face'){mr2.appendChild(el('button',{class:'hud-btn',text:'Extrude',onclick:function(){EM.extrude();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Inset',onclick:function(){EM.inset();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Dup',onclick:function(){EM.duplicateSelection();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Separate',onclick:function(){EM.separateSelection();}}));}
           if(mode==='vert'){mr2.appendChild(el('button',{class:'hud-btn',text:'Merge',onclick:function(){EM.mergeSelected();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Smooth',onclick:function(){EM.smoothVerts();renderPanel();}}));}
           if(mode==='edge'){mr2.appendChild(el('button',{class:'hud-btn',text:'Loop',onclick:function(){EM.selectLoops();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Bevel',onclick:function(){EM.bevelEdges();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Bridge',onclick:function(){EM.bridgeEdges();renderPanel();}}));mr2.appendChild(el('button',{class:'hud-btn',title:'Cap a whole boundary loop with one face',text:'Fill',onclick:function(){EM.fillHole();}}));}
@@ -2362,6 +2381,7 @@ function renderEditHud(){
 
   if(selN>0){
     var or=el('div',{class:'hud-row'});
+    or.appendChild(el('button',{class:'hud-btn',title:'Grow to the whole connected island',text:'Linked',onclick:function(){EM.selectLinked();}}));
     if(mode==='face'){
       or.appendChild(el('button',{class:'hud-btn',text:'Extrude',onclick:function(){EM.extrude();}}));
       or.appendChild(el('button',{class:'hud-btn',text:'Inset',onclick:function(){EM.inset();}}));
@@ -2501,6 +2521,8 @@ function panelEdit(b){
     el('button',{text:'Select Loop  [L]',onclick:function(){EM.selectLoops();}}),
     el('button',{text:'Duplicate  [D]',onclick:function(){EM.duplicateSelection();}})
   ]));
+  b.appendChild(el('button',{style:'width:100%;margin-top:6px',title:'Grow the selection to the whole connected mesh island',
+    text:'Select Linked',onclick:function(){EM.selectLinked();}}));
 
   b.appendChild(el('hr',{class:'sep'}));
   b.appendChild(el('div',{class:'section-title',text:'Keyboard shortcuts (desktop)'}));
