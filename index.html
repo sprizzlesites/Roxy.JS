@@ -1454,13 +1454,13 @@ var EM={
     // have real quad topology to work with from the moment a user adds a primitive.
     if(type==='Cube'){this.clear();this._quadBox(s,2);this._weld(1e-4);this._buildEdges();this._refresh();return;}
     if(type==='Plane'){this.clear();this._quadPlane(s,4);this._weld(1e-4);this._buildEdges();this._refresh();return;}
+    if(type==='Cylinder'){this.clear();this._quadCylinder(s*.5,s,8,1);this._weld(1e-4);this._buildEdges();this._refresh();return;}
+    if(type==='Prism'){this.clear();this._quadCylinder(s*.5,s,6,1);this._weld(1e-4);this._buildEdges();this._refresh();return;}
     if(type==='Sphere')geo=new THREE.SphereGeometry(s*.6,8,6);
-    else if(type==='Cylinder')geo=new THREE.CylinderGeometry(s*.5,s*.5,s,8);
     else if(type==='Cone')geo=new THREE.ConeGeometry(s*.5,s,8);
     else if(type==='Torus')geo=new THREE.TorusGeometry(s*.5,s*.2,6,10);
     else if(type==='Icosphere')geo=new THREE.IcosahedronGeometry(s*.6,1);
     else if(type==='Pyramid')geo=new THREE.ConeGeometry(s*.55,s,4);
-    else if(type==='Prism')geo=new THREE.CylinderGeometry(s*.5,s*.5,s,6);
     else geo=new THREE.BoxGeometry(s,s,s,2,2,2);
     this._fromGeo(geo);geo.dispose();},
 
@@ -1490,6 +1490,28 @@ var EM={
   _quadPlane:function(s,seg){
     var V=[],F=[];
     this._gridFace(V,F,[0,0,0],[1,0,0],[0,0,-1],s,seg);
+    this.V=V;this.F=F;},
+
+  // Native-quad cylinder: a grid of side quads (real loop-cuttable ring topology)
+  // capped with two n-gon fans, built the way Blender's default cylinder is —
+  // no triangulated caps, no apex-pinch vertex duplication down the side.
+  _quadCylinder:function(r,h,radialSeg,heightSeg){
+    var V=[],F=[],hh=h/2,grid=[];
+    for(var a=0;a<=radialSeg;a++){
+      var th=a/radialSeg*Math.PI*2,col=[];
+      for(var hI=0;hI<=heightSeg;hI++){
+        var vtx=new THREE.Vector3(r*Math.cos(th),-hh+h*hI/heightSeg,r*Math.sin(th));
+        vtx.sel=false;vtx.u0=a/radialSeg;vtx.v0=1-hI/heightSeg;
+        col.push(V.length);V.push(vtx);}
+      grid.push(col);}
+    for(var a=0;a<radialSeg;a++)for(var hI=0;hI<heightSeg;hI++)
+      F.push({vi:[grid[a][hI],grid[a][hI+1],grid[a+1][hI+1],grid[a+1][hI]],sel:false});
+    var botVi=[];
+    for(var a=0;a<radialSeg;a++){var th=a/radialSeg*Math.PI*2;var vtx=new THREE.Vector3(r*Math.cos(th),-hh,r*Math.sin(th));vtx.sel=false;botVi.push(V.length);V.push(vtx);}
+    F.push({vi:botVi,sel:false});
+    var topVi=[];
+    for(var a=radialSeg-1;a>=0;a--){var th=a/radialSeg*Math.PI*2;var vtx=new THREE.Vector3(r*Math.cos(th),hh,r*Math.sin(th));vtx.sel=false;topVi.push(V.length);V.push(vtx);}
+    F.push({vi:topVi,sel:false});
     this.V=V;this.F=F;},
 
   fromModel:function(m,pi){
