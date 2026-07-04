@@ -206,7 +206,7 @@ canvas{display:block;touch-action:none}
 #paintHud.on{display:flex}
 #phColor{width:34px;height:32px;border:1px solid var(--line);border-radius:9px;background:none;padding:2px}
 #phSize{width:120px;touch-action:none}
-#phErase{font-size:12px;padding:8px 11px;min-height:0!important}
+#phErase,#phEyedrop{font-size:12px;padding:8px 11px;min-height:0!important}
 #hint{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);max-width:88%;z-index:9;
   padding:9px 14px;border-radius:999px;font-size:12px;color:rgba(255,236,244,.92);text-align:center;cursor:pointer;
   background:rgba(26,20,14,.6);border:1px solid rgba(255,255,255,.14);
@@ -264,6 +264,7 @@ canvas{display:block;touch-action:none}
       <input type="color" id="phColor" value="#d8466a" title="Brush color">
       <input type="range" id="phSize" min="4" max="120" step="1" value="38" title="Brush size">
       <button id="phErase" title="Eraser">Erase</button>
+      <button id="phEyedrop" title="Eyedropper: pick a color from the texture">⏺</button>
     </div>
     <div id="quickUndo">
       <button id="quUndo" title="Undo">↶</button>
@@ -431,6 +432,7 @@ dom.addEventListener('pointerdown',function(e){
   dom.setPointerCapture(e.pointerId);ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY});
   clickStart={x:e.clientX,y:e.clientY,t:Date.now(),id:e.pointerId};
   if(active.view==='paint'&&paint.mode3d&&ptrs.size===1){
+    if(paint.eyedrop){pickColorAt3D(e.clientX,e.clientY);return;}
     paint.drawing=true;paint.last=null;paint._last3d=null;paint._3dSnap=paint.ctx.getImageData(0,0,1024,1024);
     do3dPaint(e.clientX,e.clientY);}
   else if(active.view==='edit'&&ptrs.size===1){
@@ -835,7 +837,7 @@ function exportOBJ(root,name){root.updateWorldMatrix(true,true);var rootInv=new 
   toast('Exported '+name+(texFiles.length?' + .mtl + texture png':''));}
 
 /* ---------------- paint ---------------- */
-var paint={cv:$('#paintCanvas'),ctx:null,part:0,color:'#d8466a',size:38,soft:0,erase:false,drawing:false,last:null,tex:null,mode3d:false,_3dSnap:null,_lastFaceIdx:-1,_last3d:null};
+var paint={cv:$('#paintCanvas'),ctx:null,part:0,color:'#d8466a',size:38,soft:0,erase:false,eyedrop:false,drawing:false,last:null,tex:null,mode3d:false,_3dSnap:null,_lastFaceIdx:-1,_last3d:null};
 paint.ctx=paint.cv.getContext('2d');
 function paintInit(){var m=getModel(state.activeId);var part=m&&m.userData.parts[paint.part];var mat=part&&part.mat;
   if(paint.tex&&mat&&mat.map===paint.tex){applyPaintTex();return;}
@@ -856,8 +858,29 @@ function paintPattern(kind){var c=paint.ctx,S=1024,before=c.getImageData(0,0,S,S
   var after=c.getImageData(0,0,S,S),tx=paint.tex;paint.tex.needsUpdate=true;invalidate();
   History.push(function(){c.putImageData(before,0,0);tx.needsUpdate=true;invalidate();},function(){c.putImageData(after,0,0);tx.needsUpdate=true;invalidate();});}
 function paintUV(x,y){var r=paint.cv.getBoundingClientRect();return {x:(x-r.left)/r.width*1024,y:(y-r.top)/r.height*1024};}
+
+/* ----- eyedropper: pick brush color from the texture, 2D canvas or 3D surface ----- */
+function setPaintColor(hex){
+  paint.color=hex;paint.erase=false;paint.eyedrop=false;
+  var col=$('#panelBody input[type=color]');if(col)col.value=hex;
+  syncPaintHud();toast('Picked '+hex);}
+function pickColorAt2D(x,y){
+  x=Math.max(0,Math.min(1023,Math.round(x)));y=Math.max(0,Math.min(1023,Math.round(y)));
+  var d=paint.ctx.getImageData(x,y,1,1).data;
+  setPaintColor('#'+('000000'+((d[0]<<16)|(d[1]<<8)|d[2]).toString(16)).slice(-6));}
+function pickColorAt3D(clientX,clientY){
+  var m=getModel(state.activeId);if(!m||!m.userData.parts[paint.part])return;
+  ensureAtlasUVs(m,paint.part); // keep UV space consistent with do3dPaint's atlas
+  var mesh=m.userData.parts[paint.part].mesh,cam=active.vs.cam,r=dom.getBoundingClientRect();
+  var ray=new THREE.Raycaster();
+  ray.setFromCamera({x:((clientX-r.left)/r.width)*2-1,y:-((clientY-r.top)/r.height)*2+1},cam);
+  var hits=ray.intersectObject(mesh,false);
+  if(!hits.length||!hits[0].uv)return;
+  pickColorAt2D(hits[0].uv.x*1024,(1-hits[0].uv.y)*1024);}
 (function bindPaint(){var c=paint.cv;var snap=null;
-  c.addEventListener('pointerdown',function(e){if(paint.mode3d)return;c.setPointerCapture(e.pointerId);paint.drawing=true;paint.last=null;snap=paint.ctx.getImageData(0,0,1024,1024);var u=paintUV(e.clientX,e.clientY);paintAt(u.x,u.y);});
+  c.addEventListener('pointerdown',function(e){if(paint.mode3d)return;var u=paintUV(e.clientX,e.clientY);
+    if(paint.eyedrop){pickColorAt2D(u.x,u.y);return;}
+    c.setPointerCapture(e.pointerId);paint.drawing=true;paint.last=null;snap=paint.ctx.getImageData(0,0,1024,1024);paintAt(u.x,u.y);});
   c.addEventListener('pointermove',function(e){if(paint.mode3d||!paint.drawing)return;var u=paintUV(e.clientX,e.clientY);paintAt(u.x,u.y);});
   function up(){if(!paint.drawing)return;paint.drawing=false;paint.last=null;if(snap){var before=snap,after=paint.ctx.getImageData(0,0,1024,1024);var tx=paint.tex;
     History.push(function(){paint.ctx.putImageData(before,0,0);tx.needsUpdate=true;invalidate();},function(){paint.ctx.putImageData(after,0,0);tx.needsUpdate=true;invalidate();});snap=null;}}
@@ -1006,11 +1029,13 @@ function panelViewer(b){var m=getModel(state.activeId);
 /* ----- floating paint HUD (3D paint mode) ----- */
 function syncPaintHud(){var ph=$('#paintHud');if(!ph)return;
   var on=active.view==='paint'&&paint.mode3d;ph.classList.toggle('on',on);
-  if(on){$('#phColor').value=paint.color;$('#phSize').value=paint.size;$('#phErase').className=paint.erase?'on':'';}}
-(function(){var pc=$('#phColor'),ps=$('#phSize'),pe=$('#phErase');if(!pc)return;
+  if(on){$('#phColor').value=paint.color;$('#phSize').value=paint.size;$('#phErase').className=paint.erase?'on':'';
+    var pk=$('#phEyedrop');if(pk)pk.className=paint.eyedrop?'on':'';}}
+(function(){var pc=$('#phColor'),ps=$('#phSize'),pe=$('#phErase'),pk=$('#phEyedrop');if(!pc)return;
   pc.addEventListener('input',function(){paint.color=this.value;paint.erase=false;pe.className='';});
   ps.addEventListener('input',function(){paint.size=+this.value;});
   pe.addEventListener('click',function(){paint.erase=!paint.erase;this.className=paint.erase?'on':'';});
+  if(pk)pk.addEventListener('click',function(){paint.eyedrop=!paint.eyedrop;this.className=paint.eyedrop?'on':'';});
 })();
 
 /* ----- Paint panel ----- */
@@ -1034,10 +1059,13 @@ function panelPaint(b){var m=getModel(state.activeId);b.appendChild(el('h2',{tex
   b.appendChild(slider('Brush size',2,160,paint.size,1,function(x){paint.size=x;syncPaintHud();}));
   b.appendChild(slider('Brush softness',0,1,paint.soft,.01,function(x){paint.soft=x;}));
   var erBtn=el('button',{text:'Eraser',onclick:function(){paint.erase=!paint.erase;updEr();}});function updEr(){erBtn.className=paint.erase?'on':'';syncPaintHud();}
-  b.appendChild(el('div',{class:'grid2'},[erBtn,el('button',{text:'Clear',onclick:function(){paint.ctx.globalCompositeOperation='source-over';paint.ctx.fillStyle='#ffffff';paint.ctx.fillRect(0,0,1024,1024);paint.tex.needsUpdate=true;}})]));
-  b.appendChild(el('div',{class:'grid2',style:'margin-top:8px'},[el('button',{text:'Fill color',onclick:function(){paint.ctx.globalCompositeOperation='source-over';paint.ctx.fillStyle=paint.color;paint.ctx.fillRect(0,0,1024,1024);paint.tex.needsUpdate=true;}}),
-    el('button',{text:'Noise fill',onclick:function(){var n=fbm(512,[{s:8,a:.5},{s:32,a:.4},{s:128,a:.3}]);paint.ctx.globalCompositeOperation='source-over';paint.ctx.drawImage(n,0,0,1024,1024);paint.tex.needsUpdate=true;}})]));
-  b.appendChild(el('div',{class:'grid2',style:'margin-top:8px'},[el('button',{text:'Show UVs',onclick:paintDrawUV}),el('button',{text:'Stamp image',onclick:function(){imgTarget='paint';$('#fileImg').click();}})]));
+  var eyeBtn=el('button',{title:'Pick a color from the texture',text:'Eyedropper',onclick:function(){paint.eyedrop=!paint.eyedrop;updEye();}});function updEye(){eyeBtn.className=paint.eyedrop?'on':'';syncPaintHud();}
+  b.appendChild(el('div',{class:'grid2'},[erBtn,eyeBtn]));
+  b.appendChild(el('div',{class:'grid2',style:'margin-top:8px'},[el('button',{text:'Clear',onclick:function(){paint.ctx.globalCompositeOperation='source-over';paint.ctx.fillStyle='#ffffff';paint.ctx.fillRect(0,0,1024,1024);paint.tex.needsUpdate=true;}}),
+    el('button',{text:'Fill color',onclick:function(){paint.ctx.globalCompositeOperation='source-over';paint.ctx.fillStyle=paint.color;paint.ctx.fillRect(0,0,1024,1024);paint.tex.needsUpdate=true;}})]));
+  b.appendChild(el('div',{class:'grid2',style:'margin-top:8px'},[el('button',{text:'Noise fill',onclick:function(){var n=fbm(512,[{s:8,a:.5},{s:32,a:.4},{s:128,a:.3}]);paint.ctx.globalCompositeOperation='source-over';paint.ctx.drawImage(n,0,0,1024,1024);paint.tex.needsUpdate=true;}}),
+    el('button',{text:'Show UVs',onclick:paintDrawUV})]));
+  b.appendChild(el('button',{style:'width:100%;margin-top:8px',text:'Stamp image',onclick:function(){imgTarget='paint';$('#fileImg').click();}}));
   b.appendChild(el('div',{class:'section-title',text:'Patterns (use brush color)'}));
   var pr=el('div',{class:'chiprow'});
   [['sprinkles','Sprinkles'],['dots','Dots'],['stripes','Stripes'],['checker','Checker'],['gradient','Gradient']].forEach(function(p){pr.appendChild(el('button',{class:'chip',text:p[1],onclick:function(){paintPattern(p[0]);}}));});
