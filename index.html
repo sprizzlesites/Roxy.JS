@@ -1743,6 +1743,20 @@ var EM={
     this.F.forEach(function(f){if(!hasSel||f.sel)f.vi.reverse();});
     this._refresh();this._pushTopo(_b);},
 
+  // Heuristic auto-orient: flip any face whose normal points toward the mesh's
+  // centroid instead of away from it. Works well for star-convex / primitive-like
+  // shapes (most sculpted/hard-surface models); not a general BSP solution.
+  recalcNormals:function(){
+    var self=this,_b=this._topoSnapshot(),hasSel=this.F.some(function(f){return f.sel;});
+    var c=new THREE.Vector3();this.V.forEach(function(v){c.add(v);});c.divideScalar(this.V.length||1);
+    var flipped=0;
+    this.F.forEach(function(f,fi){
+      if(hasSel&&!f.sel)return;
+      var n=self._faceNormal(fi),fc=self._faceCenter(fi);
+      if(n.dot(fc.clone().sub(c))<0){f.vi.reverse();flipped++;}});
+    this._refresh();this._pushTopo(_b);
+    toast(flipped?'Flipped '+flipped+' face'+(flipped>1?'s':'')+' to face outward':'Normals already consistent');},
+
   smoothVerts:function(){
     var self=this,snap=this.V.map(function(v){return v.clone();}),newPos=this.V.map(function(v){return v.clone();});
     var count=new Array(this.V.length).fill(0),sum=this.V.map(function(){return new THREE.Vector3();});
@@ -2067,6 +2081,7 @@ function renderEditHud(){
           mr2.appendChild(el('button',{class:'hud-btn',text:'Subdiv',onclick:function(){EM.subdivide();renderPanel();}}));
           mr2.appendChild(el('button',{class:'hud-btn',text:'Delete',onclick:function(){EM.deleteSelected();}}));
           mr2.appendChild(el('button',{class:'hud-btn',text:'Flip',onclick:function(){EM.flipNormals();}}));
+          mr2.appendChild(el('button',{class:'hud-btn',text:'Recalc',onclick:function(){EM.recalcNormals();}}));
         }
         mr2.appendChild(el('button',{class:'hud-btn',text:'Save →',onclick:function(){EM.exportToModel();}}));
         hud.appendChild(mr2);
@@ -2141,6 +2156,7 @@ function renderEditHud(){
     or.appendChild(el('button',{class:'hud-btn',text:'Subdivide',onclick:function(){EM.subdivide();renderPanel();}}));
     or.appendChild(el('button',{class:'hud-btn',text:'Delete',onclick:function(){EM.deleteSelected();}}));
     or.appendChild(el('button',{class:'hud-btn',text:'Flip',onclick:function(){EM.flipNormals();}}));
+    or.appendChild(el('button',{class:'hud-btn',text:'Recalc',onclick:function(){EM.recalcNormals();}}));
     hud.appendChild(or);
   }
 
@@ -2232,6 +2248,8 @@ function panelEdit(b){
     el('button',{text:'Delete  [X]',onclick:function(){EM.deleteSelected();}}),
     el('button',{text:'Flip Normals',onclick:function(){EM.flipNormals();}})
   ]));
+  b.appendChild(el('button',{style:'width:100%;margin-top:6px',title:'Auto-flip any face pointing inward toward the mesh center',
+    text:'Recalculate Normals (Outside)  [N]',onclick:function(){EM.recalcNormals();}}));
   b.appendChild(el('div',{class:'grid2',style:'margin-top:6px'},[
     el('button',{text:'Separate Faces',onclick:function(){EM.separateSelection();}}),
     el('button',{text:'Bridge Edges',onclick:function(){EM.bridgeEdges();renderPanel();}})
@@ -2251,7 +2269,7 @@ function panelEdit(b){
 
   b.appendChild(el('hr',{class:'sep'}));
   b.appendChild(el('div',{class:'section-title',text:'Keyboard shortcuts (desktop)'}));
-  b.appendChild(el('p',{class:'small muted',text:'E=Extrude  I=Inset  S=Subdivide  B=Bevel  L=Loop Select  D=Duplicate  X=Delete  A=Select All  drag selected → move  6=Open this tab'}));
+  b.appendChild(el('p',{class:'small muted',text:'E=Extrude  I=Inset  S=Subdivide  B=Bevel  L=Loop Select  N=Recalc Normals  D=Duplicate  X=Delete  A=Select All  drag selected → move  6=Open this tab'}));
 
   b.appendChild(el('hr',{class:'sep'}));
   b.appendChild(el('div',{class:'section-title',text:'Export to library'}));
@@ -2309,6 +2327,7 @@ window.addEventListener('keydown',function(e){var tag=(e.target&&e.target.tagNam
     else if(z==='i'){EM.inset();}
     else if(z==='b'){EM.bevelEdges();}
     else if(z==='l'){EM.selectLoops();}
+    else if(z==='n'){EM.recalcNormals();}
     else if(z==='d'&&!e.ctrlKey&&!e.metaKey){e.preventDefault();EM.duplicateSelection();}
     else if(z==='x'){EM.deleteSelected();}
     else if(z==='s'&&!e.ctrlKey&&!e.metaKey){EM.subdivide();renderPanel();}
