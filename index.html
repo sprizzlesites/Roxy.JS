@@ -1867,6 +1867,30 @@ var EM={
     this.F.push({vi:(d1<=d2?[a1,b1,b2,a2]:[a1,b1,a2,b2]),sel:false});
     this.clearSel();this._buildEdges();this._refresh();this._pushTopo(_b);toast('Bridged');},
 
+  // Cap a whole boundary loop (a hole left by Delete, or an open primitive edge)
+  // with one new n-gon face, instead of bridging pairs of edges by hand.
+  fillHole:function(){
+    var self=this,sel=this.E.filter(function(e){return e.sel;});
+    if(sel.length<3){toast('Select the boundary edges around a hole (3+, Edge mode)');return;}
+    if(sel.some(function(e){return e.fi.length!==1;})){toast('Selected edges must all be open boundary (1 face) — not shared by 2 faces');return;}
+    // Each boundary edge's lone face "sees" it in one direction (a->b or b->a) as part of
+    // that face's own outward-wound vi list; the cap must traverse each edge the OPPOSITE
+    // way so the new face's winding faces outward too, on the far side of the hole.
+    var next={};
+    for(var i=0;i<sel.length;i++){
+      var e=sel[i],f=this.F[e.fi[0]],vi=f.vi,ia=vi.indexOf(e.a);
+      if(ia<0)continue;
+      var aToB=vi[(ia+1)%vi.length]===e.b;
+      if(aToB)next[e.b]=e.a;else next[e.a]=e.b;}
+    var startV=sel[0].a,loop=[startV],cur=next[startV],guard=0;
+    while(cur!==undefined&&cur!==startV&&guard++<sel.length+1){loop.push(cur);cur=next[cur];}
+    if(cur!==startV||loop.length!==sel.length){toast('Selected edges don\'t form a single closed loop');return;}
+    var _b=this._topoSnapshot();
+    this.clearSel();
+    this.F.push({vi:loop,sel:true});
+    this._buildEdges();this._refresh();this._pushTopo(_b);
+    renderPanel();toast('Filled hole with a '+loop.length+'-sided face');},
+
   // Chamfer-bevel selected interior edges: each edge splits into a flat strip.
   // Edges sharing a vertex with an already-beveled edge are skipped this pass.
   bevelEdges:function(){
@@ -2273,7 +2297,7 @@ function renderEditHud(){
         if(selN>0){
           if(mode==='face'){mr2.appendChild(el('button',{class:'hud-btn',text:'Extrude',onclick:function(){EM.extrude();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Inset',onclick:function(){EM.inset();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Dup',onclick:function(){EM.duplicateSelection();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Separate',onclick:function(){EM.separateSelection();}}));}
           if(mode==='vert'){mr2.appendChild(el('button',{class:'hud-btn',text:'Merge',onclick:function(){EM.mergeSelected();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Smooth',onclick:function(){EM.smoothVerts();renderPanel();}}));}
-          if(mode==='edge'){mr2.appendChild(el('button',{class:'hud-btn',text:'Loop',onclick:function(){EM.selectLoops();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Bevel',onclick:function(){EM.bevelEdges();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Bridge',onclick:function(){EM.bridgeEdges();renderPanel();}}));}
+          if(mode==='edge'){mr2.appendChild(el('button',{class:'hud-btn',text:'Loop',onclick:function(){EM.selectLoops();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Bevel',onclick:function(){EM.bevelEdges();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Bridge',onclick:function(){EM.bridgeEdges();renderPanel();}}));mr2.appendChild(el('button',{class:'hud-btn',title:'Cap a whole boundary loop with one face',text:'Fill',onclick:function(){EM.fillHole();}}));}
           mr2.appendChild(el('button',{class:'hud-btn',text:'Subdiv',onclick:function(){EM.subdivide();renderPanel();}}));
           mr2.appendChild(el('button',{class:'hud-btn',text:'Delete',onclick:function(){EM.deleteSelected();}}));
           mr2.appendChild(el('button',{class:'hud-btn',text:'Flip',onclick:function(){EM.flipNormals();}}));
@@ -2352,6 +2376,7 @@ function renderEditHud(){
       or.appendChild(el('button',{class:'hud-btn',text:'Loop',onclick:function(){EM.selectLoops();}}));
       or.appendChild(el('button',{class:'hud-btn',text:'Bevel',onclick:function(){EM.bevelEdges();}}));
       or.appendChild(el('button',{class:'hud-btn',text:'Bridge',onclick:function(){EM.bridgeEdges();renderPanel();}}));
+      or.appendChild(el('button',{class:'hud-btn',title:'Cap a whole boundary loop with one face',text:'Fill',onclick:function(){EM.fillHole();}}));
     }
     or.appendChild(el('button',{class:'hud-btn',text:'Subdivide',onclick:function(){EM.subdivide();renderPanel();}}));
     or.appendChild(el('button',{class:'hud-btn',text:'Delete',onclick:function(){EM.deleteSelected();}}));
@@ -2462,6 +2487,8 @@ function panelEdit(b){
     el('button',{text:'Separate Faces',onclick:function(){EM.separateSelection();}}),
     el('button',{text:'Bridge Edges',onclick:function(){EM.bridgeEdges();renderPanel();}})
   ]));
+  b.appendChild(el('button',{style:'width:100%;margin-top:6px',title:'Select all the boundary edges around a hole (Edge mode), then cap it with one face',
+    text:'Fill Hole',onclick:function(){EM.fillHole();}}));
   b.appendChild(el('div',{class:'grid2',style:'margin-top:6px'},[
     el('button',{text:'Merge Verts',onclick:function(){EM.mergeSelected();}}),
     el('button',{text:'Smooth',onclick:function(){EM.smoothVerts();renderPanel();}})
