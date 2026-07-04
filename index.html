@@ -27,8 +27,8 @@ input[type=text],input[type=number],select{font-family:inherit;font-size:13px;co
   border:1px solid var(--line);border-radius:9px;padding:8px 9px;width:100%}
 input[type=color]{width:34px;height:30px;border:1px solid var(--line);border-radius:8px;background:none;padding:2px}
 label.fld{display:block;font-size:11px;letter-spacing:.04em;color:var(--muted);margin:0 0 5px}
-.sldval{cursor:pointer;border-bottom:1px dashed var(--faint);padding-bottom:1px}
-.sldval:hover{color:var(--ink);border-bottom-color:var(--pink)}
+.tap-edit{cursor:pointer;border-bottom:1px dashed var(--faint);padding-bottom:1px}
+.tap-edit:hover{color:var(--ink);border-bottom-color:var(--pink)}
 .spread{display:flex;gap:8px;align-items:center}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:11px}
@@ -538,6 +538,30 @@ function setActiveModel(id){state.activeId=id;var holder=viewerScene.userData.mo
   var m=getModel(id);if(m){holder.add(m);frameObject(m,viewState.viewer);}invalidate();if(active.view==='viewer'||active.view==='paint')renderPanel();}
 function getModel(id){for(var i=0;i<state.models.length;i++)if(state.models[i].userData.id===id)return state.models[i];return null;}
 function addModel(m){state.models.push(m);scheduleAutosave();return m;}
+function renameModel(m){
+  var nv=prompt('Rename model:',m.userData.name);if(nv==null)return;nv=nv.trim();if(!nv||nv===m.userData.name)return;
+  var old=m.userData.name;m.userData.name=nv;
+  renderAssets();renderPanel();scheduleAutosave();toast('Renamed to "'+nv+'"');
+  History.push(function(){m.userData.name=old;renderAssets();renderPanel();},
+               function(){m.userData.name=nv;renderAssets();renderPanel();});}
+function duplicateModel(m){
+  var parts=m.userData.parts.map(function(p){return {geo:p.mesh.geometry.clone(),mat:p.mat.clone(),_hasProperUVs:p._hasProperUVs};});
+  var name=m.userData.name+' Copy';
+  var nm=makeModel(name,parts);
+  addModel(nm);setActiveModel(nm.userData.id);toast('"'+name+'" duplicated');renderAssets();}
+function deleteModel(id){
+  var idx=state.models.findIndex(function(mm){return mm.userData.id===id;});if(idx<0)return;
+  var m=state.models[idx],wasActive=(state.activeId===id);
+  state.models.splice(idx,1);
+  if(wasActive){var next=state.models[0];state.activeId=next?next.userData.id:null;
+    if(next)setActiveModel(next.userData.id);
+    else{var holder=viewerScene.userData.modelHolder;while(holder.children.length)holder.remove(holder.children[0]);invalidate();}}
+  renderAssets();if(active.view==='viewer'||active.view==='paint')renderPanel();
+  toast('"'+m.userData.name+'" deleted');scheduleAutosave();
+  History.push(function(){state.models.splice(idx,0,m);if(wasActive)setActiveModel(id);renderAssets();renderPanel();},
+    function(){var i2=state.models.findIndex(function(mm){return mm.userData.id===id;});if(i2>=0)state.models.splice(i2,1);
+      if(state.activeId===id){var nx=state.models[0];state.activeId=nx?nx.userData.id:null;if(nx)setActiveModel(nx.userData.id);}
+      renderAssets();renderPanel();});}
 
 function frameObject(obj,vs){var box=new THREE.Box3().setFromObject(obj);if(box.isEmpty())return;var s=new THREE.Vector3();box.getSize(s);
   var c=new THREE.Vector3();box.getCenter(c);var r=Math.max(s.x,s.y,s.z)*0.5||1;vs.tx=c.x;vs.ty=c.y;vs.tz=c.z;vs.rad=r*3.2;}
@@ -834,7 +858,7 @@ function showHint(v){var h=$('#hint');if(!h||!HINTS[v])return;
   clearTimeout(hintTimer);hintTimer=setTimeout(function(){h.classList.remove('show');},6000);}
 $('#hint').addEventListener('click',function(){this.classList.remove('show');});
 
-function slider(label,min,max,val,step,on){var out=el('span',{class:'muted small sldval',text:(+val).toFixed(2),title:'Tap to enter an exact value'});var startV=null;
+function slider(label,min,max,val,step,on){var out=el('span',{class:'muted small tap-edit',text:(+val).toFixed(2),title:'Tap to enter an exact value'});var startV=null;
   var r=el('input',{type:'range',min:min,max:max,step:step||.01,value:val,
     onpointerdown:function(e){startV=+e.target.value;},
     oninput:function(e){out.textContent=(+e.target.value).toFixed(2);on(+e.target.value);invalidate();},
@@ -880,6 +904,10 @@ function panelViewer(b){var m=getModel(state.activeId);
   b.appendChild(el('h2',{text:'Model'}));b.appendChild(el('p',{class:'sub',text:m?m.userData.name:'No model'}));
   var sel=el('select',{onchange:function(e){setActiveModel(e.target.value);}});state.models.forEach(function(mm){sel.appendChild(el('option',{value:mm.userData.id,text:mm.userData.name}));});if(m)sel.value=m.userData.id;
   b.appendChild(el('label',{class:'fld',text:'Active model'}));b.appendChild(sel);
+  if(m)b.appendChild(el('div',{class:'grid2',style:'margin-top:8px'},[
+    el('button',{text:'Rename',onclick:function(){renameModel(m);}}),
+    el('button',{text:'Duplicate',onclick:function(){duplicateModel(m);}})]));
+  if(m)b.appendChild(el('button',{style:'width:100%;margin-top:6px',text:'Delete model',onclick:function(){deleteModel(m.userData.id);}}));
   b.appendChild(el('div',{class:'section-title',text:'Lighting / Environment'}));
   var ev=el('select',{onchange:function(e){applyEnv(viewerScene,e.target.value);}});ENVS.forEach(function(p){ev.appendChild(el('option',{value:p.id,text:p.name}));});ev.value=viewerScene.userData.envId;b.appendChild(ev);
   b.appendChild(el('div',{class:'section-title',text:'Material'}));
@@ -1089,9 +1117,10 @@ function renderAssets(){var body=$('#assetsBody');body.innerHTML='';body.appendC
     var card=el('div',{class:'thumb'});
     var url=modelThumb(m);
     if(url)card.appendChild(el('img',{class:'thumb-img',src:url,alt:m.userData.name}));
-    card.appendChild(el('div',{class:'nm',text:m.userData.name}));
+    card.appendChild(el('div',{class:'nm tap-edit',title:'Tap to rename',text:m.userData.name,onclick:function(){renameModel(m);}}));
     card.appendChild(el('div',{class:'mt',text:parts+' part'+(parts===1?'':'s')+' · '+m.userData.mods.length+' modifier'+(m.userData.mods.length===1?'':'s')}));
     card.appendChild(el('div',{class:'grid2'},[el('button',{text:'Open',onclick:function(){setActiveModel(m.userData.id);setView('viewer');}}),el('button',{text:'To Scene',onclick:function(){addPlacement(m.userData.id);toast('Added to scene');}})]));
+    card.appendChild(el('div',{class:'grid2'},[el('button',{text:'Duplicate',onclick:function(){duplicateModel(m);}}),el('button',{text:'Delete',onclick:function(){deleteModel(m.userData.id);}})]));
     card.appendChild(el('div',{class:'grid2'},[el('button',{text:'Export .glb',onclick:function(){exportGLB(m,m.userData.name+'.glb');}}),el('button',{text:'Export .obj',onclick:function(){exportOBJ(m,m.userData.name+'.obj');}})]));
     grid.appendChild(card);});
   body.appendChild(grid);}
