@@ -273,11 +273,11 @@ canvas{display:block;touch-action:none}
       <div class="paint2d"><canvas id="paintCanvas" width="1024" height="1024"></canvas></div>
       <div class="paint-prev gl-slot" id="slot-paint"></div>
     </section>
-    <section class="view" data-view="build"><div class="gl-slot" id="slot-build"></div><button class="fab" id="fabBuild">+</button></section>
-    <section class="view" data-view="scene"><div class="gl-slot" id="slot-scene"></div><button class="fab" id="fabScene">+</button></section>
+    <section class="view" data-view="build"><div class="gl-slot" id="slot-build"></div><button class="fab" id="fabBuild" title="Add a cube" aria-label="Add a cube">+</button></section>
+    <section class="view" data-view="scene"><div class="gl-slot" id="slot-scene"></div><button class="fab" id="fabScene" title="Add a model to the scene" aria-label="Add a model to the scene">+</button></section>
     <section class="view" data-view="assets"><div class="assets-body" id="assetsBody"></div></section>
     <section class="view" data-view="edit"><div class="gl-slot" id="slot-edit"></div><div id="editHud"></div></section>
-    <canvas id="rotBall" width="80" height="80"></canvas>
+    <canvas id="rotBall" width="80" height="80" role="img" aria-label="Orbit gizmo — drag to rotate the view"></canvas>
     <div id="zoomKnob">
       <button class="zk-btn" id="zkIn" title="Zoom in">+</button>
       <input id="zkSlider" type="range" min="1" max="100" value="50">
