@@ -1449,17 +1449,48 @@ var EM={
     EM._srcTex=null;
     var mt=this._mat;mt.map=null;mt.color.setHex(0xbba898);mt.transparent=false;mt.opacity=1;mt.needsUpdate=true;
     var s=1,geo;
-    if(type==='Cube')geo=new THREE.BoxGeometry(s,s,s,2,2,2);
-    else if(type==='Sphere')geo=new THREE.SphereGeometry(s*.6,8,6);
+    // Cube/Plane are built as native quads (not via THREE's triangulating BoxGeometry/
+    // PlaneGeometry) so Select Loop and Loop Cut — which both only walk 4-vertex faces —
+    // have real quad topology to work with from the moment a user adds a primitive.
+    if(type==='Cube'){this.clear();this._quadBox(s,2);this._weld(1e-4);this._buildEdges();this._refresh();return;}
+    if(type==='Plane'){this.clear();this._quadPlane(s,4);this._weld(1e-4);this._buildEdges();this._refresh();return;}
+    if(type==='Sphere')geo=new THREE.SphereGeometry(s*.6,8,6);
     else if(type==='Cylinder')geo=new THREE.CylinderGeometry(s*.5,s*.5,s,8);
     else if(type==='Cone')geo=new THREE.ConeGeometry(s*.5,s,8);
     else if(type==='Torus')geo=new THREE.TorusGeometry(s*.5,s*.2,6,10);
-    else if(type==='Plane'){geo=new THREE.PlaneGeometry(s,s,4,4);geo.rotateX(-Math.PI/2);}
     else if(type==='Icosphere')geo=new THREE.IcosahedronGeometry(s*.6,1);
     else if(type==='Pyramid')geo=new THREE.ConeGeometry(s*.55,s,4);
     else if(type==='Prism')geo=new THREE.CylinderGeometry(s*.5,s*.5,s,6);
     else geo=new THREE.BoxGeometry(s,s,s,2,2,2);
     this._fromGeo(geo);geo.dispose();},
+
+  // Push one flat quad-grid face (seg x seg quads) into shared V/F arrays. o=center,
+  // u/v=in-plane axes (unit length s), chosen per-face so u×v points outward — that
+  // keeps _faceNormal's cross(v1-v0,v2-v0) winding consistent with the rest of EM.
+  _gridFace:function(V,F,o,u,v,s,seg){
+    var rows=[];
+    for(var j=0;j<=seg;j++){var row=[];
+      for(var i=0;i<=seg;i++){
+        var iu=(i/seg-.5)*s,jv=(j/seg-.5)*s;
+        var vtx=new THREE.Vector3(o[0]+u[0]*iu+v[0]*jv,o[1]+u[1]*iu+v[1]*jv,o[2]+u[2]*iu+v[2]*jv);
+        vtx.sel=false;vtx.u0=i/seg;vtx.v0=1-j/seg;
+        row.push(V.length);V.push(vtx);}
+      rows.push(row);}
+    for(var j=0;j<seg;j++)for(var i=0;i<seg;i++)
+      F.push({vi:[rows[j][i],rows[j][i+1],rows[j+1][i+1],rows[j+1][i]],sel:false});},
+
+  _quadBox:function(s,seg){
+    var V=[],F=[],h=s/2,self=this;
+    [{o:[0,0,h],u:[1,0,0],v:[0,1,0]},{o:[0,0,-h],u:[-1,0,0],v:[0,1,0]},
+     {o:[h,0,0],u:[0,1,0],v:[0,0,1]},{o:[-h,0,0],u:[0,-1,0],v:[0,0,1]},
+     {o:[0,h,0],u:[0,0,1],v:[1,0,0]},{o:[0,-h,0],u:[0,0,-1],v:[1,0,0]}
+    ].forEach(function(fd){self._gridFace(V,F,fd.o,fd.u,fd.v,s,seg);});
+    this.V=V;this.F=F;},
+
+  _quadPlane:function(s,seg){
+    var V=[],F=[];
+    this._gridFace(V,F,[0,0,0],[1,0,0],[0,0,-1],s,seg);
+    this.V=V;this.F=F;},
 
   fromModel:function(m,pi){
     if(!m||!m.userData.parts.length)return;
