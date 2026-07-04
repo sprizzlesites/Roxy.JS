@@ -1111,10 +1111,13 @@ function modelThumb(m){
     return url;
   }catch(e){return null;}}
 
+var assetSearchQuery='';
 function renderAssets(){var body=$('#assetsBody');body.innerHTML='';body.appendChild(el('h2',{style:'font:600 18px/1 \"Fraunces\",serif;margin:0 0 4px',text:'Project Library'}));
   body.appendChild(el('p',{class:'muted small',text:state.models.length+' model'+(state.models.length===1?'':'s')+' · static, no server, exports to your device'}));
-  var grid=el('div',{class:'thumbs'});state.models.forEach(function(m){var parts=m.userData.parts.length;
-    var card=el('div',{class:'thumb'});
+  if(state.models.length>4)body.appendChild(el('input',{type:'text',placeholder:'Search models…',value:assetSearchQuery,style:'margin:8px 0 4px',
+    oninput:function(e){assetSearchQuery=e.target.value;filterAssetGrid();}}));
+  var grid=el('div',{class:'thumbs',id:'assetsGrid',style:'margin-top:10px'});state.models.forEach(function(m){var parts=m.userData.parts.length;
+    var card=el('div',{class:'thumb','data-name':m.userData.name.toLowerCase()});
     var url=modelThumb(m);
     if(url)card.appendChild(el('img',{class:'thumb-img',src:url,alt:m.userData.name}));
     card.appendChild(el('div',{class:'nm tap-edit',title:'Tap to rename',text:m.userData.name,onclick:function(){renameModel(m);}}));
@@ -1123,7 +1126,16 @@ function renderAssets(){var body=$('#assetsBody');body.innerHTML='';body.appendC
     card.appendChild(el('div',{class:'grid2'},[el('button',{text:'Duplicate',onclick:function(){duplicateModel(m);}}),el('button',{text:'Delete',onclick:function(){deleteModel(m.userData.id);}})]));
     card.appendChild(el('div',{class:'grid2'},[el('button',{text:'Export .glb',onclick:function(){exportGLB(m,m.userData.name+'.glb');}}),el('button',{text:'Export .obj',onclick:function(){exportOBJ(m,m.userData.name+'.obj');}})]));
     grid.appendChild(card);});
-  body.appendChild(grid);}
+  body.appendChild(grid);
+  filterAssetGrid();}
+/* Filters the already-rendered grid in place (no thumbnail re-render) so search stays instant */
+function filterAssetGrid(){var grid=$('#assetsGrid');if(!grid)return;
+  var q=assetSearchQuery.trim().toLowerCase(),any=false;
+  $$('.thumb',grid).forEach(function(card){var match=!q||(card.getAttribute('data-name')||'').indexOf(q)>=0;
+    card.style.display=match?'':'none';if(match)any=true;});
+  var empty=$('#assetsEmptyMsg');
+  if(!any&&q){if(!empty){empty=el('p',{id:'assetsEmptyMsg',class:'muted small',style:'margin-top:12px',text:'No models match "'+assetSearchQuery+'"'});grid.parentNode.appendChild(empty);}}
+  else if(empty)empty.remove();}
 
 /* ----- file inputs ----- */
 var imgTarget='paint';
