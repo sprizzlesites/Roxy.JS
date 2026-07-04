@@ -370,7 +370,7 @@ var History={st:[],i:-1,lim:80,
  push:function(u,r){this.st=this.st.slice(0,this.i+1);this.st.push({u:u,r:r});if(this.st.length>this.lim)this.st.shift();this.i=this.st.length-1;updUndo();},
  undo:function(){if(this.i<0)return;this.st[this.i].u();this.i--;updUndo();afterHist();},
  redo:function(){if(this.i>=this.st.length-1)return;this.i++;this.st[this.i].r();updUndo();afterHist();}};
-function updUndo(){var u=$('#btnUndo'),r=$('#btnRedo');if(u)u.style.opacity=History.i>=0?1:.35;if(r)r.style.opacity=History.i<History.st.length-1?1:.35;
+function updUndo(){scheduleAutosave();var u=$('#btnUndo'),r=$('#btnRedo');if(u)u.style.opacity=History.i>=0?1:.35;if(r)r.style.opacity=History.i<History.st.length-1?1:.35;
   var qu=$('#quUndo'),qr=$('#quRedo');if(qu)qu.style.opacity=History.i>=0?1:.35;if(qr)qr.style.opacity=History.i<History.st.length-1?1:.35;}
 function afterHist(){renderPanel();if(active.view==='assets')renderAssets();invalidate();}
 
@@ -535,7 +535,7 @@ function applyModifiers(m){if(!m)return;
 function setActiveModel(id){state.activeId=id;var holder=viewerScene.userData.modelHolder;while(holder.children.length)holder.remove(holder.children[0]);
   var m=getModel(id);if(m){holder.add(m);frameObject(m,viewState.viewer);}invalidate();if(active.view==='viewer'||active.view==='paint')renderPanel();}
 function getModel(id){for(var i=0;i<state.models.length;i++)if(state.models[i].userData.id===id)return state.models[i];return null;}
-function addModel(m){state.models.push(m);return m;}
+function addModel(m){state.models.push(m);scheduleAutosave();return m;}
 
 function frameObject(obj,vs){var box=new THREE.Box3().setFromObject(obj);if(box.isEmpty())return;var s=new THREE.Vector3();box.getSize(s);
   var c=new THREE.Vector3();box.getCenter(c);var r=Math.max(s.x,s.y,s.z)*0.5||1;vs.tx=c.x;vs.ty=c.y;vs.tz=c.z;vs.rad=r*3.2;}
@@ -1043,7 +1043,10 @@ function panelAssets(b){b.appendChild(el('h2',{text:'Assets'}));b.appendChild(el
   b.appendChild(el('hr',{class:'sep'}));
   b.appendChild(el('button',{style:'width:100%',text:'Save project (.json)',onclick:saveProject}));
   b.appendChild(el('button',{style:'width:100%;margin-top:8px',text:'Open project (.json)',onclick:function(){$('#fileProj').click();}}));
-  b.appendChild(el('button',{style:'width:100%;margin-top:8px',text:'Load sample: Donut',onclick:function(){var d=buildDonut();addModel(d);setActiveModel(d.userData.id);toast('Donut added');renderAssets();}}));}
+  b.appendChild(el('button',{style:'width:100%;margin-top:8px',text:'Load sample: Donut',onclick:function(){var d=buildDonut();addModel(d);setActiveModel(d.userData.id);toast('Donut added');renderAssets();}}));
+  b.appendChild(el('hr',{class:'sep'}));
+  b.appendChild(el('p',{class:'small muted',text:'Your work is autosaved to this browser as you go — reopening the page restores it.'}));
+  b.appendChild(el('button',{style:'width:100%',text:'Clear autosave',onclick:clearAutosave}));}
 /* tiny offscreen renderer for library thumbnails (lazy; shares geometry/materials) */
 var thumbGL=null,thumbScene=null,thumbCam=null;
 function modelThumb(m){
@@ -1097,11 +1100,32 @@ $('#fileProj').addEventListener('change',function(e){var f=e.target.files[0];if(
 
 /* ----- project save/load (geometry baked) ----- */
 function texToDataURL(t){if(!t||!t.image)return null;var img=t.image,cv;if(img instanceof HTMLCanvasElement)cv=img;else{cv=el('canvas');cv.width=img.width||512;cv.height=img.height||512;try{cv.getContext('2d').drawImage(img,0,0);}catch(e){return null;}}try{return cv.toDataURL('image/png');}catch(e){return null;}}
-function saveProject(){var data={v:2,scene:{env:sceneScene.userData.envId},models:state.models.map(function(m){return {name:m.userData.name,
+function buildProjectData(skipMaps){return {v:2,scene:{env:sceneScene.userData.envId},models:state.models.map(function(m){return {name:m.userData.name,
   parts:m.userData.parts.map(function(p){var g=p.baseGeo;return {pos:Array.from(g.attributes.position.array),uv:g.attributes.uv?Array.from(g.attributes.uv.array):null,index:g.index?Array.from(g.index.array):null,
-    color:'#'+p.mat.color.getHexString(),rough:p.mat.roughness,metal:p.mat.metalness,map:texToDataURL(p.mat.map),
-    emissive:'#'+p.mat.emissive.getHexString(),emInt:p.mat.emissiveIntensity,opacity:p.mat.opacity,transmission:p.mat.transmission||0,clearcoat:p.mat.clearcoat||0};}),mods:m.userData.mods};})};
+    color:'#'+p.mat.color.getHexString(),rough:p.mat.roughness,metal:p.mat.metalness,map:skipMaps?null:texToDataURL(p.mat.map),
+    emissive:'#'+p.mat.emissive.getHexString(),emInt:p.mat.emissiveIntensity,opacity:p.mat.opacity,transmission:p.mat.transmission||0,clearcoat:p.mat.clearcoat||0};}),mods:m.userData.mods};})};}
+function saveProject(){var data=buildProjectData(false);
   download(new Blob([JSON.stringify(data)],{type:'application/json'}),'project.json');toast('Saved project.json');}
+
+/* ----- autosave (localStorage, debounced) ----- */
+var AUTOSAVE_KEY='roxyAutosave',autosaveTimer=null,autosaveWarned=false,autosaveSuspended=false;
+function scheduleAutosave(){if(autosaveSuspended)return;clearTimeout(autosaveTimer);autosaveTimer=setTimeout(doAutosave,1500);}
+function doAutosave(){
+  if(!state.models.length){try{localStorage.removeItem(AUTOSAVE_KEY);}catch(e){}return;}
+  try{localStorage.setItem(AUTOSAVE_KEY,JSON.stringify(buildProjectData(false)));return;}catch(e){}
+  try{localStorage.setItem(AUTOSAVE_KEY,JSON.stringify(buildProjectData(true)));
+    if(!autosaveWarned){autosaveWarned=true;toast('Autosave: textures too large, saved geometry only');}}
+  catch(e){if(!autosaveWarned){autosaveWarned=true;toast('Autosave failed (storage full) — export a project.json to be safe');}}}
+function clearAutosave(){try{localStorage.removeItem(AUTOSAVE_KEY);}catch(e){}toast('Autosave cleared');}
+function tryRestoreAutosave(){
+  var raw;try{raw=localStorage.getItem(AUTOSAVE_KEY);}catch(e){return false;}
+  if(!raw)return false;
+  var data;try{data=JSON.parse(raw);}catch(e){try{localStorage.removeItem(AUTOSAVE_KEY);}catch(e2){}return false;}
+  if(!data||!data.models||!data.models.length)return false;
+  autosaveSuspended=true;var ok=false;
+  try{loadProject(data);toast('Restored autosave from last session');ok=true;}
+  catch(e){try{localStorage.removeItem(AUTOSAVE_KEY);}catch(e2){}}
+  autosaveSuspended=false;return ok;}
 function loadProject(data){state.models.length=0;(data.models||[]).forEach(function(md){var parts=md.parts.map(function(pp){var g=new THREE.BufferGeometry();
   g.setAttribute('position',new THREE.Float32BufferAttribute(pp.pos,3));if(pp.uv)g.setAttribute('uv',new THREE.Float32BufferAttribute(pp.uv,2));if(pp.index)g.setIndex(pp.index);g.computeVertexNormals();
   var mat=makeMaterial({color:new THREE.Color(pp.color).getHex(),rough:pp.rough,metal:pp.metal});
@@ -2243,10 +2267,11 @@ function syncZoomKnob(){
   zo.addEventListener('click',function(){if(!active||!active.vs)return;active.vs.rad=clamp(active.vs.rad/0.82,.6,60);updateCam();syncZoomKnob();invalidate();});
 })();
 RotBall.init();
-setView('edit');updUndo();
+var _restored=tryRestoreAutosave();
+setView(_restored?'viewer':'edit');updUndo();
 loop();
 boot.style.display='none';
-toast('Welcome to ROXY.JS — tap a face/vert/edge to select, drag the gizmo to move');
+if(!_restored)toast('Welcome to ROXY.JS — tap a face/vert/edge to select, drag the gizmo to move');
 })();
 </script>
 </body>
