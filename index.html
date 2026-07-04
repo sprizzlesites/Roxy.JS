@@ -27,6 +27,8 @@ input[type=text],input[type=number],select{font-family:inherit;font-size:13px;co
   border:1px solid var(--line);border-radius:9px;padding:8px 9px;width:100%}
 input[type=color]{width:34px;height:30px;border:1px solid var(--line);border-radius:8px;background:none;padding:2px}
 label.fld{display:block;font-size:11px;letter-spacing:.04em;color:var(--muted);margin:0 0 5px}
+.sldval{cursor:pointer;border-bottom:1px dashed var(--faint);padding-bottom:1px}
+.sldval:hover{color:var(--ink);border-bottom-color:var(--pink)}
 .spread{display:flex;gap:8px;align-items:center}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:11px}
@@ -832,11 +834,18 @@ function showHint(v){var h=$('#hint');if(!h||!HINTS[v])return;
   clearTimeout(hintTimer);hintTimer=setTimeout(function(){h.classList.remove('show');},6000);}
 $('#hint').addEventListener('click',function(){this.classList.remove('show');});
 
-function slider(label,min,max,val,step,on){var out=el('span',{class:'muted small',text:(+val).toFixed(2)});var startV=null;
+function slider(label,min,max,val,step,on){var out=el('span',{class:'muted small sldval',text:(+val).toFixed(2),title:'Tap to enter an exact value'});var startV=null;
   var r=el('input',{type:'range',min:min,max:max,step:step||.01,value:val,
     onpointerdown:function(e){startV=+e.target.value;},
     oninput:function(e){out.textContent=(+e.target.value).toFixed(2);on(+e.target.value);invalidate();},
     onchange:function(e){var nv=+e.target.value,sv=startV==null?val:startV;if(nv!==sv){History.push(function(){on(sv);renderPanel();invalidate();},function(){on(nv);renderPanel();invalidate();});}startV=null;}});
+  out.addEventListener('click',function(){
+    var sv=+r.value,input=prompt(label.replace(/\s+$/,'')+' (range '+min+' to '+max+'):',sv);
+    if(input==null)return;var nv=+input;if(!isFinite(nv))return;
+    nv=Math.max(min,Math.min(max,nv));
+    r.value=nv;out.textContent=nv.toFixed(2);on(nv);invalidate();
+    if(nv!==sv)History.push(function(){r.value=sv;out.textContent=sv.toFixed(2);on(sv);renderPanel();invalidate();},
+                             function(){r.value=nv;out.textContent=nv.toFixed(2);on(nv);renderPanel();invalidate();});});
   return el('div',{},[el('label',{class:'fld'},[label+'  ',out]),r]);}
 
 function renderPanel(){var b=$('#panelBody');b.innerHTML='';var v=active.view;
