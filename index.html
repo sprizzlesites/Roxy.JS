@@ -546,6 +546,25 @@ function duplicateModel(m){
   var name=m.userData.name+' Copy';
   var nm=makeModel(name,parts);
   addModel(nm);setActiveModel(nm.userData.id);toast('"'+name+'" duplicated');renderAssets();}
+// Frees GPU-side buffers for a deleted model. Safe to call even if something else still
+// renders the same objects: THREE's dispose() only drops the cached GPU upload — the
+// renderer transparently re-uploads from the intact CPU-side data next time it's drawn.
+// Still, avoid disposing textures known to be actively shared elsewhere:
+// - paint.tex is one long-lived canvas texture reused across every paint session
+// - EM._srcTex is whatever texture the mesh editor currently has loaded/exports
+// A model still placed in the Scene shares its geometry/material by reference with the
+// placement (Object3D.clone() doesn't deep-clone them), so skip it entirely — its
+// resources are still in active use there.
+function disposeModelResources(m){
+  var stillPlaced=sceneScene.userData.holder.children.some(function(c){return c.userData&&c.userData.placement&&c.userData.modelId===m.userData.id;});
+  if(stillPlaced)return;
+  m.userData.parts.forEach(function(p){
+    if(p.baseGeo&&p.baseGeo!==p.mesh.geometry)p.baseGeo.dispose();
+    if(p.mesh.geometry)p.mesh.geometry.dispose();
+    var mat=p.mat;if(!mat)return;
+    ['map','bumpMap','normalMap','roughnessMap','metalnessMap','emissiveMap'].forEach(function(k){
+      var t=mat[k];if(t&&t!==paint.tex&&t!==EM._srcTex)t.dispose();});
+    mat.dispose();});}
 function deleteModel(id){
   var idx=state.models.findIndex(function(mm){return mm.userData.id===id;});if(idx<0)return;
   var m=state.models[idx],wasActive=(state.activeId===id);
@@ -555,10 +574,11 @@ function deleteModel(id){
     else{var holder=viewerScene.userData.modelHolder;while(holder.children.length)holder.remove(holder.children[0]);invalidate();}}
   renderAssets();if(active.view==='viewer'||active.view==='paint')renderPanel();
   toast('"'+m.userData.name+'" deleted');scheduleAutosave();
+  disposeModelResources(m);
   History.push(function(){state.models.splice(idx,0,m);if(wasActive)setActiveModel(id);renderAssets();renderPanel();},
     function(){var i2=state.models.findIndex(function(mm){return mm.userData.id===id;});if(i2>=0)state.models.splice(i2,1);
       if(state.activeId===id){var nx=state.models[0];state.activeId=nx?nx.userData.id:null;if(nx)setActiveModel(nx.userData.id);}
-      renderAssets();renderPanel();});}
+      renderAssets();renderPanel();disposeModelResources(m);});}
 
 function frameObject(obj,vs){var box=new THREE.Box3().setFromObject(obj);if(box.isEmpty())return;var s=new THREE.Vector3();box.getSize(s);
   var c=new THREE.Vector3();box.getCenter(c);var r=Math.max(s.x,s.y,s.z)*0.5||1;vs.tx=c.x;vs.ty=c.y;vs.tz=c.z;vs.rad=r*3.2;}
