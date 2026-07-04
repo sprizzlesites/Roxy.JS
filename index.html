@@ -1572,6 +1572,21 @@ var EM={
       } else newF.push(f);});
     this.F=newF;this._buildEdges();this._refresh();this._pushTopo(_b);},
 
+  // Bake the X-Mirror preview into real geometry: duplicate every face mirrored
+  // across the YZ plane (winding reversed so normals stay outward-facing), then
+  // weld the two halves together along the seam.
+  applyMirror:function(){
+    var _b=this._topoSnapshot(),n=this.V.length;
+    var mirroredV=this.V.map(function(v){var mv=v.clone();mv.x=-mv.x;mv.sel=false;
+      if(v.u0!==undefined){mv.u0=v.u0;mv.v0=v.v0;}return mv;});
+    var mirroredF=this.F.map(function(f){return {vi:f.vi.map(function(i){return i+n;}).reverse(),sel:false};});
+    this.V=this.V.concat(mirroredV);this.F=this.F.concat(mirroredF);
+    this._weld(1e-4);
+    editState.mirror=false;this._mirMap=null;
+    this._buildEdges();this._refresh();this._pushTopo(_b);
+    renderPanel();renderEditHud();
+    toast('Mirror applied — '+mirroredF.length+' faces mirrored and welded');},
+
   // Copy selected faces as detached geometry; the copy becomes the selection
   // so an immediate drag moves it into place (Blender's Shift+D flow).
   duplicateSelection:function(){
@@ -2006,6 +2021,7 @@ function renderEditHud(){
         mr2.appendChild(el('button',{class:'hud-btn',text:'None',onclick:function(){EM.clearSel();EM._refresh();renderPanel();}}));
         mr2.appendChild(el('button',{class:'hud-btn'+(editState.prop?' on':''),text:'Soft',onclick:function(){editState.prop=!editState.prop;EM._propW=null;renderEditHud();renderPanel();}}));
         mr2.appendChild(el('button',{class:'hud-btn'+(editState.mirror?' on':''),text:'Mirror',onclick:function(){editState.mirror=!editState.mirror;EM._mirMap=null;EM._refresh();renderEditHud();renderPanel();}}));
+        if(editState.mirror)mr2.appendChild(el('button',{class:'hud-btn',title:'Bake the mirrored half into real geometry',text:'Apply Mirror',onclick:function(){EM.applyMirror();}}));
         if(selN>0){
           if(mode==='face'){mr2.appendChild(el('button',{class:'hud-btn',text:'Extrude',onclick:function(){EM.extrude();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Inset',onclick:function(){EM.inset();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Dup',onclick:function(){EM.duplicateSelection();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Separate',onclick:function(){EM.separateSelection();}}));}
           if(mode==='vert'){mr2.appendChild(el('button',{class:'hud-btn',text:'Merge',onclick:function(){EM.mergeSelected();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Smooth',onclick:function(){EM.smoothVerts();renderPanel();}}));}
@@ -2064,6 +2080,7 @@ function renderEditHud(){
   mr.appendChild(el('button',{class:'hud-btn'+(editState.multiSel?' on':''),title:'Multi-select (additive tap)',text:'Multi',onclick:function(){editState.multiSel=!editState.multiSel;renderEditHud();}}));
   mr.appendChild(el('button',{class:'hud-btn'+(editState.prop?' on':''),title:'Proportional edit (soft falloff)',text:'Soft',onclick:function(){editState.prop=!editState.prop;EM._propW=null;renderEditHud();renderPanel();}}));
   mr.appendChild(el('button',{class:'hud-btn'+(editState.mirror?' on':''),title:'X-mirror moves across the YZ plane',text:'Mirror',onclick:function(){editState.mirror=!editState.mirror;EM._mirMap=null;EM._refresh();renderEditHud();renderPanel();}}));
+  if(editState.mirror)mr.appendChild(el('button',{class:'hud-btn',title:'Bake the mirrored half into real geometry',text:'Apply Mirror',onclick:function(){EM.applyMirror();}}));
   hud.appendChild(mr);
 
   if(selN>0){
@@ -2161,6 +2178,8 @@ function panelEdit(b){
     text:editState.mirror?'✓ X-Mirror (live ghost + mirrored drags)':'X-Mirror (live ghost + mirrored drags)',
     onclick:function(){editState.mirror=!editState.mirror;EM._mirMap=null;EM._refresh();renderPanel();renderEditHud();
       toast(editState.mirror?'Modeling one half — the other half mirrors live':'X-Mirror off');}})]));
+  if(editState.mirror)b.appendChild(el('button',{style:'width:100%;margin-top:6px',title:'Bake the mirrored half into real, welded geometry',
+    text:'Apply Mirror (bake + weld)',onclick:function(){EM.applyMirror();}}));
 
   b.appendChild(el('div',{class:'section-title',text:'Operations'}));
   b.appendChild(el('div',{class:'grid2'},[
