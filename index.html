@@ -492,6 +492,13 @@ dom.addEventListener('wheel',function(e){e.preventDefault();active.vs.rad=clamp(
 
 function updateCam(){var vs=active.vs,c=vs.cam,sp=Math.sin(vs.ph);
   c.position.set(vs.tx+vs.rad*sp*Math.cos(vs.th),vs.ty+vs.rad*Math.cos(vs.ph),vs.tz+vs.rad*sp*Math.sin(vs.th));c.lookAt(vs.tx,vs.ty,vs.tz);}
+
+// Snap orbit to a standard axis-aligned view (keeps target + zoom, only changes angle).
+// th/ph values match the drag handler's clamp range (ph 0.1-1.5) so a follow-up
+// orbit drag continues smoothly instead of jumping.
+var VIEW_SNAPS={front:{th:Math.PI/2,ph:1.5},back:{th:-Math.PI/2,ph:1.5},right:{th:0,ph:1.5},left:{th:Math.PI,ph:1.5},top:{ph:.1}};
+function snapView(name){var s=VIEW_SNAPS[name];if(!s)return;var vs=active.vs;
+  if(s.th!=null)vs.th=s.th;vs.ph=s.ph;updateCam();invalidate();}
 function resizeActive(){var slot=curSlot();if(!slot)return;var r=slot.getBoundingClientRect();if(r.width<2||r.height<2)return;
   renderer.setSize(r.width,r.height);active.vs.cam.aspect=r.width/r.height;active.vs.cam.updateProjectionMatrix();}
 function curSlot(){var v=active.view;if(v==='paint')return $('#slot-paint');return $('#slot-'+v);}
@@ -2126,6 +2133,10 @@ function renderEditHud(){
     hud.appendChild(r1);
 
     if(editState.hudExpanded){
+      var vrow2=el('div',{class:'hud-row hud-compact'});
+      [['front','Front'],['back','Back'],['left','Left'],['right','Right'],['top','Top']].forEach(function(p){
+        vrow2.appendChild(el('button',{class:'hud-btn',text:p[1],onclick:function(){snapView(p[0]);}}));});
+      hud.appendChild(vrow2);
       if(sculpting){
         var symrow2=el('div',{class:'hud-row hud-compact'});
         [[0,'Sym Off'],[1,'X'],[2,'Y'],[3,'Z']].forEach(function(p){symrow2.appendChild(el('button',{class:'hud-btn'+(Sculpt.symmetry===p[0]?' on':''),text:p[1],onclick:function(){Sculpt.symmetry=p[0];renderEditHud();}}));});
@@ -2280,6 +2291,14 @@ function panelEdit(b){
 
   var selN=EM.selCount();
   if(selN>0)b.appendChild(el('div',{class:'card',style:'text-align:center;margin-top:8px;color:var(--pink)'},[el('span',{text:selN+' '+editState.mode+(selN>1?'s':'')+' selected'})]));
+
+  b.appendChild(el('div',{class:'section-title',text:'View'}));
+  b.appendChild(el('div',{class:'chiprow'},[
+    el('button',{class:'chip',text:'Front',onclick:function(){snapView('front');}}),
+    el('button',{class:'chip',text:'Back',onclick:function(){snapView('back');}}),
+    el('button',{class:'chip',text:'Left',onclick:function(){snapView('left');}}),
+    el('button',{class:'chip',text:'Right',onclick:function(){snapView('right');}}),
+    el('button',{class:'chip',text:'Top',onclick:function(){snapView('top');}})]));
 
   b.appendChild(el('div',{class:'section-title',text:'Transform'}));
   b.appendChild(el('p',{class:'small muted',style:'margin-bottom:6px',text:'Select elements then drag them in the 3D view to move · RotBall to orbit · two-finger to zoom/pan'}));
