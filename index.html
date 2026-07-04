@@ -1375,7 +1375,7 @@ var RotBall={
 
 var EM={
   V:[],F:[],E:[],_triMap:[],_srcTex:null,
-  _meshObj:null,_edgeObj:null,_vertObj:null,_selObj:null,_overlayObj:null,_mirrorObj:null,
+  _meshObj:null,_edgeObj:null,_vertObj:null,_selObj:null,_mirrorObj:null,
   _mat:new THREE.MeshStandardMaterial({color:0xbba898,roughness:.55,side:THREE.DoubleSide}),
   _selMat:new THREE.MeshBasicMaterial({color:0xff8fb1,transparent:true,opacity:.42,side:THREE.DoubleSide,depthTest:false}),
   _mirrorMat:new THREE.MeshStandardMaterial({color:0x9fd4ff,roughness:.55,side:THREE.DoubleSide,transparent:true,opacity:.5,depthWrite:false}),
@@ -1383,7 +1383,6 @@ var EM={
   clear:function(){
     var self=this;
     [this._meshObj,this._edgeObj,this._vertObj,this._selObj].forEach(function(o){if(o){editScene.remove(o);if(o.geometry)o.geometry.dispose();}});
-    if(this._overlayObj){editScene.remove(this._overlayObj);this._overlayObj=null;}
     if(this._mirrorObj){editScene.remove(this._mirrorObj);this._mirrorObj=null;}
     this._meshObj=this._edgeObj=this._vertObj=this._selObj=null;
     this.V=[];this.F=[];this.E=[];this._triMap=[];},
