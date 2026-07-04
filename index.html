@@ -876,12 +876,17 @@ var HINTS={
   edit:'Tap to select · Drag selection to move · RotBall orbits · Double-tap to frame',
   paint:'Paint the 2D canvas — or enable "Paint on 3D surface" in Tools'};
 var hintTimer=null;
-function showHint(v){var h=$('#hint');if(!h||!HINTS[v])return;
+function showHint(v){var h=$('#hint');if(!h)return;
+  // Always clear a still-fading hint from whatever view we just left — otherwise its
+  // gesture text (e.g. edit's "drag selection to move") keeps showing, wrongly
+  // describing the view we switched to, until its own 6s timer happens to expire.
+  h.classList.remove('show');clearTimeout(hintTimer);
+  if(!HINTS[v])return;
   var seen={};try{seen=JSON.parse(localStorage.getItem('roxyHints')||'{}');}catch(e){}
   if(seen[v])return;
   seen[v]=1;try{localStorage.setItem('roxyHints',JSON.stringify(seen));}catch(e){}
   h.textContent=HINTS[v];h.classList.add('show');
-  clearTimeout(hintTimer);hintTimer=setTimeout(function(){h.classList.remove('show');},6000);}
+  hintTimer=setTimeout(function(){h.classList.remove('show');},6000);}
 $('#hint').addEventListener('click',function(){this.classList.remove('show');});
 
 function slider(label,min,max,val,step,on){var out=el('span',{class:'muted small tap-edit',text:(+val).toFixed(2),title:'Tap to enter an exact value'});var startV=null;
@@ -2409,7 +2414,6 @@ var _restored=tryRestoreAutosave();
 setView(_restored?'viewer':'edit');updUndo();
 loop();
 boot.style.display='none';
-if(!_restored)toast('Welcome to ROXY.JS — tap a face/vert/edge to select, drag the gizmo to move');
 })();
 </script>
 </body>
