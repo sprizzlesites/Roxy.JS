@@ -451,11 +451,8 @@ function endPtr(e){
   if(active.view==='edit'&&Sculpt.painting&&Sculpt.ptId===e.pointerId){Sculpt.up();}
   if(active.view==='edit'&&editDirect.ptId===e.pointerId){
     if(editDirect.active){
-      // Grid snap (top-bar Snap toggle): settle the verts this drag moved onto a 0.1 grid
-      if(Gizmo.snap){var gs=.1;
-        EM.V.forEach(function(v,i){var o=editDirect.snap[i];if(!o||v.equals(o))return;
-          v.set(Math.round(v.x/gs)*gs,Math.round(v.y/gs)*gs,Math.round(v.z/gs)*gs);});
-        EM._refresh();}
+      // Snap (top-bar Snap toggle): see applyEditSnap
+      if(Gizmo.snap)applyEditSnap(editDirect.snap);
       var snap=editDirect.snap,curr=EM.V.map(function(v){return v.clone();});
       History.push(function(){EM.V.forEach(function(v,i){v.copy(snap[i]);});EM._refresh();},
                    function(){EM.V.forEach(function(v,i){v.copy(curr[i]);});EM._refresh();});}
@@ -1213,6 +1210,21 @@ function screenDeltaToWorld(dx,dy){
 function distSeg2D(px,py,ax,ay,bx,by){var dx=bx-ax,dy=by-ay,l2=dx*dx+dy*dy;if(!l2)return Math.hypot(px-ax,py-ay);var t=Math.max(0,Math.min(1,((px-ax)*dx+(py-ay)*dy)/l2));return Math.hypot(px-(ax+t*dx),py-(ay+t*dy));}
 
 var editDirect={ptId:null,pending:false,active:false,startX:0,startY:0,prevX:0,prevY:0,snap:null};
+
+// Applied on drag-release when the top-bar Snap toggle is on: each vertex the drag moved
+// first tries to snap onto a nearby *stationary* vertex (closing gaps exactly, Blender-style
+// vertex snap); only falls back to a 0.1 grid when nothing else is within range. Snap radius
+// scales with camera distance so it feels consistent whether zoomed in or out.
+function applyEditSnap(preDragSnap){
+  var gs=.1,vsnapR=Math.max(.02,active.vs.rad*.025);
+  var movedIdx=[],targetIdx=[];
+  EM.V.forEach(function(v,i){var o=preDragSnap[i];if(!o)return;(v.equals(o)?targetIdx:movedIdx).push(i);});
+  movedIdx.forEach(function(i){
+    var v=EM.V[i],best=-1,bestD=vsnapR;
+    targetIdx.forEach(function(j){var d=v.distanceTo(EM.V[j]);if(d<bestD){bestD=d;best=j;}});
+    if(best>=0)v.copy(EM.V[best]);
+    else v.set(Math.round(v.x/gs)*gs,Math.round(v.y/gs)*gs,Math.round(v.z/gs)*gs);});
+  EM._refresh();}
 
 /* ─── Sculpt brush (push/pull verts on the surface, Blender-like) ─── */
 function falloff(d,R){var t=1-d/R;return t<=0?0:t*t*(3-2*t);}
@@ -2326,7 +2338,8 @@ $('#btnUndo').addEventListener('click',function(){History.undo();});
 $('#btnRedo').addEventListener('click',function(){History.redo();});
 $('#quUndo').addEventListener('click',function(){History.undo();});
 $('#quRedo').addEventListener('click',function(){History.redo();});
-$('#btnSnap').addEventListener('click',function(e){Gizmo.snap=!Gizmo.snap;e.currentTarget.className=Gizmo.snap?'act on':'act';toast(Gizmo.snap?'Grid snap on':'Grid snap off');});
+$('#btnSnap').addEventListener('click',function(e){Gizmo.snap=!Gizmo.snap;e.currentTarget.className=Gizmo.snap?'act on':'act';
+  toast(Gizmo.snap?(active.view==='edit'?'Snap on — snaps to nearby verts, falls back to grid':'Grid snap on'):'Snap off');});
 window.addEventListener('keydown',function(e){var tag=(e.target&&e.target.tagName)||'';if(tag==='INPUT'||tag==='SELECT'||tag==='TEXTAREA')return;
   var z=e.key.toLowerCase();
   if((e.ctrlKey||e.metaKey)&&!e.shiftKey&&z==='z'){e.preventDefault();History.undo();}
