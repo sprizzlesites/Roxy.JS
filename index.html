@@ -78,6 +78,7 @@ canvas{display:block;touch-action:none}
 .sec-toggle.closed::after{transform:rotate(-90deg)}
 
 #tabbar{display:none}
+#navMask{display:none}
 #sheetHandle{display:none}
 
 .assets-body{position:absolute;inset:0;overflow:auto;padding:18px}
@@ -137,6 +138,13 @@ canvas{display:block;touch-action:none}
   #sheetHandle{display:flex;align-items:center;justify-content:center;gap:8px;height:38px;margin:-6px -14px 6px;cursor:grab;touch-action:none}
   #sheetHandle .bar{width:48px;height:5px;border-radius:99px;background:var(--faint)}
   #sheetHandle .lbl{font-size:11px;color:var(--muted);letter-spacing:.1em;text-transform:uppercase}
+  /* Covers the thin slivers around the tabbar (above/below it, within the panel's
+     reserved bottom offset) so the collapsed sheet's peek can never show real
+     content through them — the gap there is fixed-size regardless of viewport
+     height, but a short (landscape) viewport shrinks the panel enough that real
+     text lands in exactly that gap instead of blank space. */
+  #navMask{display:block;position:fixed;left:0;right:0;bottom:0;height:calc(78px + env(safe-area-inset-bottom));
+    background:var(--bg);z-index:25;pointer-events:none}
   #tabbar{display:flex;position:fixed;left:10px;right:10px;bottom:calc(10px + env(safe-area-inset-bottom));height:62px;
     border:1px solid rgba(255,255,255,.13);border-radius:26px;padding:0 4px;
     background:linear-gradient(rgba(40,31,22,.58),rgba(20,15,11,.72));
@@ -260,6 +268,7 @@ canvas{display:block;touch-action:none}
     <div id="panelBody"></div>
   </aside>
 
+  <div id="navMask"></div>
   <nav id="tabbar"></nav>
 </div>
 
