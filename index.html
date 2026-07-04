@@ -1456,9 +1456,9 @@ var EM={
     if(type==='Plane'){this.clear();this._quadPlane(s,4);this._weld(1e-4);this._buildEdges();this._refresh();return;}
     if(type==='Cylinder'){this.clear();this._quadCylinder(s*.5,s,8,1);this._weld(1e-4);this._buildEdges();this._refresh();return;}
     if(type==='Prism'){this.clear();this._quadCylinder(s*.5,s,6,1);this._weld(1e-4);this._buildEdges();this._refresh();return;}
+    if(type==='Torus'){this.clear();this._quadTorus(s*.5,s*.2,10,6);this._weld(1e-4);this._buildEdges();this._refresh();return;}
     if(type==='Sphere')geo=new THREE.SphereGeometry(s*.6,8,6);
     else if(type==='Cone')geo=new THREE.ConeGeometry(s*.5,s,8);
-    else if(type==='Torus')geo=new THREE.TorusGeometry(s*.5,s*.2,6,10);
     else if(type==='Icosphere')geo=new THREE.IcosahedronGeometry(s*.6,1);
     else if(type==='Pyramid')geo=new THREE.ConeGeometry(s*.55,s,4);
     else geo=new THREE.BoxGeometry(s,s,s,2,2,2);
@@ -1512,6 +1512,25 @@ var EM={
     var topVi=[];
     for(var a=radialSeg-1;a>=0;a--){var th=a/radialSeg*Math.PI*2;var vtx=new THREE.Vector3(r*Math.cos(th),hh,r*Math.sin(th));vtx.sel=false;topVi.push(V.length);V.push(vtx);}
     F.push({vi:topVi,sel:false});
+    this.V=V;this.F=F;},
+
+  // Native-quad torus: a doubly-periodic grid (wraps in both the major and minor
+  // directions, seams welded like the cylinder's) — a torus has no poles/caps at
+  // all, so unlike Sphere/Cone this is a pure quad mesh with nothing left over.
+  _quadTorus:function(R,r,radialSeg,tubeSeg){
+    var V=[],F=[],grid=[];
+    for(var i=0;i<=radialSeg;i++){
+      var th=i/radialSeg*Math.PI*2,ct=Math.cos(th),st=Math.sin(th),row=[];
+      for(var j=0;j<=tubeSeg;j++){
+        var ph=j/tubeSeg*Math.PI*2,cp=Math.cos(ph),sp=Math.sin(ph),rad=R+r*cp;
+        var vtx=new THREE.Vector3(rad*ct,r*sp,rad*st);
+        vtx.sel=false;vtx.u0=i/radialSeg;vtx.v0=1-j/tubeSeg;
+        row.push(V.length);V.push(vtx);}
+      grid.push(row);}
+    // face order (i,j)->(i,j+1)->(i+1,j+1)->(i+1,j): u-axis=minor(phi), v-axis=major(theta),
+    // so cross(uAxis,vAxis)=cross(phiDir,thetaDir) matches the tube's outward radial normal
+    for(var i=0;i<radialSeg;i++)for(var j=0;j<tubeSeg;j++)
+      F.push({vi:[grid[i][j],grid[i][j+1],grid[i+1][j+1],grid[i+1][j]],sel:false});
     this.V=V;this.F=F;},
 
   fromModel:function(m,pi){
