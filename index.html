@@ -1293,7 +1293,7 @@ function onViewportTap(e){var slot=curSlot();if(!slot)return;var r=dom.getBoundi
    MESH EDIT MODE
    ═══════════════════════════════════════════════════════ */
 
-var editState={mode:'face',tool:'select',grabActive:false,grabPtId:null,grabPrevX:0,grabPrevY:0,grabSnap:null,multiSel:false,hudExpanded:false,prop:false,propR:.8,mirror:false};
+var editState={mode:'face',tool:'select',grabActive:false,grabPtId:null,grabPrevX:0,grabPrevY:0,grabSnap:null,multiSel:false,hudExpanded:false,prop:false,propR:.8,mirror:false,mirrorAxis:0};
 
 function screenDeltaToWorld(dx,dy){
   var cam=active.vs.cam,rad=active.vs.rad;
@@ -1601,11 +1601,12 @@ var EM={
     if(!this._meshObj){this._meshObj=new THREE.Mesh(new THREE.BufferGeometry(),this._mat);this._meshObj.castShadow=true;editScene.add(this._meshObj);}
     var g=this._toGeo();this._meshObj.geometry.dispose();this._meshObj.geometry=g;
 
-    // Live mirror preview: a scale.x=-1 ghost sharing the same geometry, so sculpting
-    // and every mesh op are mirrored live without duplicating any vertex data.
+    // Live mirror preview: a negative-scale ghost on the chosen axis sharing the same
+    // geometry, so sculpting and every mesh op are mirrored live without duplicating verts.
     if(editState.mirror){
-      if(!this._mirrorObj){this._mirrorObj=new THREE.Mesh(g,this._mirrorMat);this._mirrorObj.scale.x=-1;this._mirrorObj.renderOrder=2;editScene.add(this._mirrorObj);}
+      if(!this._mirrorObj){this._mirrorObj=new THREE.Mesh(g,this._mirrorMat);this._mirrorObj.renderOrder=2;editScene.add(this._mirrorObj);}
       else this._mirrorObj.geometry=g;
+      this._mirrorObj.scale.set(1,1,1);this._mirrorObj.scale.setComponent(editState.mirrorAxis,-1);
     }else if(this._mirrorObj){editScene.remove(this._mirrorObj);this._mirrorObj=null;}
 
     // Edges
@@ -1691,26 +1692,27 @@ var EM={
       for(var i=0;i<this.V.length;i++)if(w[i]>0)this.V[i].addScaledVector(delta,w[i]);
     }else selV.forEach(function(i){this.V[i].add(delta);},this);
     if(editState.mirror&&selV.size){
-      var mm=this._mirMap,self=this;
+      var mm=this._mirMap,self=this,ax=editState.mirrorAxis;
       function wt(i){return w?w[i]:(selV.has(i)?1:0);}
       for(var i=0;i<this.V.length;i++){
         var wi=wt(i);if(wi<=0)continue;
         var j=mm[i];if(j<0)continue;
-        if(j===i){this.V[i].x=0;continue;}          // on-plane verts stay on the plane
+        if(j===i){this.V[i].setComponent(ax,0);continue;}   // on-plane verts stay on the plane
         var wj=wt(j);
-        if(wj>wi||(wj===wi&&j<i))continue;          // stronger (or first) side drives the pair
-        this.V[j].set(-this.V[i].x,this.V[i].y,this.V[i].z);}}
+        if(wj>wi||(wj===wi&&j<i))continue;                  // stronger (or first) side drives the pair
+        this.V[j].copy(this.V[i]);this.V[j].setComponent(ax,-this.V[i].getComponent(ax));}}
     this._refresh();},
 
-  // Vertex → X-mirrored counterpart (-1 when none; own index when on the plane)
+  // Vertex → axis-mirrored counterpart (-1 when none; own index when on the mirror plane)
   _mirMap:null,
   _mirrorMap:function(){
-    var n=this.V.length,map=new Int32Array(n),eps=5e-3;
+    var n=this.V.length,map=new Int32Array(n),eps=5e-3,ax=editState.mirrorAxis;
     for(var i=0;i<n;i++){
       map[i]=-1;var vi=this.V[i];
-      if(Math.abs(vi.x)<eps){map[i]=i;continue;}
-      for(var j=0;j<n;j++){var vj=this.V[j];
-        if(Math.abs(vj.x+vi.x)<eps&&Math.abs(vj.y-vi.y)<eps&&Math.abs(vj.z-vi.z)<eps){map[i]=j;break;}}}
+      if(Math.abs(vi.getComponent(ax))<eps){map[i]=i;continue;}
+      for(var j=0;j<n;j++){var vj=this.V[j],ok=Math.abs(vj.getComponent(ax)+vi.getComponent(ax))<eps;
+        for(var c=0;c<3&&ok;c++)if(c!==ax&&Math.abs(vj.getComponent(c)-vi.getComponent(c))>=eps)ok=false;
+        if(ok){map[i]=j;break;}}}
     return map;},
 
   // Interpolate carried UVs (u0/v0) from verts ia→ib onto new vert nv (t=0 copies ia's)
@@ -1802,12 +1804,12 @@ var EM={
       } else newF.push(f);});
     this.F=newF;this._buildEdges();this._refresh();this._pushTopo(_b);},
 
-  // Bake the X-Mirror preview into real geometry: duplicate every face mirrored
-  // across the YZ plane (winding reversed so normals stay outward-facing), then
-  // weld the two halves together along the seam.
+  // Bake the mirror preview into real geometry: duplicate every face reflected across
+  // the chosen axis plane (winding reversed — any single-axis reflection flips
+  // handedness — so normals stay outward-facing), then weld the halves at the seam.
   applyMirror:function(){
-    var _b=this._topoSnapshot(),n=this.V.length;
-    var mirroredV=this.V.map(function(v){var mv=v.clone();mv.x=-mv.x;mv.sel=false;
+    var _b=this._topoSnapshot(),n=this.V.length,ax=editState.mirrorAxis;
+    var mirroredV=this.V.map(function(v){var mv=v.clone();mv.setComponent(ax,-mv.getComponent(ax));mv.sel=false;
       if(v.u0!==undefined){mv.u0=v.u0;mv.v0=v.v0;}return mv;});
     var mirroredF=this.F.map(function(f){return {vi:f.vi.map(function(i){return i+n;}).reverse(),sel:false};});
     this.V=this.V.concat(mirroredV);this.F=this.F.concat(mirroredF);
@@ -2268,6 +2270,15 @@ function hudSlider(label,min,max,val,step,on){
   var r=el('input',{type:'range',min:min,max:max,step:step,value:val,class:'hud-range',
     oninput:function(e){out.textContent=(+e.target.value).toFixed(2);on(+e.target.value);}});
   return el('div',{class:'hud-row hud-srow'},[el('span',{class:'hud-slbl',text:label}),r,out]);}
+// One control cycles the mirror through Off → X → Y → Z (no extra buttons to crowd the
+// mobile HUD); the label shows the active axis so the current state is always readable.
+function cycleMirror(){var es=editState;
+  if(!es.mirror){es.mirror=true;es.mirrorAxis=0;}
+  else if(es.mirrorAxis<2){es.mirrorAxis++;}
+  else{es.mirror=false;}
+  EM._mirMap=null;EM._refresh();renderEditHud();renderPanel();
+  toast(es.mirror?'Mirror '+'XYZ'[es.mirrorAxis]+' — the other half mirrors live':'Mirror off');}
+function mirrorBtnLabel(){return editState.mirror?'Mir '+'XYZ'[editState.mirrorAxis]:'Mirror';}
 function renderEditHud(){
   var hud=$('#editHud');if(!hud)return;
   hud.innerHTML='';
@@ -2310,7 +2321,7 @@ function renderEditHud(){
         mr2.appendChild(el('button',{class:'hud-btn',text:'All',onclick:function(){EM.selAll();}}));
         mr2.appendChild(el('button',{class:'hud-btn',text:'None',onclick:function(){EM.clearSel();EM._refresh();renderPanel();}}));
         mr2.appendChild(el('button',{class:'hud-btn'+(editState.prop?' on':''),text:'Soft',onclick:function(){editState.prop=!editState.prop;EM._propW=null;renderEditHud();renderPanel();}}));
-        mr2.appendChild(el('button',{class:'hud-btn'+(editState.mirror?' on':''),text:'Mirror',onclick:function(){editState.mirror=!editState.mirror;EM._mirMap=null;EM._refresh();renderEditHud();renderPanel();}}));
+        mr2.appendChild(el('button',{class:'hud-btn'+(editState.mirror?' on':''),title:'Cycle mirror axis: Off → X → Y → Z',text:mirrorBtnLabel(),onclick:cycleMirror}));
         if(editState.mirror)mr2.appendChild(el('button',{class:'hud-btn',title:'Bake the mirrored half into real geometry',text:'Apply Mirror',onclick:function(){EM.applyMirror();}}));
         if(selN>0){
           mr2.appendChild(el('button',{class:'hud-btn',title:'Grow to the whole connected island',text:'Linked',onclick:function(){EM.selectLinked();}}));
@@ -2375,7 +2386,7 @@ function renderEditHud(){
   mr.appendChild(el('button',{class:'hud-btn',text:'None',onclick:function(){EM.clearSel();EM._refresh();renderPanel();}}));
   mr.appendChild(el('button',{class:'hud-btn'+(editState.multiSel?' on':''),title:'Multi-select (additive tap)',text:'Multi',onclick:function(){editState.multiSel=!editState.multiSel;renderEditHud();}}));
   mr.appendChild(el('button',{class:'hud-btn'+(editState.prop?' on':''),title:'Proportional edit (soft falloff)',text:'Soft',onclick:function(){editState.prop=!editState.prop;EM._propW=null;renderEditHud();renderPanel();}}));
-  mr.appendChild(el('button',{class:'hud-btn'+(editState.mirror?' on':''),title:'X-mirror moves across the YZ plane',text:'Mirror',onclick:function(){editState.mirror=!editState.mirror;EM._mirMap=null;EM._refresh();renderEditHud();renderPanel();}}));
+  mr.appendChild(el('button',{class:'hud-btn'+(editState.mirror?' on':''),title:'Cycle mirror axis: Off → X → Y → Z',text:mirrorBtnLabel(),onclick:cycleMirror}));
   if(editState.mirror)mr.appendChild(el('button',{class:'hud-btn',title:'Bake the mirrored half into real geometry',text:'Apply Mirror',onclick:function(){EM.applyMirror();}}));
   hud.appendChild(mr);
 
@@ -2481,12 +2492,11 @@ function panelEdit(b){
     b.appendChild(el('label',{class:'fld',style:'margin-top:6px',text:'Falloff radius'}));
     b.appendChild(el('input',{type:'range',min:.1,max:3,step:.05,value:editState.propR,
       oninput:function(e){editState.propR=+e.target.value;EM._propW=null;}}));}
-  b.appendChild(el('div',{style:'margin-top:6px'},[el('button',{class:editState.mirror?'on':'',style:'width:100%',
-    text:editState.mirror?'✓ X-Mirror (live ghost + mirrored drags)':'X-Mirror (live ghost + mirrored drags)',
-    onclick:function(){editState.mirror=!editState.mirror;EM._mirMap=null;EM._refresh();renderPanel();renderEditHud();
-      toast(editState.mirror?'Modeling one half — the other half mirrors live':'X-Mirror off');}})]));
+  b.appendChild(el('div',{style:'margin-top:6px'},[el('button',{class:editState.mirror?'on':'',style:'width:100%',title:'Cycle mirror axis: Off → X → Y → Z',
+    text:editState.mirror?'✓ Mirror '+'XYZ'[editState.mirrorAxis]+' (live ghost + mirrored drags)':'Mirror (live ghost + mirrored drags)',
+    onclick:cycleMirror})]));
   if(editState.mirror)b.appendChild(el('button',{style:'width:100%;margin-top:6px',title:'Bake the mirrored half into real, welded geometry',
-    text:'Apply Mirror (bake + weld)',onclick:function(){EM.applyMirror();}}));
+    text:'Apply Mirror '+'XYZ'[editState.mirrorAxis]+' (bake + weld)',onclick:function(){EM.applyMirror();}}));
 
   b.appendChild(el('div',{class:'section-title',text:'Operations'}));
   b.appendChild(el('div',{class:'grid2'},[
