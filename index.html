@@ -562,18 +562,20 @@ function applyMatPreset(mat,name){var p=MATPRESETS[name];if(!p)return;
 function makeModel(name,parts){var g=new THREE.Group();g.name=name;var extras=new THREE.Group();extras.name='__extras';
   g.userData={id:uid(),name:name,parts:[],mods:[],extras:extras};
   parts.forEach(function(p){var mesh=new THREE.Mesh(p.geo.clone(),p.mat);mesh.castShadow=true;mesh.receiveShadow=true;mesh.userData.part=true;
-    g.add(mesh);g.userData.parts.push({baseGeo:p.geo.clone(),mesh:mesh,mat:p.mat,_hasProperUVs:!!p._hasProperUVs});});
+    g.add(mesh);g.userData.parts.push({baseGeo:p.geo.clone(),mesh:mesh,mat:p.mat,_hasProperUVs:!!p._hasProperUVs,_baseIsAtlas:!!p._baseIsAtlas});});
   g.add(extras);return g;}
 
 function rebuildModel(model){var ud=model.userData;
   ud.parts.forEach(function(part,pi){var geo=part.baseGeo.clone();
     ud.mods.forEach(function(m){var def=MODDB[m.def];if(def&&def.kind==='deform'&&m.on){var r=def.apply(geo,m.val);if(r&&r.isBufferGeometry&&r!==geo){var prev=geo;geo=r;if(prev.dispose)prev.dispose();}}});
-    geo.computeVertexNormals();var old=part.mesh.geometry,wasAtlas=part._atlasUVs;part.mesh.geometry=geo;part._atlasUVs=false;if(old&&old!==part.baseGeo)old.dispose();
-    // If this part was being 3D-painted with a per-face atlas, the fresh geometry has the
-    // model's original (often overlapping) UVs — but the paint canvas is still in atlas
-    // layout. Re-derive matching atlas UVs on the new geometry (keepCanvas: don't touch the
-    // pixels — deform preserves face order so the tiles still line up) to avoid a scramble.
-    if(wasAtlas&&!part._hasProperUVs)ensureAtlasUVs(model,pi,true);});
+    // When the atlas has been promoted into baseGeo (_baseIsAtlas), the deformed geometry
+    // already carries the atlas UVs, so the paint state survives the rebuild untouched.
+    geo.computeVertexNormals();var old=part.mesh.geometry,wasAtlas=part._atlasUVs;part.mesh.geometry=geo;part._atlasUVs=!!part._baseIsAtlas;if(old&&old!==part.baseGeo)old.dispose();
+    // Otherwise, if this part was mid-3D-paint with a not-yet-promoted atlas (a deform was
+    // active when painting), the fresh geometry has the model's original (often overlapping)
+    // UVs while the canvas is still atlas-layout — re-derive matching atlas UVs on it
+    // (keepCanvas: leave the pixels alone; deform preserves face order so tiles line up).
+    if(wasAtlas&&!part._baseIsAtlas&&!part._hasProperUVs)ensureAtlasUVs(model,pi,true);});
   while(ud.extras.children.length)ud.extras.remove(ud.extras.children[0]);
   ud.mods.forEach(function(m){var def=MODDB[m.def];if(def&&def.kind==='gen'&&m.on){var o=def.apply(model,m.val);if(o)ud.extras.add(o);}});invalidate();}
 
@@ -601,7 +603,7 @@ function renameModel(m){
   History.push(function(){m.userData.name=old;renderAssets();renderPanel();},
                function(){m.userData.name=nv;renderAssets();renderPanel();});}
 function duplicateModel(m){
-  var parts=m.userData.parts.map(function(p){return {geo:p.mesh.geometry.clone(),mat:p.mat.clone(),_hasProperUVs:p._hasProperUVs};});
+  var parts=m.userData.parts.map(function(p){return {geo:p.mesh.geometry.clone(),mat:p.mat.clone(),_hasProperUVs:p._hasProperUVs,_baseIsAtlas:p._baseIsAtlas};});
   var name=m.userData.name+' Copy';
   var nm=makeModel(name,parts);
   addModel(nm);setActiveModel(nm.userData.id);toast('"'+name+'" duplicated');renderAssets();}
@@ -1277,6 +1279,7 @@ $('#fileProj').addEventListener('change',function(e){var f=e.target.files[0];if(
 function texToDataURL(t){if(!t||!t.image)return null;var img=t.image,cv;if(img instanceof HTMLCanvasElement)cv=img;else{cv=el('canvas');cv.width=img.width||512;cv.height=img.height||512;try{cv.getContext('2d').drawImage(img,0,0);}catch(e){return null;}}try{return cv.toDataURL('image/png');}catch(e){return null;}}
 function buildProjectData(skipMaps){return {v:2,scene:{env:sceneScene.userData.envId},models:state.models.map(function(m){return {name:m.userData.name,
   parts:m.userData.parts.map(function(p){var g=p.baseGeo;return {pos:Array.from(g.attributes.position.array),uv:g.attributes.uv?Array.from(g.attributes.uv.array):null,index:g.index?Array.from(g.index.array):null,
+    properUV:!!p._hasProperUVs,baseAtlas:!!p._baseIsAtlas,
     color:'#'+p.mat.color.getHexString(),rough:p.mat.roughness,metal:p.mat.metalness,map:skipMaps?null:texToDataURL(p.mat.map),
     emissive:'#'+p.mat.emissive.getHexString(),emInt:p.mat.emissiveIntensity,opacity:p.mat.opacity,transmission:p.mat.transmission||0,clearcoat:p.mat.clearcoat||0};}),mods:m.userData.mods};})};}
 function saveProject(){var data=buildProjectData(false);
@@ -1308,7 +1311,7 @@ function loadProject(data){state.models.length=0;(data.models||[]).forEach(funct
   if(pp.opacity!=null){mat.opacity=pp.opacity;}if(pp.transmission&&'transmission' in mat)mat.transmission=pp.transmission;if(pp.clearcoat&&'clearcoat' in mat)mat.clearcoat=pp.clearcoat;
   mat.transparent=(mat.opacity<1)||(mat.transmission>0);
   if(pp.map){var im=new Image();im.onload=function(){var tx=new THREE.Texture(im);tx.encoding=THREE.sRGBEncoding;tx.needsUpdate=true;mat.map=tx;mat.color.setHex(0xffffff);mat.needsUpdate=true;invalidate();};im.src=pp.map;}
-  return {geo:g,mat:mat};});
+  return {geo:g,mat:mat,_hasProperUVs:!!pp.properUV,_baseIsAtlas:!!pp.baseAtlas};});
   var m=makeModel(md.name,parts);m.userData.mods=md.mods||[];rebuildModel(m);addModel(m);});
   if(data.scene&&data.scene.env)applyEnv(sceneScene,data.scene.env);
   if(state.models.length){setActiveModel(state.models[0].userData.id);}renderAssets();}
@@ -2206,6 +2209,14 @@ function ensureAtlasUVs(m,pi,keepCanvas){
   newGeo.setAttribute('normal',new THREE.Float32BufferAttribute(nor,3));
   newGeo.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));
   part.mesh.geometry.dispose();part.mesh.geometry=newGeo;part._atlasUVs=true;
+  // Promote the per-face atlas into the persisted base geometry so it survives save/restore
+  // and modifier rebuilds. Only safe when no deform is active — then newGeo's positions equal
+  // the undeformed base, so baseGeo captures the true (un-deformed) atlas rather than a
+  // deformed snapshot that a later rebuild would deform a second time.
+  if(!keepCanvas&&!part._baseIsAtlas){
+    var hasDeform=m.userData.mods&&m.userData.mods.some(function(md){var d=MODDB[md.def];return d&&d.kind==='deform'&&md.on;});
+    if(!hasDeform){var ob=part.baseGeo;part.baseGeo=newGeo.clone();part._baseIsAtlas=true;if(ob&&ob.dispose)ob.dispose();}
+  }
   // keepCanvas: geometry was rebuilt under an already-atlased canvas (e.g. a modifier
   // re-deform) — face order is preserved so the existing atlas tiles still line up; only
   // the per-face UVs are re-derived above, the painted pixels must be left alone.
