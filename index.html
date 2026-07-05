@@ -582,7 +582,11 @@ function applyModifiers(m){if(!m)return;
                function(){m.userData.parts.forEach(function(p,i){p.baseGeo=newBase[i];});m.userData.mods=bakedMods.slice();rebuildModel(m);renderPanel();});}
 
 function setActiveModel(id){state.activeId=id;var holder=viewerScene.userData.modelHolder;while(holder.children.length)holder.remove(holder.children[0]);
-  var m=getModel(id);if(m){holder.add(m);frameObject(m,viewState.viewer);}invalidate();if(active.view==='viewer'||active.view==='paint')renderPanel();}
+  var m=getModel(id);if(m){holder.add(m);frameObject(m,viewState.viewer);}invalidate();
+  // If we're painting, rebind the editor to the newly-active model — paintInit freezes the
+  // previous model's texture first, so switching models never bleeds paint between them.
+  if(active.view==='paint')paintInit();
+  if(active.view==='viewer'||active.view==='paint')renderPanel();}
 function getModel(id){for(var i=0;i<state.models.length;i++)if(state.models[i].userData.id===id)return state.models[i];return null;}
 function addModel(m){state.models.push(m);scheduleAutosave();return m;}
 function renameModel(m){
@@ -860,13 +864,22 @@ function exportOBJ(root,name){root.updateWorldMatrix(true,true);var rootInv=new 
   toast('Exported '+name+(texFiles.length?' + .mtl + texture png':''));}
 
 /* ---------------- paint ---------------- */
-var paint={cv:$('#paintCanvas'),ctx:null,part:0,color:'#d8466a',size:38,soft:0,erase:false,eyedrop:false,drawing:false,last:null,tex:null,mode3d:false,_3dSnap:null,_lastFaceIdx:-1,_last3d:null};
+var paint={cv:$('#paintCanvas'),ctx:null,part:0,color:'#d8466a',size:38,soft:0,erase:false,eyedrop:false,drawing:false,last:null,tex:null,mode3d:false,_3dSnap:null,_lastFaceIdx:-1,_last3d:null,_boundMat:null};
 paint.ctx=paint.cv.getContext('2d');
+// The 2D editor paints onto ONE shared #paintCanvas, and while a model is being edited its
+// material samples that live canvas. Before the canvas is rebound to a different model, freeze
+// the outgoing model's pixels into its OWN independent canvas/texture — otherwise every painted
+// model would keep pointing at the single shared canvas and editing one would overwrite them all.
+function freezePaintTexture(){var bm=paint._boundMat;if(!bm||bm.map!==paint.tex)return;
+  var snap=el('canvas');snap.width=snap.height=1024;snap.getContext('2d').drawImage(paint.cv,0,0);
+  bm.map=tex(snap,true,[1,1]);bm.needsUpdate=true;paint._boundMat=null;}
 function paintInit(){var m=getModel(state.activeId);var part=m&&m.userData.parts[paint.part];var mat=part&&part.mat;
-  if(paint.tex&&mat&&mat.map===paint.tex){applyPaintTex();return;}
+  if(!mat)return;
+  if(paint._boundMat===mat){applyPaintTex();return;}   // already live-editing this exact part
+  freezePaintTexture();                                 // freeze whatever other part was live first
   paint.ctx.fillStyle='#ffffff';paint.ctx.fillRect(0,0,1024,1024);
-  if(mat&&mat.map&&mat.map.image&&mat.map.image!==paint.cv){try{paint.ctx.drawImage(mat.map.image,0,0,1024,1024);}catch(e){}}
-  paint.tex=tex(paint.cv,true,[1,1]);applyPaintTex();}
+  if(mat.map&&mat.map.image&&mat.map.image!==paint.cv){try{paint.ctx.drawImage(mat.map.image,0,0,1024,1024);}catch(e){}}
+  paint.tex=tex(paint.cv,true,[1,1]);paint._boundMat=mat;applyPaintTex();}
 function applyPaintTex(){var m=getModel(state.activeId);if(m&&m.userData.parts[paint.part]){var mat=m.userData.parts[paint.part].mat;mat.map=paint.tex;mat.color.setHex(0xffffff);mat.needsUpdate=true;}}
 function paintAt(x,y){var c=paint.ctx;c.globalCompositeOperation=paint.erase?'destination-out':'source-over';c.strokeStyle=paint.color;c.fillStyle=paint.color;c.lineWidth=paint.size;c.lineCap='round';c.lineJoin='round';
   if(paint.soft>0){c.shadowBlur=paint.soft*paint.size*0.9;c.shadowColor=paint.erase?'rgba(0,0,0,1)':paint.color;}else c.shadowBlur=0;
