@@ -209,6 +209,8 @@ canvas{display:block;touch-action:none}
 .hud-btn:active{transform:scale(.93)}
 .hud-sel{font-size:11.5px;color:rgba(255,212,226,.85);background:rgba(18,14,10,.78);padding:4px 12px;
   border-radius:999px;border:1px solid rgba(255,143,177,.28);pointer-events:none;backdrop-filter:blur(8px)}
+#selBox{position:fixed;display:none;border:1.5px dashed rgba(255,143,177,.9);background:rgba(255,143,177,.14);
+  border-radius:3px;z-index:12;pointer-events:none}
 .hud-srow{align-items:center}
 .hud-range{width:150px;pointer-events:auto;touch-action:none}
 .hud-slbl{font-size:11px;color:#ffd4e2;background:rgba(18,14,10,.85);padding:6px 9px;border-radius:8px;pointer-events:none}
@@ -294,6 +296,7 @@ canvas{display:block;touch-action:none}
       <button id="quRedo" title="Redo">↷</button>
     </div>
     <div id="hint"></div>
+    <div id="selBox"></div>
   </main>
 
   <aside id="panel">
@@ -460,6 +463,7 @@ dom.addEventListener('pointerdown',function(e){
     do3dPaint(e.clientX,e.clientY);}
   else if(active.view==='edit'&&ptrs.size===1){
     if(editState.tool==='sculpt'&&EM._meshObj){Sculpt.down(e);}
+    else if(editState.boxSel){editBox.active=true;editBox.ptId=e.pointerId;editBox.x0=e.clientX;editBox.y0=e.clientY;showSelBox(e.clientX,e.clientY,e.clientX,e.clientY);}
     else if(EM.selCount()>0){editDirect.pending=true;editDirect.ptId=e.pointerId;
       editDirect.startX=e.clientX;editDirect.startY=e.clientY;
       editDirect.prevX=e.clientX;editDirect.prevY=e.clientY;}}
@@ -473,6 +477,7 @@ dom.addEventListener('pointermove',function(e){
     return;}
   if(active.view==='edit'&&ptrs.size===1){
     if(Sculpt.painting&&Sculpt.ptId===e.pointerId){Sculpt.move(e);invalidate();return;}
+    if(editBox.active&&editBox.ptId===e.pointerId){showSelBox(editBox.x0,editBox.y0,e.clientX,e.clientY);clickStart=null;invalidate();return;}
     if(editDirect.ptId===e.pointerId){
       if(!editDirect.active&&editDirect.pending&&Math.hypot(e.clientX-editDirect.startX,e.clientY-editDirect.startY)>5){
         editDirect.active=true;editDirect.pending=false;
@@ -492,6 +497,12 @@ dom.addEventListener('pointermove',function(e){
 function endPtr(e){
   if(gizmoDrag===e.pointerId){Gizmo.end();gizmoDrag=null;invalidate();return;}
   if(active.view==='edit'&&Sculpt.painting&&Sculpt.ptId===e.pointerId){Sculpt.up();}
+  if(active.view==='edit'&&editBox.active&&editBox.ptId===e.pointerId){
+    hideSelBox();var r=dom.getBoundingClientRect();
+    if(Math.hypot(e.clientX-editBox.x0,e.clientY-editBox.y0)<5){onViewportTap(e);} // tiny box = plain tap
+    else{if(editState.boxSel!==2&&!editState.multiSel&&!e.shiftKey)EM.clearSel();
+      EM.boxSelect(editBox.x0-r.left,editBox.y0-r.top,e.clientX-r.left,e.clientY-r.top,active.vs.cam,r.width,r.height,editState.boxSel===2);}
+    editBox.active=false;editBox.ptId=null;clickStart=null;ptrs.delete(e.pointerId);invalidate();return;}
   if(active.view==='edit'&&editDirect.ptId===e.pointerId){
     if(editDirect.active){
       // Snap (top-bar Snap toggle): see applyEditSnap
@@ -1360,7 +1371,7 @@ function onViewportTap(e){var slot=curSlot();if(!slot)return;var r=dom.getBoundi
    MESH EDIT MODE
    ═══════════════════════════════════════════════════════ */
 
-var editState={mode:'face',tool:'select',grabActive:false,grabPtId:null,grabPrevX:0,grabPrevY:0,grabSnap:null,multiSel:false,hudExpanded:false,prop:false,propR:.8,mirror:false,mirrorAxis:0};
+var editState={mode:'face',tool:'select',grabActive:false,grabPtId:null,grabPrevX:0,grabPrevY:0,grabSnap:null,multiSel:false,hudExpanded:false,prop:false,propR:.8,mirror:false,mirrorAxis:0,boxSel:0};
 
 function screenDeltaToWorld(dx,dy){
   var cam=active.vs.cam,rad=active.vs.rad;
@@ -1372,6 +1383,12 @@ function screenDeltaToWorld(dx,dy){
 function distSeg2D(px,py,ax,ay,bx,by){var dx=bx-ax,dy=by-ay,l2=dx*dx+dy*dy;if(!l2)return Math.hypot(px-ax,py-ay);var t=Math.max(0,Math.min(1,((px-ax)*dx+(py-ay)*dy)/l2));return Math.hypot(px-(ax+t*dx),py-(ay+t*dy));}
 
 var editDirect={ptId:null,pending:false,active:false,startX:0,startY:0,prevX:0,prevY:0,snap:null};
+var editBox={active:false,ptId:null,x0:0,y0:0};
+function showSelBox(x0,y0,x1,y1){var el=$('#selBox');if(!el)return;el.style.display='block';
+  el.style.left=Math.min(x0,x1)+'px';el.style.top=Math.min(y0,y1)+'px';el.style.width=Math.abs(x1-x0)+'px';el.style.height=Math.abs(y1-y0)+'px';
+  el.style.borderColor=editState.boxSel===2?'rgba(120,190,255,.9)':'rgba(255,143,177,.9)';
+  el.style.background=editState.boxSel===2?'rgba(120,190,255,.14)':'rgba(255,143,177,.14)';}
+function hideSelBox(){var el=$('#selBox');if(el)el.style.display='none';}
 
 // Applied on drag-release when the top-bar Snap toggle is on: each vertex the drag moved
 // first tries to snap onto a nearby *stationary* vertex (closing gaps exactly, Blender-style
@@ -1732,6 +1749,24 @@ var EM={
     if(mode==='face'){var fi=(hit&&hit.faceIndex>=0&&this._triMap[hit.faceIndex]!=null)?this._triMap[hit.faceIndex]:-1;if(fi>=0)this.F[fi].sel=add?!this.F[fi].sel:true;}
     else if(mode==='vert'){var vi=this._pickVert(sx,sy,cam,W,H,hit);if(vi>=0)this.V[vi].sel=add?!this.V[vi].sel:true;}
     else{var ei=this._pickEdge(sx,sy,cam,W,H,hit);if(ei>=0)this.E[ei].sel=add?!this.E[ei].sel:true;}
+    this._refresh();renderPanel();},
+
+  // Rectangular drag-select in canvas pixels. sub=true removes from the selection instead of
+  // adding. Only front-facing elements are affected (an element counts as front if it belongs
+  // to a face whose normal points toward the camera) so the box can't reach through to the
+  // far side of the solid mesh.
+  boxSelect:function(x0,y0,x1,y1,cam,W,H,sub){
+    var self=this,mode=editState.mode,val=!sub;
+    var minx=Math.min(x0,x1),maxx=Math.max(x0,x1),miny=Math.min(y0,y1),maxy=Math.max(y0,y1);
+    function scr(v){var p=v.clone().project(cam);return {x:(p.x+1)/2*W,y:(-p.y+1)/2*H,z:p.z};}
+    function inBox(s){return s.z<=1&&s.x>=minx&&s.x<=maxx&&s.y>=miny&&s.y<=maxy;}
+    var cp=cam.position,front=this.F.map(function(f,fi){var n=self._faceNormal(fi),c=self._faceCenter(fi);return n.dot(cp.clone().sub(c))>0;});
+    if(mode==='face'){this.F.forEach(function(f,fi){if(front[fi]&&inBox(scr(self._faceCenter(fi))))f.sel=val;});}
+    else if(mode==='vert'){var vf=new Array(this.V.length);this.F.forEach(function(f,fi){if(front[fi])f.vi.forEach(function(vi){vf[vi]=true;});});
+      this.V.forEach(function(v,i){if(vf[i]&&inBox(scr(v)))v.sel=val;});}
+    else{var ef=new Array(this.E.length);this.E.forEach(function(e,i){e.fi.forEach(function(fi){if(front[fi])ef[i]=true;});});
+      this.E.forEach(function(e,i){if(!ef[i])return;var sa=scr(self.V[e.a]),sb=scr(self.V[e.b]);
+        if(inBox({x:(sa.x+sb.x)/2,y:(sa.y+sb.y)/2,z:Math.min(sa.z,sb.z)})||(inBox(sa)&&inBox(sb)))e.sel=val;});}
     this._refresh();renderPanel();},
 
   // Distance beyond which a vertex counts as "behind the front surface" (occluded). Verts of
@@ -2387,6 +2422,11 @@ function cycleMirror(){var es=editState;
   EM._mirMap=null;EM._refresh();renderEditHud();renderPanel();
   toast(es.mirror?'Mirror '+'XYZ'[es.mirrorAxis]+' — the other half mirrors live':'Mirror off');}
 function mirrorBtnLabel(){return editState.mirror?'Mir '+'XYZ'[editState.mirrorAxis]:'Mirror';}
+// Drag box-select cycles Off → Add (+) → Subtract (−). While on, dragging the viewport draws
+// a selection rectangle instead of moving the selection; orbit stays on the RotBall gizmo.
+function cycleBoxSel(){editState.boxSel=(editState.boxSel+1)%3;if(editState.boxSel)editState.tool='select';
+  renderEditHud();renderPanel();toast(editState.boxSel===1?'Box select — drag to add':(editState.boxSel===2?'Box select — drag to remove':'Box select off'));}
+function boxSelBtnLabel(){return editState.boxSel===1?'Box +':(editState.boxSel===2?'Box −':'Box');}
 function renderEditHud(){
   var hud=$('#editHud');if(!hud)return;
   hud.innerHTML='';
@@ -2408,6 +2448,7 @@ function renderEditHud(){
       ['face','vert','edge'].forEach(function(m){
         r1.appendChild(el('button',{class:'hud-btn'+(mode===m?' on':''),text:m[0].toUpperCase()+m.slice(1),onclick:function(){editState.mode=m;EM.clearSel();EM._refresh();renderPanel();}}));});
       r1.appendChild(el('button',{class:'hud-btn'+(editState.multiSel?' on':''),title:'Multi-select: tap to add to selection',text:'Multi',onclick:function(){editState.multiSel=!editState.multiSel;renderEditHud();}}));
+      r1.appendChild(el('button',{class:'hud-btn'+(editState.boxSel?' on':''),title:'Drag box-select: Off → Add → Remove',text:boxSelBtnLabel(),onclick:cycleBoxSel}));
     }
     r1.appendChild(el('button',{class:'hud-btn'+(editState.hudExpanded?' on':''),text:'···',onclick:function(){editState.hudExpanded=!editState.hudExpanded;renderEditHud();}}));
     hud.appendChild(r1);
@@ -2493,6 +2534,7 @@ function renderEditHud(){
   mr.appendChild(el('button',{class:'hud-btn',text:'All',onclick:function(){EM.selAll();}}));
   mr.appendChild(el('button',{class:'hud-btn',text:'None',onclick:function(){EM.clearSel();EM._refresh();renderPanel();}}));
   mr.appendChild(el('button',{class:'hud-btn'+(editState.multiSel?' on':''),title:'Multi-select (additive tap)',text:'Multi',onclick:function(){editState.multiSel=!editState.multiSel;renderEditHud();}}));
+  mr.appendChild(el('button',{class:'hud-btn'+(editState.boxSel?' on':''),title:'Drag box-select: Off → Add → Remove',text:boxSelBtnLabel(),onclick:cycleBoxSel}));
   mr.appendChild(el('button',{class:'hud-btn'+(editState.prop?' on':''),title:'Proportional edit (soft falloff)',text:'Soft',onclick:function(){editState.prop=!editState.prop;EM._propW=null;renderEditHud();renderPanel();}}));
   mr.appendChild(el('button',{class:'hud-btn'+(editState.mirror?' on':''),title:'Cycle mirror axis: Off → X → Y → Z',text:mirrorBtnLabel(),onclick:cycleMirror}));
   if(editState.mirror)mr.appendChild(el('button',{class:'hud-btn',title:'Bake the mirrored half into real geometry',text:'Apply Mirror',onclick:function(){EM.applyMirror();}}));
