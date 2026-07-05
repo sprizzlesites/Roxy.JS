@@ -748,7 +748,8 @@ function parseOBJ(text){var V=[],VT=[],VN=[],pos=[],uv=[],nor=[];var lines=text.
      if(c[2]&&VN[+c[2]-1]){var n2=VN[+c[2]-1];nor.push(n2[0],n2[1],n2[2]);}else nor.push(0,0,0);});}}});
  var g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
  g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));if(nor.some(function(x){return x!==0;}))g.setAttribute('normal',new THREE.Float32BufferAttribute(nor,3));else g.computeVertexNormals();
- g.computeBoundingBox();var c=new THREE.Vector3();g.boundingBox.getCenter(c);g.translate(-c.x,-c.y,-c.z);return g;}
+ g.computeBoundingBox();var c=new THREE.Vector3();g.boundingBox.getCenter(c);g.translate(-c.x,-c.y,-c.z);
+ g.userData.hasUV=VT.length>0;return g;}
 
 function importGLB(buf){ // node transforms, interleaved buffers, embedded baseColor textures
  var dv=new DataView(buf);if(dv.getUint32(0,true)!==0x46546C67)throw new Error('not glb');
@@ -1267,7 +1268,7 @@ function filterAssetGrid(){var grid=$('#assetsGrid');if(!grid)return;
 /* ----- file inputs ----- */
 var imgTarget='paint';
 $('#fileModel').addEventListener('change',function(e){var f=e.target.files[0];if(!f)return;var rd=new FileReader();
-  if(/\.obj$/i.test(f.name)){rd.onload=function(){try{var g=parseOBJ(rd.result);var m=makeModel(f.name.replace(/\.obj$/i,''),[{geo:g,mat:makeMaterial({color:0xcdb7a4,rough:.55})}]);addModel(m);setActiveModel(m.userData.id);setView('viewer');toast('Imported '+f.name);}catch(err){toast('OBJ import failed');console.error(err);}};rd.readAsText(f);}
+  if(/\.obj$/i.test(f.name)){rd.onload=function(){try{var g=parseOBJ(rd.result);var m=makeModel(f.name.replace(/\.obj$/i,''),[{geo:g,mat:makeMaterial({color:0xcdb7a4,rough:.55}),_hasProperUVs:g.userData.hasUV}]);addModel(m);setActiveModel(m.userData.id);setView('viewer');toast('Imported '+f.name);}catch(err){toast('OBJ import failed');console.error(err);}};rd.readAsText(f);}
   else{rd.onload=function(){try{var m=importGLB(rd.result);m.userData.name=f.name.replace(/\.(glb|gltf)$/i,'');addModel(m);setActiveModel(m.userData.id);setView('viewer');toast('Imported '+f.name);}catch(err){toast('GLB import failed (try .obj)');console.error(err);}};rd.readAsArrayBuffer(f);}
   e.target.value='';});
 $('#fileImg').addEventListener('change',function(e){var f=e.target.files[0];if(!f)return;var rd=new FileReader();rd.onload=function(){var img=new Image();img.onload=function(){
