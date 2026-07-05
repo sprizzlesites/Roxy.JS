@@ -1500,7 +1500,7 @@ var EM={
     this.V=[];this.F=[];this.E=[];this._triMap=[];},
 
   fromPrim:function(type){
-    EM._srcTex=null;
+    EM._srcTex=null;EM._srcProperUVs=false;
     var mt=this._mat;mt.map=null;mt.color.setHex(0xbba898);mt.transparent=false;mt.opacity=1;mt.needsUpdate=true;
     var s=1,geo;
     // Cube/Plane are built as native quads (not via THREE's triangulating BoxGeometry/
@@ -1592,6 +1592,7 @@ var EM={
     pi=pi||0;if(pi>=m.userData.parts.length)pi=0;
     var pt=m.userData.parts[pi];
     EM._srcTex=pt.mat&&pt.mat.map&&pt.mat.map.image?pt.mat.map:null;
+    EM._srcProperUVs=!!pt._hasProperUVs; // carry the source's real-unwrap status to the export
     // Texture the live edit mesh (per-vertex UVs carried in _fromGeo) so the artist
     // sees the wrapping deform while sculpting; slight transparency keeps depth readable.
     var mt=this._mat;
@@ -2049,7 +2050,10 @@ var EM={
     var mat=makeMaterial({color:EM._srcTex?0xffffff:0xcdb7a4,rough:.55});
     if(EM._srcTex){mat.map=EM._srcTex;mat.needsUpdate=true;}
     var name='Mesh '+(state.models.length+1);var m=makeModel(name,[{geo:geo,mat:mat}]);
-    if(keepUV)m.userData.parts[0]._hasProperUVs=(EM._srcTex.flipY===false);
+    // Inherit the real-unwrap status from the source model (not the texture's flipY, which is
+    // true for painted-canvas sources even when the underlying UVs are a proper GLB unwrap) so
+    // the exported model paints non-destructively iff its source did.
+    if(keepUV)m.userData.parts[0]._hasProperUVs=!!EM._srcProperUVs;
     addModel(m);setActiveModel(m.userData.id);toast('"'+name+'" added — open Viewer');renderPanel();},
 
   // Unindexed triangles keeping each vertex's carried u0/v0 (flat per-face normals)
