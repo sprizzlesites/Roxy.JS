@@ -502,8 +502,8 @@ function endPtr(e){
     editDirect.ptId=null;editDirect.pending=false;editDirect.active=false;editDirect.snap=null;EM._propW=null;EM._mirMap=null;}
   if(active.view==='paint'&&paint.mode3d&&paint.drawing){
     paint.drawing=false;paint.last=null;paint._last3d=null;
-    var bef=paint._3dSnap,aft=paint.ctx.getImageData(0,0,1024,1024),tx=paint.tex;
-    if(bef){History.push(function(){paint.ctx.putImageData(bef,0,0);tx.needsUpdate=true;invalidate();},function(){paint.ctx.putImageData(aft,0,0);tx.needsUpdate=true;invalidate();});}
+    var bef=paint._3dSnap,aft=paint.ctx.getImageData(0,0,1024,1024);
+    if(bef)pushPaintHistory(bef,aft);
     paint._3dSnap=null;}
   ptrs.delete(e.pointerId);lastDist=0;lastMid=null;
   if(clickStart&&clickStart.id===e.pointerId&&Date.now()-clickStart.t<350&&Math.hypot(e.clientX-clickStart.x,e.clientY-clickStart.y)<6){
@@ -881,6 +881,15 @@ function paintInit(){var m=getModel(state.activeId);var part=m&&m.userData.parts
   if(mat.map&&mat.map.image&&mat.map.image!==paint.cv){try{paint.ctx.drawImage(mat.map.image,0,0,1024,1024);}catch(e){}}
   paint.tex=tex(paint.cv,true,[1,1]);paint._boundMat=mat;applyPaintTex();}
 function applyPaintTex(){var m=getModel(state.activeId);if(m&&m.userData.parts[paint.part]){var mat=m.userData.parts[paint.part].mat;mat.map=paint.tex;mat.color.setHex(0xffffff);mat.needsUpdate=true;}}
+// Record a paint edit so undo/redo targets the model the stroke belongs to. If that model is
+// still live-bound, write to the shared editor canvas; if the user has since switched models,
+// write to the model's own frozen canvas instead of clobbering whatever is being edited now.
+function pushPaintHistory(before,after){var mat=paint._boundMat;
+  function apply(data){
+    if(paint._boundMat===mat){paint.ctx.putImageData(data,0,0);if(paint.tex)paint.tex.needsUpdate=true;}
+    else if(mat&&mat.map&&mat.map.image&&mat.map.image.getContext){mat.map.image.getContext('2d').putImageData(data,0,0);mat.map.needsUpdate=true;}
+    invalidate();}
+  History.push(function(){apply(before);},function(){apply(after);});}
 function paintAt(x,y){var c=paint.ctx;c.globalCompositeOperation=paint.erase?'destination-out':'source-over';c.strokeStyle=paint.color;c.fillStyle=paint.color;c.lineWidth=paint.size;c.lineCap='round';c.lineJoin='round';
   if(paint.soft>0){c.shadowBlur=paint.soft*paint.size*0.9;c.shadowColor=paint.erase?'rgba(0,0,0,1)':paint.color;}else c.shadowBlur=0;
   if(paint.last){c.beginPath();c.moveTo(paint.last.x,paint.last.y);c.lineTo(x,y);c.stroke();}else{c.beginPath();c.arc(x,y,paint.size/2,0,7);c.fill();}
@@ -891,8 +900,8 @@ function paintPattern(kind){var c=paint.ctx,S=1024,before=c.getImageData(0,0,S,S
   else if(kind==='dots'){c.fillStyle='#ffffff';c.fillRect(0,0,S,S);c.fillStyle=paint.color;for(var y=0;y<S;y+=80)for(var x=0;x<S;x+=80){c.beginPath();c.arc(x+40,y+40,18,0,7);c.fill();}}
   else if(kind==='gradient'){var g=c.createLinearGradient(0,0,0,S);g.addColorStop(0,paint.color);g.addColorStop(1,'#ffffff');c.fillStyle=g;c.fillRect(0,0,S,S);}
   else if(kind==='sprinkles'){c.fillStyle='#ffffff';c.fillRect(0,0,S,S);var cols=['#ff5d8f','#ffd23f','#5ec5ff','#7be0a3','#c08bff','#ff8a3d'];for(var i=0;i<900;i++){var x=Math.random()*S,y=Math.random()*S,a=Math.random()*Math.PI;c.save();c.translate(x,y);c.rotate(a);c.fillStyle=cols[(Math.random()*cols.length)|0];c.fillRect(-3,-12,6,24);c.restore();}}
-  var after=c.getImageData(0,0,S,S),tx=paint.tex;paint.tex.needsUpdate=true;invalidate();
-  History.push(function(){c.putImageData(before,0,0);tx.needsUpdate=true;invalidate();},function(){c.putImageData(after,0,0);tx.needsUpdate=true;invalidate();});}
+  var after=c.getImageData(0,0,S,S);paint.tex.needsUpdate=true;invalidate();
+  pushPaintHistory(before,after);}
 function paintUV(x,y){var r=paint.cv.getBoundingClientRect();return {x:(x-r.left)/r.width*1024,y:(y-r.top)/r.height*1024};}
 
 /* ----- eyedropper: pick brush color from the texture, 2D canvas or 3D surface ----- */
@@ -918,8 +927,8 @@ function pickColorAt3D(clientX,clientY){
     if(paint.eyedrop){pickColorAt2D(u.x,u.y);return;}
     c.setPointerCapture(e.pointerId);paint.drawing=true;paint.last=null;snap=paint.ctx.getImageData(0,0,1024,1024);paintAt(u.x,u.y);});
   c.addEventListener('pointermove',function(e){if(paint.mode3d||!paint.drawing)return;var u=paintUV(e.clientX,e.clientY);paintAt(u.x,u.y);});
-  function up(){if(!paint.drawing)return;paint.drawing=false;paint.last=null;if(snap){var before=snap,after=paint.ctx.getImageData(0,0,1024,1024);var tx=paint.tex;
-    History.push(function(){paint.ctx.putImageData(before,0,0);tx.needsUpdate=true;invalidate();},function(){paint.ctx.putImageData(after,0,0);tx.needsUpdate=true;invalidate();});snap=null;}}
+  function up(){if(!paint.drawing)return;paint.drawing=false;paint.last=null;if(snap){var before=snap,after=paint.ctx.getImageData(0,0,1024,1024);
+    pushPaintHistory(before,after);snap=null;}}
   c.addEventListener('pointerup',up);c.addEventListener('pointercancel',up);})();
 function paintDrawUV(){var m=getModel(state.activeId);if(!m||!m.userData.parts[paint.part])return;var geo=m.userData.parts[paint.part].mesh.geometry;var uv=geo.attributes.uv;if(!uv){toast('This part has no UVs');return;}
   var c=paint.ctx;c.save();c.globalCompositeOperation='source-over';c.strokeStyle='rgba(0,0,0,.35)';c.lineWidth=1;var idx=geo.index;var S=1024;
