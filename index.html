@@ -2131,7 +2131,18 @@ var EM={
    geometrically unrelated faces (e.g. the back of a sphere). */
 function ensureAtlasUVs(m,pi){
   var part=m&&m.userData.parts[pi];if(!part||part._atlasUVs)return;
-  var geo=part.mesh.geometry,posAttr=geo.attributes.position,norAttr=geo.attributes.normal,idxAttr=geo.index;
+  var geo=part.mesh.geometry;
+  // Non-destructive fast path: a mesh that already carries a real UV unwrap (imported GLB,
+  // or a textured mesh exported from the editor) does NOT need the per-face atlas repack.
+  // do3dPaint only needs the geometry un-indexed (it addresses faces as fi*3); un-indexing
+  // alone keeps the ORIGINAL uvs, so painting happens in the model's own texture space and
+  // toggling "Paint on 3D surface" never rebakes/scrambles the existing texture.
+  if(part._hasProperUVs&&geo.attributes.uv){
+    var ni=geo.index?geo.toNonIndexed():geo.clone();
+    part.mesh.geometry.dispose();part.mesh.geometry=ni;part._atlasUVs=true;
+    invalidate();return;
+  }
+  var posAttr=geo.attributes.position,norAttr=geo.attributes.normal,idxAttr=geo.index;
   var origUVAttr=geo.attributes.uv; // save original UVs before rebuild
   var triCount=idxAttr?idxAttr.count/3:posAttr.count/3;
   var faceData=[],pos=[],nor=[],uv=[];
