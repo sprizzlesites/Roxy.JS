@@ -566,9 +566,14 @@ function makeModel(name,parts){var g=new THREE.Group();g.name=name;var extras=ne
   g.add(extras);return g;}
 
 function rebuildModel(model){var ud=model.userData;
-  ud.parts.forEach(function(part){var geo=part.baseGeo.clone();
+  ud.parts.forEach(function(part,pi){var geo=part.baseGeo.clone();
     ud.mods.forEach(function(m){var def=MODDB[m.def];if(def&&def.kind==='deform'&&m.on){var r=def.apply(geo,m.val);if(r&&r.isBufferGeometry&&r!==geo){var prev=geo;geo=r;if(prev.dispose)prev.dispose();}}});
-    geo.computeVertexNormals();var old=part.mesh.geometry;part.mesh.geometry=geo;part._atlasUVs=false;if(old&&old!==part.baseGeo)old.dispose();});
+    geo.computeVertexNormals();var old=part.mesh.geometry,wasAtlas=part._atlasUVs;part.mesh.geometry=geo;part._atlasUVs=false;if(old&&old!==part.baseGeo)old.dispose();
+    // If this part was being 3D-painted with a per-face atlas, the fresh geometry has the
+    // model's original (often overlapping) UVs — but the paint canvas is still in atlas
+    // layout. Re-derive matching atlas UVs on the new geometry (keepCanvas: don't touch the
+    // pixels — deform preserves face order so the tiles still line up) to avoid a scramble.
+    if(wasAtlas&&!part._hasProperUVs)ensureAtlasUVs(model,pi,true);});
   while(ud.extras.children.length)ud.extras.remove(ud.extras.children[0]);
   ud.mods.forEach(function(m){var def=MODDB[m.def];if(def&&def.kind==='gen'&&m.on){var o=def.apply(model,m.val);if(o)ud.extras.add(o);}});invalidate();}
 
@@ -2151,7 +2156,7 @@ var EM={
 /* Rebuild any mesh's UVs into a per-face atlas so every triangle gets its
    own unique UV tile — prevents painting on one face from bleeding to
    geometrically unrelated faces (e.g. the back of a sphere). */
-function ensureAtlasUVs(m,pi){
+function ensureAtlasUVs(m,pi,keepCanvas){
   var part=m&&m.userData.parts[pi];if(!part||part._atlasUVs)return;
   var geo=part.mesh.geometry;
   // Non-destructive fast path: a mesh that already carries a real UV unwrap (imported GLB,
@@ -2201,6 +2206,10 @@ function ensureAtlasUVs(m,pi){
   newGeo.setAttribute('normal',new THREE.Float32BufferAttribute(nor,3));
   newGeo.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));
   part.mesh.geometry.dispose();part.mesh.geometry=newGeo;part._atlasUVs=true;
+  // keepCanvas: geometry was rebuilt under an already-atlased canvas (e.g. a modifier
+  // re-deform) — face order is preserved so the existing atlas tiles still line up; only
+  // the per-face UVs are re-derived above, the painted pixels must be left alone.
+  if(!keepCanvas){
   // Bake existing canvas content into new atlas tiles instead of wiping to white
   if(origUVAttr&&paint.tex){
     // Copy current canvas to temp so we can read from it while writing to paint.cv
@@ -2240,7 +2249,8 @@ function ensureAtlasUVs(m,pi){
       paint.ctx.restore();}
   }else{
     paint.ctx.fillStyle='#ffffff';paint.ctx.fillRect(0,0,1024,1024);}
-  if(paint.tex)paint.tex.needsUpdate=true;invalidate();}
+  if(paint.tex)paint.tex.needsUpdate=true;}
+  invalidate();}
 
 // Project a world-space point to dom-local screen pixels
 function projLocal(w,cam,r){var p=w.clone().project(cam);return{x:(p.x*.5+.5)*r.width,y:(1-(p.y*.5+.5))*r.height};}
