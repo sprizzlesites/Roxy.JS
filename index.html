@@ -1159,10 +1159,20 @@ function syncSceneFromModels(){/* placements already live in sceneScene holder *
 function addPlacement(modelId){var src=getModel(modelId);if(!src)return;var inst=src.clone(true);inst.userData={placement:true,modelId:modelId,name:src.userData.name};
   inst.traverse(function(o){if(o.isMesh){o.castShadow=true;o.receiveShadow=true;}});var n=sceneScene.userData.holder.children.length;inst.position.set((n%3-1)*2.4,0,Math.floor(n/3)*2.4);sceneScene.userData.holder.add(inst);state.selScene=inst;
   History.push(function(){sceneScene.userData.holder.remove(inst);if(state.selScene===inst)state.selScene=null;},function(){sceneScene.userData.holder.add(inst);state.selScene=inst;});invalidate();if(active.view==='scene')renderPanel();}
-function addLight(kind){var L,helper;if(kind==='Point'){L=new THREE.PointLight(0xffffff,12,30);L.position.set(2,3,2);}else if(kind==='Spot'){L=new THREE.SpotLight(0xffffff,18,30,.6,.4);L.position.set(3,5,2);}else{L=new THREE.DirectionalLight(0xffffff,2);L.position.set(3,5,2);}
-  L.castShadow=true;var sph=new THREE.Mesh(new THREE.SphereGeometry(.12,12,8),new THREE.MeshBasicMaterial({color:0xffe9a8}));sph.position.copy(L.position);L.userData.helper=sph;L.userData.kind=kind;
-  sceneScene.userData.lights.add(L);sceneScene.userData.lights.add(sph);state.selLight=L;state.selScene=null;
-  History.push(function(){sceneScene.userData.lights.remove(L);sceneScene.userData.lights.remove(sph);if(state.selLight===L)state.selLight=null;},function(){sceneScene.userData.lights.add(L);sceneScene.userData.lights.add(sph);state.selLight=L;});renderPanel();}
+// Create a light + its helper sphere and add both to the scene. Shared by the "+ Light"
+// buttons (defaults) and project restore (saved params) so the two never diverge.
+function spawnLight(kind,params){params=params||{};var L;
+  if(kind==='Point')L=new THREE.PointLight(0xffffff,params.intensity!=null?params.intensity:12,params.distance||30);
+  else if(kind==='Spot')L=new THREE.SpotLight(0xffffff,params.intensity!=null?params.intensity:18,params.distance||30,params.angle!=null?params.angle:.6,params.penumbra!=null?params.penumbra:.4);
+  else L=new THREE.DirectionalLight(0xffffff,params.intensity!=null?params.intensity:2);
+  L.castShadow=true;
+  if(params.pos)L.position.fromArray(params.pos);else L.position.set(kind==='Point'?2:3,kind==='Point'?3:5,2);
+  if(params.color)L.color.set(params.color);
+  var sph=new THREE.Mesh(new THREE.SphereGeometry(.12,12,8),new THREE.MeshBasicMaterial({color:0xffe9a8}));
+  sph.position.copy(L.position);sph.material.color.copy(L.color);L.userData.helper=sph;L.userData.kind=kind;
+  sceneScene.userData.lights.add(L);sceneScene.userData.lights.add(sph);return L;}
+function addLight(kind){var L=spawnLight(kind);state.selLight=L;state.selScene=null;
+  History.push(function(){sceneScene.userData.lights.remove(L);sceneScene.userData.lights.remove(L.userData.helper);if(state.selLight===L)state.selLight=null;},function(){sceneScene.userData.lights.add(L);sceneScene.userData.lights.add(L.userData.helper);state.selLight=L;});renderPanel();}
 function panelScene(b){b.appendChild(el('h2',{text:'Scene'}));b.appendChild(el('p',{class:'sub',text:'Compose models, lights & camera, then render.'}));
   b.appendChild(el('div',{class:'section-title',text:'Environment'}));var es=el('select',{onchange:function(e){applyEnv(sceneScene,e.target.value);}});ENVS.forEach(function(p){es.appendChild(el('option',{value:p.id,text:p.name}));});es.value=sceneScene.userData.envId;b.appendChild(es);
   var bgIn=el('input',{type:'color',value:'#'+(sceneScene.background&&sceneScene.background.getHexString?sceneScene.background.getHexString():'14100c'),oninput:function(e){sceneScene.background=new THREE.Color(e.target.value);invalidate();}});
@@ -1278,7 +1288,12 @@ $('#fileProj').addEventListener('change',function(e){var f=e.target.files[0];if(
 
 /* ----- project save/load (geometry baked) ----- */
 function texToDataURL(t){if(!t||!t.image)return null;var img=t.image,cv;if(img instanceof HTMLCanvasElement)cv=img;else{cv=el('canvas');cv.width=img.width||512;cv.height=img.height||512;try{cv.getContext('2d').drawImage(img,0,0);}catch(e){return null;}}try{return cv.toDataURL('image/png');}catch(e){return null;}}
-function buildProjectData(skipMaps){return {v:2,scene:{env:sceneScene.userData.envId},models:state.models.map(function(m){return {name:m.userData.name,
+function buildProjectData(skipMaps){return {v:2,scene:{env:sceneScene.userData.envId,
+  bg:(sceneScene.background&&sceneScene.background.getHexString)?('#'+sceneScene.background.getHexString()):null,
+  grid:sceneScene.userData.grid?!!sceneScene.userData.grid.visible:false,
+  placements:sceneScene.userData.holder.children.filter(function(c){return c.userData&&c.userData.placement;}).map(function(c){return {modelId:c.userData.modelId,pos:c.position.toArray(),rot:[c.rotation.x,c.rotation.y,c.rotation.z],scale:c.scale.toArray()};}),
+  lights:sceneScene.userData.lights.children.filter(function(c){return c.isLight;}).map(function(L){return {kind:L.userData.kind,pos:L.position.toArray(),color:'#'+L.color.getHexString(),intensity:L.intensity,distance:L.distance,angle:L.angle,penumbra:L.penumbra};})
+  },models:state.models.map(function(m){return {id:m.userData.id,name:m.userData.name,
   parts:m.userData.parts.map(function(p){var g=p.baseGeo;return {pos:Array.from(g.attributes.position.array),uv:g.attributes.uv?Array.from(g.attributes.uv.array):null,index:g.index?Array.from(g.index.array):null,
     properUV:!!p._hasProperUVs,baseAtlas:!!p._baseIsAtlas,
     color:'#'+p.mat.color.getHexString(),rough:p.mat.roughness,metal:p.mat.metalness,map:skipMaps?null:texToDataURL(p.mat.map),
@@ -1305,7 +1320,12 @@ function tryRestoreAutosave(){
   try{loadProject(data);toast('Restored autosave from last session');ok=true;}
   catch(e){try{localStorage.removeItem(AUTOSAVE_KEY);}catch(e2){}}
   autosaveSuspended=false;return ok;}
-function loadProject(data){state.models.length=0;(data.models||[]).forEach(function(md){var parts=md.parts.map(function(pp){var g=new THREE.BufferGeometry();
+function loadProject(data){state.models.length=0;
+  // clear any existing scene composition so a load replaces rather than stacks
+  var _h=sceneScene.userData.holder;while(_h.children.length)_h.remove(_h.children[0]);
+  var _lg=sceneScene.userData.lights;while(_lg.children.length)_lg.remove(_lg.children[0]);
+  state.selScene=null;state.selLight=null;
+  (data.models||[]).forEach(function(md){var parts=md.parts.map(function(pp){var g=new THREE.BufferGeometry();
   g.setAttribute('position',new THREE.Float32BufferAttribute(pp.pos,3));if(pp.uv)g.setAttribute('uv',new THREE.Float32BufferAttribute(pp.uv,2));if(pp.index)g.setIndex(pp.index);g.computeVertexNormals();
   var mat=makeMaterial({color:new THREE.Color(pp.color).getHex(),rough:pp.rough,metal:pp.metal});
   if(pp.emissive)mat.emissive.set(pp.emissive);if(pp.emInt!=null)mat.emissiveIntensity=pp.emInt;
@@ -1313,8 +1333,18 @@ function loadProject(data){state.models.length=0;(data.models||[]).forEach(funct
   mat.transparent=(mat.opacity<1)||(mat.transmission>0);
   if(pp.map){var im=new Image();im.onload=function(){var tx=new THREE.Texture(im);tx.encoding=THREE.sRGBEncoding;tx.needsUpdate=true;mat.map=tx;mat.color.setHex(0xffffff);mat.needsUpdate=true;invalidate();};im.src=pp.map;}
   return {geo:g,mat:mat,_hasProperUVs:!!pp.properUV,_baseIsAtlas:!!pp.baseAtlas};});
-  var m=makeModel(md.name,parts);m.userData.mods=md.mods||[];rebuildModel(m);addModel(m);});
-  if(data.scene&&data.scene.env)applyEnv(sceneScene,data.scene.env);
+  var m=makeModel(md.name,parts);if(md.id)m.userData.id=md.id;m.userData.mods=md.mods||[];rebuildModel(m);addModel(m);});
+  var sc=data.scene||{};
+  if(sc.env)applyEnv(sceneScene,sc.env);
+  if(sc.bg)sceneScene.background=new THREE.Color(sc.bg);
+  if(sceneScene.userData.grid){sceneScene.userData.grid.visible=!!sc.grid;sceneScene.userData.showGrid=!!sc.grid;}
+  // rebuild scene composition (placements re-link to models by their preserved ids)
+  (sc.placements||[]).forEach(function(pl){var src=getModel(pl.modelId);if(!src)return;
+    var inst=src.clone(true);inst.userData={placement:true,modelId:pl.modelId,name:src.userData.name};
+    inst.traverse(function(o){if(o.isMesh){o.castShadow=true;o.receiveShadow=true;}});
+    if(pl.pos)inst.position.fromArray(pl.pos);if(pl.rot)inst.rotation.set(pl.rot[0],pl.rot[1],pl.rot[2]);if(pl.scale)inst.scale.fromArray(pl.scale);
+    sceneScene.userData.holder.add(inst);});
+  (sc.lights||[]).forEach(function(ld){spawnLight(ld.kind,ld);});
   if(state.models.length){setActiveModel(state.models[0].userData.id);}renderAssets();}
 
 /* ----- viewport tap selection ----- */
