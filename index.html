@@ -1371,7 +1371,7 @@ function onViewportTap(e){var slot=curSlot();if(!slot)return;var r=dom.getBoundi
    MESH EDIT MODE
    ═══════════════════════════════════════════════════════ */
 
-var editState={mode:'face',tool:'select',grabActive:false,grabPtId:null,grabPrevX:0,grabPrevY:0,grabSnap:null,multiSel:false,hudExpanded:false,prop:false,propR:.8,mirror:false,mirrorAxis:0,boxSel:0};
+var editState={mode:'face',tool:'select',grabActive:false,grabPtId:null,grabPrevX:0,grabPrevY:0,grabSnap:null,multiSel:false,hudExpanded:false,prop:false,propR:.8,mirror:false,mirrorAxis:0,boxSel:0,extrudeAmt:.3,insetAmt:.22};
 
 function screenDeltaToWorld(dx,dy){
   var cam=active.vs.cam,rad=active.vs.rad;
@@ -1873,24 +1873,41 @@ var EM={
     var snap=this.V.map(function(v){return v.clone();}),c=this._selCentroid(set),ax=new THREE.Vector3(axis==='x'?1:0,axis==='y'?1:0,axis==='z'?1:0);
     set.forEach(function(i){var p=this.V[i].clone().sub(c);p.applyAxisAngle(ax,ang);this.V[i].copy(p.add(c));},this);this._refresh();this._pushVertHistory(snap);},
 
-  extrude:function(){
+  // dist defaults to editState.extrudeAmt; a negative distance embosses (pushes the faces
+  // inward instead of out). The new cap faces stay selected so a drag, the amount slider, or
+  // Push ±N can fine-tune the depth afterwards.
+  extrude:function(dist){
     var self=this,selF=this.F.filter(function(f){return f.sel;});
     if(!selF.length){toast('Select face(s) first (Face mode)');return;}
+    dist=(dist==null?editState.extrudeAmt:dist);
     var _b=this._topoSnapshot();
     selF.forEach(function(f){
-      var fi=self.F.indexOf(f),n=self._faceNormal(fi),dist=0.3,vMap={};
+      var fi=self.F.indexOf(f),n=self._faceNormal(fi),vMap={};
       f.vi.forEach(function(vi){if(vMap[vi]===undefined){var nv=self.V[vi].clone().addScaledVector(n,dist);nv.sel=false;self._uvMix(nv,vi,vi,0);self.V.push(nv);vMap[vi]=self.V.length-1;}});
       for(var i=0;i<f.vi.length;i++){var a=f.vi[i],b=f.vi[(i+1)%f.vi.length];self.F.push({vi:[a,b,vMap[b],vMap[a]],sel:false});}
       f.vi=f.vi.map(function(vi){return vMap[vi];});f.sel=true;});
     this._buildEdges();this._refresh();this._pushTopo(_b);
-    renderPanel();toast('Extruded — drag the new faces to reposition');},
+    renderPanel();toast((dist<0?'Embossed':'Extruded')+' '+Math.abs(dist).toFixed(2)+' — drag or use Push ±');},
 
-  inset:function(){
+  // Move the selected faces along their averaged normal by dist (no new geometry) — the precise
+  // way to deepen or pull back an extrusion after the fact.
+  pushSel:function(dist){
+    var self=this,selF=this.F.filter(function(f){return f.sel;}),set=this._selVertSet();
+    if(!set.size){toast('Select face(s) first');return;}
+    var n=new THREE.Vector3();
+    if(selF.length){selF.forEach(function(f){n.add(self._faceNormal(self.F.indexOf(f)));});n.normalize();}
+    else n.set(0,1,0);
+    var snap=this.V.map(function(v){return v.clone();});
+    set.forEach(function(i){this.V[i].addScaledVector(n,dist);},this);
+    this._refresh();this._pushVertHistory(snap);toast('Pushed '+dist.toFixed(2));},
+
+  inset:function(amt){
     var self=this,selF=this.F.filter(function(f){return f.sel;});
     if(!selF.length){toast('Select face(s) first (Face mode)');return;}
+    amt=(amt==null?editState.insetAmt:amt);
     var _b=this._topoSnapshot();
     selF.forEach(function(f){
-      var fi=self.F.indexOf(f),c=self._faceCenter(fi),amt=0.22,newVi=f.vi.map(function(vi){var nv=self.V[vi].clone().lerp(c,amt);nv.sel=false;self._uvMix(nv,vi,vi,0);self.V.push(nv);return self.V.length-1;});
+      var fi=self.F.indexOf(f),c=self._faceCenter(fi),newVi=f.vi.map(function(vi){var nv=self.V[vi].clone().lerp(c,amt);nv.sel=false;self._uvMix(nv,vi,vi,0);self.V.push(nv);return self.V.length-1;});
       for(var i=0;i<f.vi.length;i++){var a=f.vi[i],b=f.vi[(i+1)%f.vi.length];self.F.push({vi:[a,b,newVi[(i+1)%newVi.length],newVi[i]],sel:false});}
       f.vi=newVi;f.sel=true;});
     this._buildEdges();this._refresh();this._pushTopo(_b);renderPanel();},
@@ -2474,7 +2491,7 @@ function renderEditHud(){
         if(editState.mirror)mr2.appendChild(el('button',{class:'hud-btn',title:'Bake the mirrored half into real geometry',text:'Apply Mirror',onclick:function(){EM.applyMirror();}}));
         if(selN>0){
           mr2.appendChild(el('button',{class:'hud-btn',title:'Grow to the whole connected island',text:'Linked',onclick:function(){EM.selectLinked();}}));
-          if(mode==='face'){mr2.appendChild(el('button',{class:'hud-btn',text:'Extrude',onclick:function(){EM.extrude();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Inset',onclick:function(){EM.inset();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Dup',onclick:function(){EM.duplicateSelection();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Separate',onclick:function(){EM.separateSelection();}}));}
+          if(mode==='face'){mr2.appendChild(el('button',{class:'hud-btn',text:'Extrude',onclick:function(){EM.extrude();}}));mr2.appendChild(el('button',{class:'hud-btn',title:'Extrude inward',text:'Emboss',onclick:function(){EM.extrude(-editState.extrudeAmt);}}));mr2.appendChild(el('button',{class:'hud-btn',title:'Push faces out along normal',text:'Push+',onclick:function(){EM.pushSel(editState.extrudeAmt*.5);}}));mr2.appendChild(el('button',{class:'hud-btn',title:'Push faces in along normal',text:'Push−',onclick:function(){EM.pushSel(-editState.extrudeAmt*.5);}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Inset',onclick:function(){EM.inset();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Dup',onclick:function(){EM.duplicateSelection();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Separate',onclick:function(){EM.separateSelection();}}));}
           if(mode==='vert'){mr2.appendChild(el('button',{class:'hud-btn',text:'Merge',onclick:function(){EM.mergeSelected();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Smooth',onclick:function(){EM.smoothVerts();renderPanel();}}));}
           if(mode==='edge'){mr2.appendChild(el('button',{class:'hud-btn',text:'Loop',onclick:function(){EM.selectLoops();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Bevel',onclick:function(){EM.bevelEdges();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Bridge',onclick:function(){EM.bridgeEdges();renderPanel();}}));mr2.appendChild(el('button',{class:'hud-btn',title:'Cap a whole boundary loop with one face',text:'Fill',onclick:function(){EM.fillHole();}}));}
           mr2.appendChild(el('button',{class:'hud-btn',text:'Subdiv',onclick:function(){EM.subdivide();renderPanel();}}));
@@ -2545,6 +2562,9 @@ function renderEditHud(){
     or.appendChild(el('button',{class:'hud-btn',title:'Grow to the whole connected island',text:'Linked',onclick:function(){EM.selectLinked();}}));
     if(mode==='face'){
       or.appendChild(el('button',{class:'hud-btn',text:'Extrude',onclick:function(){EM.extrude();}}));
+      or.appendChild(el('button',{class:'hud-btn',title:'Extrude inward',text:'Emboss',onclick:function(){EM.extrude(-editState.extrudeAmt);}}));
+      or.appendChild(el('button',{class:'hud-btn',title:'Push faces out along normal',text:'Push+',onclick:function(){EM.pushSel(editState.extrudeAmt*.5);}}));
+      or.appendChild(el('button',{class:'hud-btn',title:'Push faces in along normal',text:'Push−',onclick:function(){EM.pushSel(-editState.extrudeAmt*.5);}}));
       or.appendChild(el('button',{class:'hud-btn',text:'Inset',onclick:function(){EM.inset();}}));
       or.appendChild(el('button',{class:'hud-btn',text:'Dup',onclick:function(){EM.duplicateSelection();}}));
       or.appendChild(el('button',{class:'hud-btn',text:'Separate',onclick:function(){EM.separateSelection();}}));
@@ -2649,9 +2669,18 @@ function panelEdit(b){
     text:'Apply Mirror '+'XYZ'[editState.mirrorAxis]+' (bake + weld)',onclick:function(){EM.applyMirror();}}));
 
   b.appendChild(el('div',{class:'section-title',text:'Operations'}));
+  b.appendChild(slider('Extrude / inset amount',.02,1.5,editState.extrudeAmt,.01,function(x){editState.extrudeAmt=x;editState.insetAmt=Math.min(.48,x*.6);}));
   b.appendChild(el('div',{class:'grid2'},[
-    el('button',{text:'Extrude  [E]',onclick:function(){EM.extrude();}}),
-    el('button',{text:'Inset Face  [I]',onclick:function(){EM.inset();}})
+    el('button',{text:'Extrude Out  [E]',title:'Push selected faces outward by the amount above',onclick:function(){EM.extrude(editState.extrudeAmt);}}),
+    el('button',{text:'Emboss (In)',title:'Push selected faces inward by the amount above',onclick:function(){EM.extrude(-editState.extrudeAmt);}})
+  ]));
+  b.appendChild(el('div',{class:'grid2',style:'margin-top:6px'},[
+    el('button',{text:'Push +  ▲',title:'Nudge the selected faces out along their normal (adjust an extrusion after the fact)',onclick:function(){EM.pushSel(editState.extrudeAmt*.5);}}),
+    el('button',{text:'Push −  ▼',title:'Nudge the selected faces inward — pull an extrusion back in',onclick:function(){EM.pushSel(-editState.extrudeAmt*.5);}})
+  ]));
+  b.appendChild(el('div',{class:'grid2',style:'margin-top:6px'},[
+    el('button',{text:'Inset Face  [I]',onclick:function(){EM.inset();}}),
+    el('button',{text:'Shrink −',title:'Scale the selection down about its center',onclick:function(){EM.scaleSelection(.85);}})
   ]));
   b.appendChild(el('div',{class:'grid2',style:'margin-top:6px'},[
     el('button',{text:'Subdivide  [S]',onclick:function(){EM.subdivide();renderPanel();}}),
