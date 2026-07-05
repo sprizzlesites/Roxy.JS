@@ -1881,11 +1881,20 @@ var EM={
     if(!selF.length){toast('Select face(s) first (Face mode)');return;}
     dist=(dist==null?editState.extrudeAmt:dist);
     var _b=this._topoSnapshot();
-    selF.forEach(function(f){
-      var fi=self.F.indexOf(f),n=self._faceNormal(fi),vMap={};
-      f.vi.forEach(function(vi){if(vMap[vi]===undefined){var nv=self.V[vi].clone().addScaledVector(n,dist);nv.sel=false;self._uvMix(nv,vi,vi,0);self.V.push(nv);vMap[vi]=self.V.length-1;}});
-      for(var i=0;i<f.vi.length;i++){var a=f.vi[i],b=f.vi[(i+1)%f.vi.length];self.F.push({vi:[a,b,vMap[b],vMap[a]],sel:false});}
-      f.vi=f.vi.map(function(vi){return vMap[vi];});f.sel=true;});
+    // Region extrude: lift each selected vertex ONCE (shared across all selected faces, along
+    // the average of its selected faces' normals), so an adjacent group stays one connected
+    // block instead of splitting into per-face pillars. Side walls are built only on the
+    // region BOUNDARY (edges used by a single selected face); interior shared edges get none.
+    var selVN={},order=[];
+    selF.forEach(function(f){var n=self._faceNormal(self.F.indexOf(f));f.vi.forEach(function(vi){if(!selVN[vi]){selVN[vi]=new THREE.Vector3();order.push(vi);}selVN[vi].add(n);});});
+    var vMap={};
+    order.forEach(function(vi){var n=selVN[vi].clone();if(n.lengthSq()<1e-12)n.set(0,1,0);else n.normalize();
+      var nv=self.V[vi].clone().addScaledVector(n,dist);nv.sel=false;self._uvMix(nv,vi,vi,0);self.V.push(nv);vMap[vi]=self.V.length-1;});
+    var ec={};function ek(a,b){return Math.min(a,b)+'_'+Math.max(a,b);}
+    selF.forEach(function(f){for(var i=0;i<f.vi.length;i++){var k=ek(f.vi[i],f.vi[(i+1)%f.vi.length]);ec[k]=(ec[k]||0)+1;}});
+    selF.forEach(function(f){for(var i=0;i<f.vi.length;i++){var a=f.vi[i],b=f.vi[(i+1)%f.vi.length];
+      if(ec[ek(a,b)]===1)self.F.push({vi:[a,b,vMap[b],vMap[a]],sel:false});}});
+    selF.forEach(function(f){f.vi=f.vi.map(function(vi){return vMap[vi];});f.sel=true;});
     this._buildEdges();this._refresh();this._pushTopo(_b);
     renderPanel();toast((dist<0?'Embossed':'Extruded')+' '+Math.abs(dist).toFixed(2)+' — drag or use Push ±');},
 
