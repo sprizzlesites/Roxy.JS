@@ -1696,15 +1696,25 @@ var EM={
       this._mirrorObj.scale.set(1,1,1);this._mirrorObj.scale.setComponent(editState.mirrorAxis,-1);
     }else if(this._mirrorObj){editScene.remove(this._mirrorObj);this._mirrorObj=null;}
 
-    // Edges — only the SELECTED ones are drawn (a full grey wireframe buried the actual
-    // surface and made holes impossible to spot on dense meshes). Highlights use depthTest
-    // false so the current selection stays visible even through the now-solid mesh.
+    // Edges — the full wireframe is traced on the mesh, but depth-tested (not the old
+    // depthTest:false "x-ray" hack) so it's naturally occluded by the solid surface: only
+    // edges actually facing the camera are visible, which is what keeps holes findable on
+    // dense meshes instead of every edge in the mesh bleeding through. Selected edges are
+    // highlighted pink; everything else is a muted line just bright enough to trace the
+    // topology. Positions are nudged a hair along the vertex normal so the wireframe (sitting
+    // exactly on the mesh surface) doesn't z-fight with the solid mesh underneath it.
     if(this._edgeObj){editScene.remove(this._edgeObj);this._edgeObj.geometry.dispose();this._edgeObj=null;}
-    var ep=[];
-    for(var i=0;i<this.E.length;i++){var e=this.E[i];if(!e.sel)continue;var va=this.V[e.a],vb=this.V[e.b];ep.push(va.x,va.y,va.z,vb.x,vb.y,vb.z);}
-    if(ep.length){var eg=new THREE.BufferGeometry();eg.setAttribute('position',new THREE.Float32BufferAttribute(ep,3));
-      this._edgeObj=new THREE.LineSegments(eg,new THREE.LineBasicMaterial({color:0xff8fb1,depthTest:false,transparent:true,opacity:.95}));
-      this._edgeObj.renderOrder=9;editScene.add(this._edgeObj);}
+    if(this.E.length){
+      if(!g.boundingSphere)g.computeBoundingSphere();
+      var nrm=g.attributes.normal,eps=(g.boundingSphere?g.boundingSphere.radius:1)*.0025;
+      var ep=[],ec=[];
+      for(var i=0;i<this.E.length;i++){var e=this.E[i],va=this.V[e.a],vb=this.V[e.b];
+        ep.push(va.x+nrm.getX(e.a)*eps,va.y+nrm.getY(e.a)*eps,va.z+nrm.getZ(e.a)*eps,
+                 vb.x+nrm.getX(e.b)*eps,vb.y+nrm.getY(e.b)*eps,vb.z+nrm.getZ(e.b)*eps);
+        var c=e.sel?[1,.56,.7]:[.16,.13,.11];ec.push(c[0],c[1],c[2],c[0],c[1],c[2]);}
+      var eg=new THREE.BufferGeometry();eg.setAttribute('position',new THREE.Float32BufferAttribute(ep,3));eg.setAttribute('color',new THREE.Float32BufferAttribute(ec,3));
+      this._edgeObj=new THREE.LineSegments(eg,new THREE.LineBasicMaterial({vertexColors:true,depthTest:true,transparent:false,opacity:1}));
+      this._edgeObj.renderOrder=1;editScene.add(this._edgeObj);}
 
     // Verts — likewise only the SELECTED ones (plus, in Vert mode, a small cue set so the
     // artist can tell they're in vertex mode without the whole mesh being speckled).
