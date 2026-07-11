@@ -491,7 +491,9 @@ dom.addEventListener('pointermove',function(e){
         editDirect.snap=EM.V.map(function(v){return v.clone();});clickStart=null;}
       if(editDirect.active){
         var ddx=e.clientX-editDirect.prevX,ddy=e.clientY-editDirect.prevY;
-        editDirect.prevX=e.clientX;editDirect.prevY=e.clientY;EM.grab(screenDeltaToWorld(ddx,ddy));}}
+        editDirect.prevX=e.clientX;editDirect.prevY=e.clientY;
+        var _delta=screenDeltaToWorld(ddx,ddy);
+        if(editState.slide&&EM._slideApplicable())EM.slideDelta(_delta);else EM.grab(_delta);}}
     invalidate();return;}
   if(ptrs.size===1){
     if(active.view!=='paint'&&active.view!=='edit'){vs.th+=dx*.005;vs.ph=clamp(vs.ph-dy*.005,.1,1.5);}
@@ -1378,7 +1380,8 @@ function onViewportTap(e){var slot=curSlot();if(!slot)return;var r=dom.getBoundi
    MESH EDIT MODE
    ═══════════════════════════════════════════════════════ */
 
-var editState={mode:'face',tool:'select',grabActive:false,grabPtId:null,grabPrevX:0,grabPrevY:0,grabSnap:null,multiSel:false,hudExpanded:false,prop:false,propR:.8,mirror:false,mirrorAxis:0,boxSel:0,extrudeAmt:.3,insetAmt:.22};
+var editState={mode:'face',tool:'select',grabActive:false,grabPtId:null,grabPrevX:0,grabPrevY:0,grabSnap:null,multiSel:false,hudExpanded:false,prop:false,propR:.8,mirror:false,mirrorAxis:0,boxSel:0,extrudeAmt:.3,insetAmt:.22,
+  slide:false,shrinkAmt:.15,randAmt:.1,randSeed:0,shearAmt:.3,shearPair:0};
 
 function screenDeltaToWorld(dx,dy){
   var cam=active.vs.cam,rad=active.vs.rad;
@@ -1872,8 +1875,11 @@ var EM={
     else if(mode==='edge')this.E.forEach(function(e){if(e.sel){s.add(e.a);s.add(e.b);}});
     else this.V.forEach(function(v,i){if(v.sel)s.add(i);});return s;},
   _selCentroid:function(set){var c=new THREE.Vector3(),n=0;set.forEach(function(i){c.add(this.V[i]);n++;},this);if(n)c.divideScalar(n);return c;},
+  // Guarded against snap[i]/curr[i] being undefined: if a topology-replacing op (fromPrim,
+  // fromModel...) runs between this push and the moment it's actually undone/redone, EM.V may
+  // have since changed length — skip any index the snapshot doesn't cover instead of throwing.
   _pushVertHistory:function(snap){var curr=this.V.map(function(v){return v.clone();});
-    History.push(function(){EM.V.forEach(function(v,i){v.copy(snap[i]);});EM._refresh();},function(){EM.V.forEach(function(v,i){v.copy(curr[i]);});EM._refresh();});},
+    History.push(function(){EM.V.forEach(function(v,i){if(snap[i])v.copy(snap[i]);});EM._refresh();},function(){EM.V.forEach(function(v,i){if(curr[i])v.copy(curr[i]);});EM._refresh();});},
   _topoSnapshot:function(){return {V:this.V.map(function(v){var c=v.clone();c.sel=v.sel;return c;}),F:this.F.map(function(f){return {vi:f.vi.slice(),sel:f.sel};})};},
   _topoRestore:function(s){this.V=s.V.map(function(v){var c=v.clone();c.sel=v.sel;return c;});this.F=s.F.map(function(f){return {vi:f.vi.slice(),sel:f.sel};});this._buildEdges();this._refresh();if(active.view==='edit')renderPanel();},
   _pushTopo:function(before){var after=this._topoSnapshot();History.push(function(){EM._topoRestore(before);},function(){EM._topoRestore(after);});},
@@ -2164,6 +2170,134 @@ var EM={
       if(count[i]>0)newPos[i].lerp(sum[i].divideScalar(count[i]),.5);}
     for(var i=0;i<this.V.length;i++){this.V[i].copy(newPos[i]);}
     this._refresh();this._pushVertHistory(snap);},
+
+  // ─── Wave A1: Slide / Shrink-Fatten / Rip / Randomize / Shear ────────
+
+  // Vertex/Edge Slide: whether the current mode+selection is a legal slide target
+  // (exactly one vertex in Vert mode, or any edges in Edge mode — mirrors the HUD's
+  // "Slide" toggle visibility so the pointer handler and UI never disagree).
+  _slideApplicable:function(){
+    var mode=editState.mode;
+    if(mode==='vert')return this.V.filter(function(v){return v.sel;}).length===1;
+    if(mode==='edge')return this.E.some(function(e){return e.sel;});
+    return false;},
+
+  // Constrains a grab-style drag to glide each moved vertex along its own best-matching
+  // *adjacent* edge (the edge whose direction is closest to the drag direction), instead of
+  // `grab`'s free screen-plane translation. The edge(s) currently being slid are excluded from
+  // the candidate search so an edge doesn't just slide along itself. Any vertex with no other
+  // incident edge (isolated) falls back to a free move.
+  slideDelta:function(delta){
+    var mode=editState.mode,selV=new Set(),selE=new Set();
+    if(mode==='edge')this.E.forEach(function(e,i){if(e.sel){selV.add(e.a);selV.add(e.b);selE.add(i);}});
+    else this.V.forEach(function(v,i){if(v.sel)selV.add(i);});
+    if(!selV.size)return;
+    var dn=delta.clone();
+    if(dn.lengthSq()<1e-14){this._refresh();return;} // no motion yet this event
+    dn.normalize();
+    var self=this;
+    selV.forEach(function(vi){
+      var bestDir=null,bestScore=-1;
+      self.E.forEach(function(e,ei){
+        if(selE.has(ei))return;
+        var other=e.a===vi?e.b:(e.b===vi?e.a:-1);if(other<0)return;
+        var dir=self.V[other].clone().sub(self.V[vi]);if(dir.lengthSq()<1e-12)return;dir.normalize();
+        var score=Math.abs(dir.dot(dn));
+        if(score>bestScore){bestScore=score;bestDir=dir;}});
+      if(bestDir)self.V[vi].addScaledVector(bestDir,bestDir.dot(delta));
+      else self.V[vi].add(delta);});
+    this._refresh();},
+
+  // Per-face area (fan-triangulated from vi[0] — correct for tris and convex n-gons alike).
+  _faceArea:function(fi){
+    var f=this.F[fi],vi=f.vi,v0=this.V[vi[0]],area=0;
+    for(var t=1;t<vi.length-1;t++){
+      var a=new THREE.Vector3().subVectors(this.V[vi[t]],v0),b=new THREE.Vector3().subVectors(this.V[vi[t+1]],v0);
+      area+=a.cross(b).length()*.5;}
+    return area;},
+
+  // Area-weighted per-vertex normals — bigger neighboring faces pull the averaged normal
+  // harder than `_vertNormals`' plain unit-normal sum. Used by Shrink/Fatten so a vertex on the
+  // border of one huge face and one sliver mostly follows the huge face's normal.
+  _vertNormalsWeighted:function(){
+    var self=this,N=this.V.map(function(){return new THREE.Vector3();});
+    for(var fi=0;fi<this.F.length;fi++){var f=this.F[fi],n=this._faceNormal(fi),a=Math.max(1e-6,this._faceArea(fi));
+      for(var i=0;i<f.vi.length;i++)N[f.vi[i]].addScaledVector(n,a);}
+    N.forEach(function(n){if(n.lengthSq()>1e-12)n.normalize();else n.set(0,1,0);});
+    return N;},
+
+  // Shrink/Fatten: offsets every selected vertex along its OWN area-weighted normal by a
+  // signed distance (positive fattens outward, negative shrinks inward). Distinct from
+  // `scaleSelection`, which scales everything toward one shared center. Works in all three
+  // select modes via `_selVertSet` (verts of selected edges/faces count too).
+  shrinkFatten:function(dist){
+    var set=this._selVertSet();if(!set.size){toast('Select something first');return;}
+    var snap=this.V.map(function(v){return v.clone();}),N=this._vertNormalsWeighted();
+    set.forEach(function(i){this.V[i].addScaledVector(N[i],dist);},this);
+    this._refresh();this._pushVertHistory(snap);
+    toast((dist<0?'Shrunk ':'Fattened ')+Math.abs(dist).toFixed(2));},
+
+  // Rip/Split (Blender V / Y). Vert & Edge mode: any selected vertex touching 2+ faces gets a
+  // duplicate that takes half of its face-fan (by encounter order), opening a fresh boundary
+  // edge straight through the middle of the fan. Face mode: every selected face reclaims its
+  // own copy of any vertex it shares with an UNselected face, detaching the whole selected
+  // patch from its surroundings. Either way, `_buildEdges` (edge identity = vertex-index pair)
+  // naturally creates the new boundary — no separate seam bookkeeping needed.
+  rip:function(){
+    var self=this,_b=this._topoSnapshot(),changed=0;
+    if(editState.mode==='face'){
+      var selFi={};this.F.forEach(function(f,fi){if(f.sel)selFi[fi]=1;});
+      if(!Object.keys(selFi).length){toast('Select face(s) first (Face mode)');return;}
+      var vertFaces={};
+      this.F.forEach(function(f,fi){f.vi.forEach(function(vi){(vertFaces[vi]=vertFaces[vi]||[]).push(fi);});});
+      Object.keys(vertFaces).forEach(function(k){
+        var vi=+k,faces=vertFaces[vi];
+        var hasSel=faces.some(function(fi){return selFi[fi];}),hasOther=faces.some(function(fi){return !selFi[fi];});
+        if(!hasSel||!hasOther)return;
+        var nv=self.V[vi].clone();nv.sel=false;self._uvMix(nv,vi,vi,0);self.V.push(nv);var ni=self.V.length-1;changed++;
+        faces.forEach(function(fi){if(selFi[fi]){var f=self.F[fi];f.vi=f.vi.map(function(x){return x===vi?ni:x;});}});});
+      if(!changed){toast('Selected faces have no unselected neighbors to split from');return;}
+    }else{
+      var selV=[];this._selVertSet().forEach(function(i){selV.push(i);});
+      if(!selV.length){toast('Select vertex(es) first');return;}
+      selV.forEach(function(vi){
+        var touching=[];self.F.forEach(function(f,fi){if(f.vi.indexOf(vi)>=0)touching.push(fi);});
+        if(touching.length<2)return;
+        var half=Math.ceil(touching.length/2),groupB=touching.slice(half);
+        if(!groupB.length)return;
+        var nv=self.V[vi].clone();nv.sel=true;self._uvMix(nv,vi,vi,0);self.V.push(nv);var ni=self.V.length-1;changed++;
+        groupB.forEach(function(fi){var f=self.F[fi];f.vi=f.vi.map(function(x){return x===vi?ni:x;});});});
+      if(!changed){toast('Selected vertex needs 2+ faces to rip (try an interior vertex)');return;}
+    }
+    this._buildEdges();this._refresh();this._pushTopo(_b);
+    renderPanel();toast('Ripped '+changed+' vertex'+(changed>1?'es':''));},
+
+  // Randomize: jitters each selected vertex along its own normal by a pseudo-random signed
+  // amount in [-amount,amount]. The jitter is a deterministic function of (vertex index, seed)
+  // via `hash3` (same pattern as MODDB.noise) — not of the vertex's current position — so
+  // re-running with the same seed always reproduces the same result, e.g. after an Undo.
+  randomize:function(amount,seed){
+    var set=this._selVertSet();if(!set.size){toast('Select something first');return;}
+    seed=seed||0;
+    var snap=this.V.map(function(v){return v.clone();}),N=this._vertNormals();
+    set.forEach(function(i){
+      var r=hash3(i*12.9898+seed*3.271,i*78.233+seed*7.951,seed*37.719+i*.113);
+      this.V[i].addScaledVector(N[i],(r*2-1)*amount);},this);
+    this._refresh();this._pushVertHistory(snap);
+    toast('Randomized ±'+amount.toFixed(2));},
+
+  // Selection-scoped edit-mode Shear (vs. MODDB.shear, which shears the WHOLE mesh): moves each
+  // selected vertex along SHEAR_PAIRS[editState.shearPair]'s displacement axis by `amount` times
+  // its distance from the SELECTION centroid along the pair's reference axis.
+  shearSelection:function(amount){
+    var set=this._selVertSet();if(!set.size){toast('Select something first');return;}
+    var pair=SHEAR_PAIRS[editState.shearPair],dispAx=pair[0],refAx=pair[1];
+    var c=this._selCentroid(set),snap=this.V.map(function(v){return v.clone();});
+    set.forEach(function(i){
+      var rel=this.V[i].getComponent(refAx)-c.getComponent(refAx);
+      this.V[i].setComponent(dispAx,this.V[i].getComponent(dispAx)+rel*amount);},this);
+    this._refresh();this._pushVertHistory(snap);
+    toast('Sheared '+amount.toFixed(2));},
 
   exportToModel:function(){
     // With a source texture, export using the carried per-vertex UVs so the original
@@ -2472,6 +2606,15 @@ function mirrorBtnLabel(){return editState.mirror?'Mir '+'XYZ'[editState.mirrorA
 function cycleBoxSel(){editState.boxSel=(editState.boxSel+1)%3;if(editState.boxSel)editState.tool='select';
   renderEditHud();renderPanel();toast(editState.boxSel===1?'Box select — drag to add':(editState.boxSel===2?'Box select — drag to remove':'Box select off'));}
 function boxSelBtnLabel(){return editState.boxSel===1?'Box +':(editState.boxSel===2?'Box −':'Box');}
+// Vertex/Edge Slide toggle: while on, dragging a valid selection (see EM._slideApplicable)
+// glides along adjacent edges instead of moving freely in the screen plane.
+function toggleSlide(){editState.slide=!editState.slide;renderEditHud();renderPanel();
+  toast(editState.slide?'Slide on — drag glides along an adjacent edge':'Slide off');}
+// Edit-mode Shear's axis pair [displace-axis, reference-axis] cycles the same way mirrorAxis
+// does — a single button instead of 6 crowding the mobile HUD.
+var SHEAR_PAIRS=[[0,1],[0,2],[1,0],[1,2],[2,0],[2,1]];
+function shearPairLabel(){var p=SHEAR_PAIRS[editState.shearPair];return 'XYZ'[p[0]]+'∝'+'XYZ'[p[1]];}
+function cycleShearPair(){editState.shearPair=(editState.shearPair+1)%SHEAR_PAIRS.length;renderEditHud();renderPanel();toast('Shear axis '+shearPairLabel());}
 function renderEditHud(){
   var hud=$('#editHud');if(!hud)return;
   hud.innerHTML='';
@@ -2517,6 +2660,7 @@ function renderEditHud(){
         mr2.appendChild(el('button',{class:'hud-btn'+(editState.prop?' on':''),text:'Soft',onclick:function(){editState.prop=!editState.prop;EM._propW=null;renderEditHud();renderPanel();}}));
         mr2.appendChild(el('button',{class:'hud-btn'+(editState.mirror?' on':''),title:'Cycle mirror axis: Off → X → Y → Z',text:mirrorBtnLabel(),onclick:cycleMirror}));
         if(editState.mirror)mr2.appendChild(el('button',{class:'hud-btn',title:'Bake the mirrored half into real geometry',text:'Apply Mirror',onclick:function(){EM.applyMirror();}}));
+        if(mode!=='face')mr2.appendChild(el('button',{class:'hud-btn'+(editState.slide?' on':''),title:'Drag glides along an adjacent edge instead of moving freely',text:'Slide',onclick:toggleSlide}));
         if(selN>0){
           mr2.appendChild(el('button',{class:'hud-btn',title:'Grow to the whole connected island',text:'Linked',onclick:function(){EM.selectLinked();}}));
           if(mode==='face'){mr2.appendChild(el('button',{class:'hud-btn',text:'Extrude',onclick:function(){EM.extrude();}}));mr2.appendChild(el('button',{class:'hud-btn',title:'Extrude inward',text:'Emboss',onclick:function(){EM.extrude(-editState.extrudeAmt);}}));mr2.appendChild(el('button',{class:'hud-btn',title:'Push faces out along normal',text:'Push+',onclick:function(){EM.pushSel(editState.extrudeAmt*.5);}}));mr2.appendChild(el('button',{class:'hud-btn',title:'Push faces in along normal',text:'Push−',onclick:function(){EM.pushSel(-editState.extrudeAmt*.5);}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Inset',onclick:function(){EM.inset();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Dup',onclick:function(){EM.duplicateSelection();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Separate',onclick:function(){EM.separateSelection();}}));}
@@ -2526,6 +2670,12 @@ function renderEditHud(){
           mr2.appendChild(el('button',{class:'hud-btn',text:'Delete',onclick:function(){EM.deleteSelected();}}));
           mr2.appendChild(el('button',{class:'hud-btn',text:'Flip',onclick:function(){EM.flipNormals();}}));
           mr2.appendChild(el('button',{class:'hud-btn',text:'Recalc',onclick:function(){EM.recalcNormals();}}));
+          mr2.appendChild(el('button',{class:'hud-btn',title:'Push the selection out along each vertex\'s own normal',text:'Fatten',onclick:function(){EM.shrinkFatten(editState.shrinkAmt);}}));
+          mr2.appendChild(el('button',{class:'hud-btn',title:'Pull the selection in along each vertex\'s own normal',text:'Shrink',onclick:function(){EM.shrinkFatten(-editState.shrinkAmt);}}));
+          mr2.appendChild(el('button',{class:'hud-btn',title:'Jitter the selection along vertex normals (deterministic per press)',text:'Random',onclick:function(){EM.randomize(editState.randAmt,editState.randSeed++);}}));
+          mr2.appendChild(el('button',{class:'hud-btn',title:'Duplicate + detach a seam (Vert/Edge: face-fan split, Face: split from neighbors)',text:'Rip',onclick:function(){EM.rip();}}));
+          mr2.appendChild(el('button',{class:'hud-btn',title:'Cycle the Shear axis pair',text:'Sh '+shearPairLabel(),onclick:cycleShearPair}));
+          mr2.appendChild(el('button',{class:'hud-btn',title:'Shear the selection about its own centroid',text:'Shear',onclick:function(){EM.shearSelection(editState.shearAmt);}}));
         }
         mr2.appendChild(el('button',{class:'hud-btn',text:'Save →',onclick:function(){EM.exportToModel();}}));
         hud.appendChild(mr2);
@@ -2583,6 +2733,7 @@ function renderEditHud(){
   mr.appendChild(el('button',{class:'hud-btn'+(editState.prop?' on':''),title:'Proportional edit (soft falloff)',text:'Soft',onclick:function(){editState.prop=!editState.prop;EM._propW=null;renderEditHud();renderPanel();}}));
   mr.appendChild(el('button',{class:'hud-btn'+(editState.mirror?' on':''),title:'Cycle mirror axis: Off → X → Y → Z',text:mirrorBtnLabel(),onclick:cycleMirror}));
   if(editState.mirror)mr.appendChild(el('button',{class:'hud-btn',title:'Bake the mirrored half into real geometry',text:'Apply Mirror',onclick:function(){EM.applyMirror();}}));
+  if(mode!=='face')mr.appendChild(el('button',{class:'hud-btn'+(editState.slide?' on':''),title:'Drag glides along an adjacent edge instead of moving freely',text:'Slide',onclick:toggleSlide}));
   hud.appendChild(mr);
 
   if(selN>0){
@@ -2611,6 +2762,12 @@ function renderEditHud(){
     or.appendChild(el('button',{class:'hud-btn',text:'Delete',onclick:function(){EM.deleteSelected();}}));
     or.appendChild(el('button',{class:'hud-btn',text:'Flip',onclick:function(){EM.flipNormals();}}));
     or.appendChild(el('button',{class:'hud-btn',text:'Recalc',onclick:function(){EM.recalcNormals();}}));
+    or.appendChild(el('button',{class:'hud-btn',title:'Push the selection out along each vertex\'s own normal',text:'Fatten',onclick:function(){EM.shrinkFatten(editState.shrinkAmt);}}));
+    or.appendChild(el('button',{class:'hud-btn',title:'Pull the selection in along each vertex\'s own normal',text:'Shrink',onclick:function(){EM.shrinkFatten(-editState.shrinkAmt);}}));
+    or.appendChild(el('button',{class:'hud-btn',title:'Jitter the selection along vertex normals (deterministic per press)',text:'Randomize',onclick:function(){EM.randomize(editState.randAmt,editState.randSeed++);}}));
+    or.appendChild(el('button',{class:'hud-btn',title:'Duplicate + detach a seam  [V]',text:'Rip',onclick:function(){EM.rip();}}));
+    or.appendChild(el('button',{class:'hud-btn',title:'Cycle the Shear axis pair',text:'Shear axis '+shearPairLabel(),onclick:cycleShearPair}));
+    or.appendChild(el('button',{class:'hud-btn',title:'Shear the selection about its own centroid',text:'Shear',onclick:function(){EM.shearSelection(editState.shearAmt);}}));
     hud.appendChild(or);
   }
 
@@ -2695,6 +2852,10 @@ function panelEdit(b){
     onclick:cycleMirror})]));
   if(editState.mirror)b.appendChild(el('button',{style:'width:100%;margin-top:6px',title:'Bake the mirrored half into real, welded geometry',
     text:'Apply Mirror '+'XYZ'[editState.mirrorAxis]+' (bake + weld)',onclick:function(){EM.applyMirror();}}));
+  if(editState.mode!=='face')b.appendChild(el('div',{style:'margin-top:6px'},[el('button',{class:editState.slide?'on':'',style:'width:100%',
+    title:'Constrains a drag to glide along an adjacent edge instead of moving freely (Vert mode: 1 vertex selected · Edge mode: any edges selected)',
+    text:editState.slide?'✓ Slide (drag glides along an adjacent edge)':'Slide (drag glides along an adjacent edge)',
+    onclick:toggleSlide})]));
 
   b.appendChild(el('div',{class:'section-title',text:'Operations'}));
   b.appendChild(slider('Extrude / inset amount',.02,1.5,editState.extrudeAmt,.01,function(x){editState.extrudeAmt=x;editState.insetAmt=Math.min(.48,x*.6);}));
@@ -2741,9 +2902,32 @@ function panelEdit(b){
   b.appendChild(el('button',{style:'width:100%;margin-top:6px',title:'Grow the selection to the whole connected mesh island',
     text:'Select Linked',onclick:function(){EM.selectLinked();}}));
 
+  b.appendChild(el('div',{class:'section-title',text:'Shrink/Fatten (along normals)'}));
+  b.appendChild(el('p',{class:'small muted',style:'margin-bottom:6px',text:'Offsets each selected vertex along its OWN normal — unlike Scale, verts on opposite sides of the mesh move apart instead of toward one shared center.'}));
+  b.appendChild(slider('Shrink/Fatten amount',-1,1,editState.shrinkAmt,.01,function(x){editState.shrinkAmt=x;}));
+  b.appendChild(el('div',{class:'grid2'},[
+    el('button',{text:'Fatten (out) +',title:'Push the selection out along each vertex\'s own normal',onclick:function(){EM.shrinkFatten(editState.shrinkAmt);}}),
+    el('button',{text:'Shrink (in) −',title:'Pull the selection in along each vertex\'s own normal',onclick:function(){EM.shrinkFatten(-editState.shrinkAmt);}})
+  ]));
+
+  b.appendChild(el('div',{class:'section-title',text:'Rip / Split'}));
+  b.appendChild(el('p',{class:'small muted',style:'margin-bottom:6px',text:'Vert/Edge mode: duplicates a selected vertex (2+ faces) and hands half its face-fan to the copy, opening a seam. Face mode: detaches the selected faces from their unselected neighbors.'}));
+  b.appendChild(el('button',{style:'width:100%',text:'Rip / Split  [V]',onclick:function(){EM.rip();}}));
+
+  b.appendChild(el('div',{class:'section-title',text:'Randomize'}));
+  b.appendChild(el('p',{class:'small muted',style:'margin-bottom:6px',text:'Jitters the selection along vertex normals by a deterministic per-vertex random amount (same seed → same result).'}));
+  b.appendChild(slider('Randomize amount',0,1,editState.randAmt,.01,function(x){editState.randAmt=x;}));
+  b.appendChild(el('button',{style:'width:100%',text:'Randomize  [R]',title:'Re-press for a different pattern (advances the random seed)',onclick:function(){EM.randomize(editState.randAmt,editState.randSeed++);}}));
+
+  b.appendChild(el('div',{class:'section-title',text:'Shear (selection-scoped)'}));
+  b.appendChild(el('p',{class:'small muted',style:'margin-bottom:6px',text:'Displaces the selection along one axis proportionally to its coordinate on another, relative to the SELECTION\'s own centroid (not the whole mesh).'}));
+  b.appendChild(el('button',{style:'width:100%',title:'Cycle which axis moves proportionally to which',text:'Shear axis: '+shearPairLabel(),onclick:cycleShearPair}));
+  b.appendChild(slider('Shear amount',-1,1,editState.shearAmt,.01,function(x){editState.shearAmt=x;}));
+  b.appendChild(el('button',{style:'width:100%',text:'Apply Shear',onclick:function(){EM.shearSelection(editState.shearAmt);}}));
+
   b.appendChild(el('hr',{class:'sep'}));
   b.appendChild(el('div',{class:'section-title',text:'Keyboard shortcuts (desktop)'}));
-  b.appendChild(el('p',{class:'small muted',text:'E=Extrude  I=Inset  S=Subdivide  B=Bevel  L=Loop Select  N=Recalc Normals  D=Duplicate  X=Delete  A=Select All  M=Multi-select  drag selected → move  6=Open this tab'}));
+  b.appendChild(el('p',{class:'small muted',text:'E=Extrude  I=Inset  S=Subdivide  B=Bevel  L=Loop Select  N=Recalc Normals  D=Duplicate  X=Delete  A=Select All  M=Multi-select  V=Rip  R=Randomize  drag selected → move  6=Open this tab'}));
 
   b.appendChild(el('hr',{class:'sep'}));
   b.appendChild(el('div',{class:'section-title',text:'Export to library'}));
@@ -2807,6 +2991,8 @@ window.addEventListener('keydown',function(e){var tag=(e.target&&e.target.tagNam
     else if(z==='x'){EM.deleteSelected();}
     else if(z==='s'&&!e.ctrlKey&&!e.metaKey){EM.subdivide();renderPanel();}
     else if(z==='m'){editState.multiSel=!editState.multiSel;renderEditHud();renderPanel();toast('Multi-select '+(editState.multiSel?'on':'off'));}
+    else if(z==='v'&&!e.ctrlKey&&!e.metaKey){EM.rip();}
+    else if(z==='r'&&!e.ctrlKey&&!e.metaKey){e.preventDefault();EM.randomize(editState.randAmt,editState.randSeed++);renderPanel();}
   }});
 $('#fabBuild').addEventListener('click',function(){addPrim('Cube');openSheet(true);});
 $('#fabScene').addEventListener('click',function(){if(state.models.length){addPlacement(state.models[0].userData.id);openSheet(true);}else toast('No models yet');});

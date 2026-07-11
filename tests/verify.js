@@ -97,6 +97,95 @@ const server = http.createServer((req, res) => {
 
     EM.clearSel(); EM._mirMap = null; R.editState.mirror = false;
   }));
+
+  // ---- Wave A1: Slide / Shrink-Fatten / Rip / Randomize / Shear ----
+  await step('vertex slide constrains the drag onto an adjacent edge line', () => page.evaluate(() => {
+    var R = __R, EM = R.EM;
+    EM.fromPrim('Plane'); // native quad grid, flat in the XZ plane
+    R.editState.mode = 'vert'; EM.clearSel();
+    var adj = EM._adjacency();
+    var idx = -1; for (var i = 0; i < adj.length; i++) if (adj[i].length === 4) { idx = i; break; }
+    if (idx < 0) throw new Error('test setup: no interior (degree-4) grid vertex found');
+    EM.V[idx].sel = true;
+    if (!EM._slideApplicable()) throw new Error('slide should be applicable with exactly one vertex selected in Vert mode');
+    EM.V[EM.V.length - 1].sel = true; // a 2nd vertex should turn it off again
+    if (EM._slideApplicable()) throw new Error('slide should NOT be applicable with 2+ vertices selected in Vert mode');
+    EM.V[EM.V.length - 1].sel = false;
+    var before = EM.V[idx].clone();
+    var neighborDirs = adj[idx].map(function (j) { return EM.V[j].clone().sub(before).normalize(); });
+    EM.slideDelta(new THREE.Vector3(0.5, 0.2, 0.05)); // deliberately off-axis — free grab would follow this exactly
+    var moveVec = EM.V[idx].clone().sub(before);
+    if (moveVec.length() < 1e-6) throw new Error('slide did not move the selected vertex at all');
+    var onALine = neighborDirs.some(function (d) { return Math.abs(Math.abs(d.dot(moveVec.clone().normalize())) - 1) < 1e-4; });
+    if (!onALine) throw new Error('slid vertex left every adjacent-edge line — moved freely instead of sliding, moveVec=' + JSON.stringify(moveVec));
+    EM.clearSel();
+  }));
+
+  await step('shrinkFatten offsets every selected vertex along its own normal by the given signed distance', () => page.evaluate(() => {
+    var R = __R, EM = R.EM;
+    EM.fromPrim('Sphere');
+    R.editState.mode = 'vert'; EM.clearSel(); EM.V.forEach(function (v) { v.sel = true; });
+    var before = EM.V.map(function (v) { return v.clone(); });
+    var N = EM._vertNormalsWeighted(); // same normals shrinkFatten itself uses
+    var dist = 0.3;
+    EM.shrinkFatten(dist);
+    for (var i = 0; i < EM.V.length; i++) {
+      var expected = before[i].clone().addScaledVector(N[i], dist);
+      if (EM.V[i].distanceTo(expected) > 1e-4) throw new Error('vertex ' + i + ' did not move along its own normal by the given distance');
+    }
+    EM.clearSel(); R.History.undo(); // leave no dangling vert-history entry for later steps' meshes
+  }));
+
+  await step('rip duplicates a shared vertex, grows the vert count, and opens a new boundary edge', () => page.evaluate(() => {
+    var R = __R, EM = R.EM;
+    EM.fromPrim('Cube'); // closed quad box — starts with zero boundary edges
+    var boundaryBefore = EM.E.filter(function (e) { return e.fi.length === 1; }).length;
+    if (boundaryBefore !== 0) throw new Error('test setup: a fresh cube should have no boundary edges, got ' + boundaryBefore);
+    var vi = -1; for (var i = 0; i < EM.V.length && vi < 0; i++) { var t = 0; EM.F.forEach(function (f) { if (f.vi.indexOf(i) >= 0)t++; }); if (t >= 2) vi = i; }
+    if (vi < 0) throw new Error('test setup: no vertex touching 2+ faces found on a cube');
+    R.editState.mode = 'vert'; EM.clearSel(); EM.V[vi].sel = true;
+    var vCountBefore = EM.V.length;
+    EM.rip();
+    if (EM.V.length !== vCountBefore + 1) throw new Error('rip should add exactly one duplicate vertex, went from ' + vCountBefore + ' to ' + EM.V.length);
+    var boundaryAfter = EM.E.filter(function (e) { return e.fi.length === 1; }).length;
+    if (boundaryAfter <= boundaryBefore) throw new Error('rip should open at least one new boundary edge, boundary count stayed at ' + boundaryAfter);
+    EM.clearSel();
+  }));
+
+  await step('randomize jitters selected verts along their normals, deterministic for a fixed seed', () => page.evaluate(() => {
+    var R = __R, EM = R.EM, History = R.History;
+    EM.fromPrim('Icosphere');
+    R.editState.mode = 'vert'; EM.clearSel(); EM.V.forEach(function (v) { v.sel = true; });
+    var seed = 7, amount = 0.15;
+    var before = EM.V.map(function (v) { return v.clone(); });
+    EM.randomize(amount, seed);
+    var afterFirst = EM.V.map(function (v) { return v.clone(); });
+    var moved = false; for (var i = 0; i < EM.V.length; i++) if (afterFirst[i].distanceTo(before[i]) > 1e-6) { moved = true; break; }
+    if (!moved) throw new Error('randomize did not move any vertex');
+    History.undo();
+    for (var i = 0; i < EM.V.length; i++) if (EM.V[i].distanceTo(before[i]) > 1e-6) throw new Error('undo did not restore pre-randomize positions at vertex ' + i);
+    EM.randomize(amount, seed); // same seed, same starting positions
+    for (var i = 0; i < EM.V.length; i++) if (EM.V[i].distanceTo(afterFirst[i]) > 1e-6) throw new Error('randomize with the same seed was not deterministic at vertex ' + i);
+    History.undo();
+  }));
+
+  await step('edit-mode shear displaces the selection proportionally to distance from its OWN centroid', () => page.evaluate(() => {
+    var R = __R, EM = R.EM;
+    EM.fromPrim('Plane'); // flat in XZ (y=0) — Z varies across it, a real proportional axis to shear against
+    R.editState.mode = 'vert'; EM.clearSel(); EM.V.forEach(function (v) { v.sel = true; });
+    R.editState.shearPair = 1; // SHEAR_PAIRS[1] = [dispAxis=X(0), refAxis=Z(2)]
+    var before = EM.V.map(function (v) { return v.clone(); });
+    var c = new THREE.Vector3(); before.forEach(function (v) { c.add(v); }); c.divideScalar(before.length);
+    var amount = 0.4;
+    EM.shearSelection(amount);
+    for (var i = 0; i < EM.V.length; i++) {
+      var expectedX = before[i].x + (before[i].z - c.z) * amount;
+      if (Math.abs(EM.V[i].x - expectedX) > 1e-6) throw new Error('vertex ' + i + ' X not sheared proportionally to its distance from the selection centroid on Z');
+      if (Math.abs(EM.V[i].y - before[i].y) > 1e-9 || Math.abs(EM.V[i].z - before[i].z) > 1e-9) throw new Error('vertex ' + i + ' Y/Z should stay put for an X-displacement shear');
+    }
+    EM.clearSel(); R.History.undo(); // leave no dangling vert-history entry for later steps' meshes
+  }));
+
   await step('sculpt dabs all brushes actually move geometry', () => page.evaluate(() => {
     var R = __R, EM = R.EM;
     ['draw', 'carve', 'crease', 'inflate', 'smooth', 'flatten', 'pinch'].forEach(function (br) {
