@@ -74,12 +74,42 @@ If the scratchpad copy is gone (new session), reconstruct from `tests/` in the r
 
 ## 6. Wave ledger (update after every wave)
 
-| # | Wave | File(s) | Status | Commit | Notes |
-|---|------|---------|--------|--------|-------|
-| 0 | Branch `fullsuite` + orchestration docs | docs/ | DONE | (this commit) | |
-| 1 | Research: GAP_ANALYSIS.md | docs/ | IN PROGRESS | | sonnet research agent dispatched |
-| 2 | Suite-into-repo housekeeping (§5) | tests/ | TODO | | do before first impl wave |
-| — | *(populate from GAP_ANALYSIS roadmap once Wave 1 lands)* | | | | |
+Wave definitions live in `docs/GAP_ANALYSIS.md` §4 — this table only tracks status. Update Status/Commit/Notes after every wave.
+
+| Wave | Summary | Status | Commit | Notes |
+|------|---------|--------|--------|-------|
+| 0 | Branch `fullsuite` + orchestration docs | DONE | 52deb2f | |
+| R | Research: GAP_ANALYSIS.md | DONE | | sonnet research agent, full read of index.html |
+| T | Verification suite into repo (`tests/`) | DONE | 52deb2f | `cd tests && npm i && node verify.js` |
+| A1 | Slide/Shrink-Fatten/Rip/Randomize/Shear edit ops | TODO | | |
+| A2 | Knife / Spin / Screw | TODO | | |
+| A3 | Vertex-bevel, N-loop bridge, loop-cut slide, bevel width/segments, Symmetrize | TODO | | |
+| A4 | Seams, project-from-view unwrap, pack islands, UV editor mode | TODO | | |
+| A5 | Vertex groups (+ assign UI) — Phase B/C dependency | TODO | | |
+| A6 | Decimate, true Catmull-Clark subsurf, texture displace | TODO | | |
+| A7 | Lattice, Shrinkwrap, Cast variants, Skin modifiers | TODO | | |
+| A8 | Boolean modifier (vendored BSP CSG) | TODO | | |
+| A9 | Bezier curves, curve-to-mesh, array-along-curve | TODO | | |
+| A10 | Text objects (billboard then extruded) | TODO | | |
+| A11 | Voxel remesh (stretch) | TODO | | |
+| B1 | Weight painting | TODO | | |
+| B2 | Serialization v2 (weights/keys/skeleton through save + localStorage bridge) | TODO | | |
+| B3 | Shape keys / morph targets | TODO | | |
+| B4 | Vertex colors | TODO | | |
+| C1 | animate.html: armatures/bones/parenting | TODO | | creates animate.html |
+| C2 | Skinning bind + auto weights | TODO | | |
+| C3 | FK posing + CCD IK | TODO | | |
+| C4 | Constraints | TODO | | |
+| D1 | Keyframe core (Track model + sampler) | TODO | | load-bearing for D/E |
+| D2 | Timeline + playback transport | TODO | | |
+| D3 | Dope sheet | TODO | | |
+| D4 | Graph editor | TODO | | |
+| D5 | Camera animation + path-follow | TODO | | |
+| D6 | Action clips (NLA-lite) | TODO | | |
+| D7 | Onion skinning | TODO | | |
+| E1 | Video export (WebM guaranteed, MP4 progressive) | TODO | | |
+| E2 | Standalone Three.js code export | TODO | | |
+| F1-F7 | Polish & stretch (see GAP_ANALYSIS §4 Phase F) | TODO | | |
 
 ## 7. End-state acceptance (what "done" means)
 
