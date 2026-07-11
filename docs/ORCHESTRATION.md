@@ -81,7 +81,8 @@ Wave definitions live in `docs/GAP_ANALYSIS.md` §4 — this table only tracks s
 | 0 | Branch `fullsuite` + orchestration docs | DONE | 52deb2f | |
 | R | Research: GAP_ANALYSIS.md | DONE | | sonnet research agent, full read of index.html |
 | T | Verification suite into repo (`tests/`) | DONE | 52deb2f | `cd tests && npm i && node verify.js` |
-| A1 | Slide/Shrink-Fatten/Rip/Randomize/Shear edit ops | TODO | | |
+| A1 | Slide/Shrink-Fatten/Rip/Randomize/Shear edit ops | DONE | 9740368 | +5 checks (suite now 66); also fixed a latent `_pushVertHistory` undo crash |
+| C0 | animate.html scaffold: theme/chrome parity, localStorage model bridge, Track/keyframe core seed (Anim.sample/insertKey), timeline scrub+play proof, own suite tests/verify_animate.js (18 checks) | DONE | ab6ec0b | not in original roadmap — added to de-risk C1/D1. Track shape: `{id,targetId,path,keys:[{t,v,interp}]}`, registry targetId→Object3D |
 | A2 | Knife / Spin / Screw | TODO | | |
 | A3 | Vertex-bevel, N-loop bridge, loop-cut slide, bevel width/segments, Symmetrize | TODO | | |
 | A4 | Seams, project-from-view unwrap, pack islands, UV editor mode | TODO | | |
