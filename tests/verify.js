@@ -9,7 +9,7 @@ const SP = __dirname;
 
 // Debug handles injected inside the app IIFE (test copy only — repo file untouched)
 const INJECT = `
-window.__R={setView:setView,EM:EM,editState:editState,Sculpt:Sculpt,getModel:getModel,state:state,paint:paint,paintInit:paintInit,applyPaintTex:applyPaintTex,ensureAtlasUVs:ensureAtlasUVs,do3dPaint:do3dPaint,exportOBJ:exportOBJ,parseOBJ:parseOBJ,History:History,addModel:addModel,buildDonut:buildDonut,doAutosave:doAutosave,clearAutosave:clearAutosave,AUTOSAVE_KEY:AUTOSAVE_KEY,active:active,addPrim:addPrim,renameModel:renameModel,duplicateModel:duplicateModel,deleteModel:deleteModel,renderAssets:renderAssets,filterAssetGrid:filterAssetGrid,setAssetQuery:function(q){assetSearchQuery=q;filterAssetGrid();},applyEditSnap:applyEditSnap,addPlacement:addPlacement,sceneScene:sceneScene,disposeModelResources:disposeModelResources,resetHintsSeen:function(){try{localStorage.removeItem('roxyHints');}catch(e){}},syncPaintHud:syncPaintHud,snapView:snapView,pickColorAt2D:pickColorAt2D,pickColorAt3D:pickColorAt3D,setPaintColor:setPaintColor,setActiveModel:setActiveModel,resizeActive:resizeActive,renderEditHud:renderEditHud,makeModel:makeModel,makeMaterial:makeMaterial,rebuildModel:rebuildModel,tex:tex,addLight:addLight,frameObject:frameObject,viewState:viewState,invalidate:invalidate};
+window.__R={setView:setView,EM:EM,editState:editState,Sculpt:Sculpt,Knife:Knife,getModel:getModel,state:state,paint:paint,paintInit:paintInit,applyPaintTex:applyPaintTex,ensureAtlasUVs:ensureAtlasUVs,do3dPaint:do3dPaint,exportOBJ:exportOBJ,parseOBJ:parseOBJ,History:History,addModel:addModel,buildDonut:buildDonut,doAutosave:doAutosave,clearAutosave:clearAutosave,AUTOSAVE_KEY:AUTOSAVE_KEY,active:active,addPrim:addPrim,renameModel:renameModel,duplicateModel:duplicateModel,deleteModel:deleteModel,renderAssets:renderAssets,filterAssetGrid:filterAssetGrid,setAssetQuery:function(q){assetSearchQuery=q;filterAssetGrid();},applyEditSnap:applyEditSnap,addPlacement:addPlacement,sceneScene:sceneScene,disposeModelResources:disposeModelResources,resetHintsSeen:function(){try{localStorage.removeItem('roxyHints');}catch(e){}},syncPaintHud:syncPaintHud,snapView:snapView,pickColorAt2D:pickColorAt2D,pickColorAt3D:pickColorAt3D,setPaintColor:setPaintColor,setActiveModel:setActiveModel,resizeActive:resizeActive,renderEditHud:renderEditHud,makeModel:makeModel,makeMaterial:makeMaterial,rebuildModel:rebuildModel,tex:tex,addLight:addLight,frameObject:frameObject,viewState:viewState,invalidate:invalidate};
 window.__setDownload=function(fn){download=fn;};
 `;
 
@@ -184,6 +184,102 @@ const server = http.createServer((req, res) => {
       if (Math.abs(EM.V[i].y - before[i].y) > 1e-9 || Math.abs(EM.V[i].z - before[i].z) > 1e-9) throw new Error('vertex ' + i + ' Y/Z should stay put for an X-displacement shear');
     }
     EM.clearSel(); R.History.undo(); // leave no dangling vert-history entry for later steps' meshes
+  }));
+
+  // ---- Wave A2: Knife / Spin / Screw ----
+  await step('knife cuts across a cube face: +1 face, +2 verts, both new verts on the cut plane', () => page.evaluate(() => {
+    var R = __R, EM = R.EM;
+    EM.fromPrim('Cube');
+    var fi = 0, f = EM.F[fi];
+    if (f.vi.length !== 4) throw new Error('test setup: expected a quad face at EM.F[0]');
+    var e0 = EM._edgeIndexFor(f.vi[0], f.vi[1]), e2 = EM._edgeIndexFor(f.vi[2], f.vi[3]);
+    if (e0 < 0 || e2 < 0) throw new Error('test setup: could not find the two opposite boundary edges of the face');
+    var mid0 = EM.V[EM.E[e0].a].clone().lerp(EM.V[EM.E[e0].b], 0.5);
+    var mid1 = EM.V[EM.E[e2].a].clone().lerp(EM.V[EM.E[e2].b], 0.5);
+    var corner = EM.V[EM.E[e0].a];
+    // the face is axis-aligned (a fresh cube quad) — find which coordinate is constant across it
+    var axis = -1;
+    ['x', 'y', 'z'].forEach(function (ax) { if (Math.abs(mid0[ax] - mid1[ax]) < 1e-6 && Math.abs(mid0[ax] - corner[ax]) < 1e-6) axis = ax; });
+    if (axis === -1) throw new Error('test setup: could not determine the face\'s constant axis');
+    var vBefore = EM.V.length, fBefore = EM.F.length;
+    // synthetic cut points — exactly what Knife.tap would produce after snapping two taps to
+    // these two edges, called directly (no pointer events) per the geometric-core requirement
+    var ok = EM.knifeCore([{ type: 'edge', ei: e0, t: 0.5, fi: fi }, { type: 'edge', ei: e2, t: 0.5, fi: fi }]);
+    if (!ok) throw new Error('knifeCore reported no cut');
+    if (EM.V.length !== vBefore + 2) throw new Error('expected exactly 2 new cut vertices, got +' + (EM.V.length - vBefore));
+    if (EM.F.length !== fBefore + 1) throw new Error('expected the face count to grow by exactly 1 (one face split into two), got +' + (EM.F.length - fBefore));
+    var v0 = EM.V[vBefore], v1 = EM.V[vBefore + 1];
+    if (v0.distanceTo(mid0) > 1e-6) throw new Error('first cut vertex is not at the expected edge midpoint');
+    if (v1.distanceTo(mid1) > 1e-6) throw new Error('second cut vertex is not at the expected edge midpoint');
+    if (Math.abs(v0[axis] - corner[axis]) > 1e-6 || Math.abs(v1[axis] - corner[axis]) > 1e-6) throw new Error('cut vertices are not on the face\'s cut plane');
+    // no crack left behind: every edge of the cut face's two new sub-faces must still be shared
+    // by exactly the faces that touch it (rebuilt edge list has no stray 1-face boundary where
+    // the original interior edges used to be 2-face)
+    EM._buildEdges();
+    var openBoundary = EM.E.filter(function (e) { return e.fi.length === 1; }).length;
+    if (openBoundary !== 0) throw new Error('cutting an interior face of a closed cube should not open any new boundary edges, got ' + openBoundary);
+  }));
+
+  await step('knife tool: K toggles the tool and the HUD confirm/undo/cancel row', () => page.evaluate(() => {
+    var R = __R;
+    R.setView('edit'); R.EM.fromPrim('Cube');
+    R.editState.tool = 'select';
+    var evt = new KeyboardEvent('keydown', { key: 'k' });
+    window.dispatchEvent(evt);
+    if (R.editState.tool !== 'knife') throw new Error('K did not switch editState.tool to knife');
+    R.renderEditHud();
+    var hud = document.getElementById('editHud');
+    if (!/Confirm/i.test(hud.textContent)) throw new Error('knife HUD did not render a Confirm control');
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k' }));
+    if (R.editState.tool !== 'select') throw new Error('K did not toggle back to select');
+  }));
+
+  await step('spin revolves a profile around an axis: welded vert count and every spun vertex keeps its source radius', () => page.evaluate(() => {
+    var R = __R, EM = R.EM;
+    EM.fromPrim('Plane'); EM.clear();
+    var p0 = new THREE.Vector3(1, 0, 0); p0.sel = true;
+    var p1 = new THREE.Vector3(1.5, 1, 0); p1.sel = true;
+    var p2 = new THREE.Vector3(2, 2, 0); p2.sel = true;
+    EM.V = [p0, p1, p2]; EM.F = []; EM.E = [];
+    R.editState.mode = 'vert';
+    R.editState.spinAxis = 1; // Y
+    R.editState.spinOriginWorld = true; // origin = world 0,0,0 (all 3 profile verts are off-axis)
+    R.editState.spinAngle = 360;
+    R.editState.spinSteps = 8;
+    var vBefore = EM.V.length; // 3
+    EM.spin();
+    // a full 360°, zero-offset spin welds the seam by reusing the original profile verts for the
+    // final ring, so only (steps-1) NEW rings of 3 verts each are created
+    var expectedAdded = 3 * (R.editState.spinSteps - 1);
+    if (EM.V.length !== vBefore + expectedAdded) throw new Error('unexpected vert count after spin: got +' + (EM.V.length - vBefore) + ', expected +' + expectedAdded);
+    var radii = [1, 1.5, 2];
+    for (var i = 0; i < EM.V.length; i++) {
+      var v = EM.V[i], r = Math.sqrt(v.x * v.x + v.z * v.z);
+      var ok = radii.some(function (rr) { return Math.abs(rr - r) < 1e-4; });
+      if (!ok) throw new Error('vertex ' + i + ' radius ' + r + ' from the Y axis does not match any source profile radius');
+    }
+  }));
+
+  await step('screw sweeps a profile helically: axis coordinate rises monotonically and matches offset×revolutions', () => page.evaluate(() => {
+    var R = __R, EM = R.EM;
+    EM.fromPrim('Plane'); EM.clear();
+    var q0 = new THREE.Vector3(1, 0, 0); q0.sel = true;
+    var q1 = new THREE.Vector3(1, 0, 0.6); q1.sel = true; // 2-vertex profile, both off-axis
+    EM.V = [q0, q1]; EM.F = []; EM.E = [];
+    R.editState.mode = 'vert';
+    R.editState.spinAxis = 1; // Y
+    R.editState.spinOriginWorld = true;
+    R.editState.spinSteps = 8;
+    R.editState.screwOffset = 0.5; // per full revolution
+    R.editState.screwRevs = 3;
+    EM.screw();
+    // every 2 consecutive verts are one ring (profile has 2 verts); track ring 0's Y coordinate
+    var ys = [];
+    for (var i = 0; i < EM.V.length; i += 2) ys.push(EM.V[i].y);
+    if (ys.length < 2) throw new Error('screw produced too few rings to check monotonicity');
+    for (var j = 1; j < ys.length; j++) if (ys[j] <= ys[j - 1] - 1e-9) throw new Error('screw did not raise the axis coordinate monotonically: ' + JSON.stringify(ys));
+    var totalRise = ys[ys.length - 1] - ys[0], expectedRise = R.editState.screwOffset * R.editState.screwRevs;
+    if (Math.abs(totalRise - expectedRise) > 1e-4) throw new Error('total screw rise ' + totalRise + ' does not match offset×revolutions=' + expectedRise);
   }));
 
   await step('sculpt dabs all brushes actually move geometry', () => page.evaluate(() => {

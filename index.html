@@ -470,6 +470,7 @@ dom.addEventListener('pointerdown',function(e){
     do3dPaint(e.clientX,e.clientY);}
   else if(active.view==='edit'&&ptrs.size===1){
     if(editState.tool==='sculpt'&&EM._meshObj){Sculpt.down(e);}
+    else if(editState.tool==='knife'){/* no drag behavior — a tap is placed on release, see onViewportTap */}
     else if(editState.boxSel){editBox.active=true;editBox.ptId=e.pointerId;editBox.x0=e.clientX;editBox.y0=e.clientY;showSelBox(e.clientX,e.clientY,e.clientX,e.clientY);}
     else if(EM.selCount()>0){editDirect.pending=true;editDirect.ptId=e.pointerId;
       editDirect.startX=e.clientX;editDirect.startY=e.clientY;
@@ -1374,14 +1375,17 @@ function onViewportTap(e){var slot=curSlot();if(!slot)return;var r=dom.getBoundi
   else if(active.view==='scene'){var hs=ray.intersectObjects(sceneScene.userData.holder.children,true)[0];var hl=ray.intersectObjects(sceneScene.userData.lights.children,true)[0];
     if(hl){var lt=null;sceneScene.userData.lights.children.forEach(function(c){if(c===hl.object&&c.isMesh){sceneScene.userData.lights.children.forEach(function(L){if(L.userData&&L.userData.helper===c)lt=L;});}});if(lt){state.selLight=lt;state.selScene=null;renderPanel();return;}}
     if(hs){var top=hs.object;while(top.parent&&!top.userData.placement)top=top.parent;state.selScene=top;state.selLight=null;renderPanel();}}
-  else if(active.view==='edit'){var rr=dom.getBoundingClientRect();var sx=e.clientX-rr.left,sy=e.clientY-rr.top;EM.select(ray,sx,sy,active.vs.cam,rr.width,rr.height,e.shiftKey||editState.multiSel);}}
+  else if(active.view==='edit'){
+    if(editState.tool==='knife'){Knife.tap(e);return;}
+    var rr=dom.getBoundingClientRect();var sx=e.clientX-rr.left,sy=e.clientY-rr.top;EM.select(ray,sx,sy,active.vs.cam,rr.width,rr.height,e.shiftKey||editState.multiSel);}}
 
 /* ═══════════════════════════════════════════════════════
    MESH EDIT MODE
    ═══════════════════════════════════════════════════════ */
 
 var editState={mode:'face',tool:'select',grabActive:false,grabPtId:null,grabPrevX:0,grabPrevY:0,grabSnap:null,multiSel:false,hudExpanded:false,prop:false,propR:.8,mirror:false,mirrorAxis:0,boxSel:0,extrudeAmt:.3,insetAmt:.22,
-  slide:false,shrinkAmt:.15,randAmt:.1,randSeed:0,shearAmt:.3,shearPair:0};
+  slide:false,shrinkAmt:.15,randAmt:.1,randSeed:0,shearAmt:.3,shearPair:0,
+  spinAxis:1,spinOriginWorld:false,spinAngle:360,spinSteps:16,screwOffset:1,screwRevs:1};
 
 function screenDeltaToWorld(dx,dy){
   var cam=active.vs.cam,rad=active.vs.rad;
@@ -1391,6 +1395,10 @@ function screenDeltaToWorld(dx,dy){
   return new THREE.Vector3().addScaledVector(right,dx*k).addScaledVector(up,-dy*k);}
 
 function distSeg2D(px,py,ax,ay,bx,by){var dx=bx-ax,dy=by-ay,l2=dx*dx+dy*dy;if(!l2)return Math.hypot(px-ax,py-ay);var t=Math.max(0,Math.min(1,((px-ax)*dx+(py-ay)*dy)/l2));return Math.hypot(px-(ax+t*dx),py-(ay+t*dy));}
+// 3D counterpart of distSeg2D's t-clamp, used by Knife to project a raw hit point onto the
+// nearest point of an existing edge (both for snapping taps and for the fallback "closest edge
+// of the tapped face" when nothing is within the screen-space snap threshold).
+function closestPointT(p,A,B){var ab=new THREE.Vector3().subVectors(B,A),l2=ab.lengthSq();if(l2<1e-12)return 0;var t=new THREE.Vector3().subVectors(p,A).dot(ab)/l2;return Math.max(0,Math.min(1,t));}
 
 var editDirect={ptId:null,pending:false,active:false,startX:0,startY:0,prevX:0,prevY:0,snap:null};
 var editBox={active:false,ptId:null,x0:0,y0:0};
@@ -2299,6 +2307,150 @@ var EM={
     this._refresh();this._pushVertHistory(snap);
     toast('Sheared '+amount.toFixed(2));},
 
+  // ─── Wave A2: Knife tool (core, no pointer-event dependency — see Knife for the tap UX) ──
+
+  _edgeIndexFor:function(a,b){for(var i=0;i<this.E.length;i++){var e=this.E[i];if((e.a===a&&e.b===b)||(e.a===b&&e.b===a))return i;}return -1;},
+
+  // Splits edge `ei` at parameter t (0=e.a .. 1=e.b) into a new vertex, inserting it into the
+  // vi[] loop of EVERY face currently sharing that edge (one if it's a boundary edge, two if
+  // interior) so a cut never leaves a T-junction crack behind. Reuses an existing vertex if one
+  // is already sitting at that position (repeat taps, or two chain points resolving to the same
+  // spot) instead of creating a duplicate.
+  _splitEdgeInsertVertex:function(ei,t){
+    var e=this.E[ei];if(!e)return -1;
+    var A=this.V[e.a],B=this.V[e.b],pos=A.clone().lerp(B,Math.max(0,Math.min(1,t)));
+    for(var i=0;i<this.V.length;i++)if(this.V[i].distanceTo(pos)<1e-5)return i;
+    pos.sel=false;this._uvMix(pos,e.a,e.b,t);this.V.push(pos);var ni=this.V.length-1,self=this;
+    e.fi.forEach(function(fi){
+      var f=self.F[fi];if(!f)return;var vi=f.vi;
+      for(var k=0;k<vi.length;k++){var u=vi[k],w=vi[(k+1)%vi.length];
+        if((u===e.a&&w===e.b)||(u===e.b&&w===e.a)){vi.splice(k+1,0,ni);return;}}});
+    return ni;},
+
+  // Resolves one already-snapped knife point ({type:'vert',vi} or {type:'edge',ei,t}, see
+  // Knife.tap) to a concrete, stable vertex index — materializing edge points into real geometry.
+  _materializeKnifePoint:function(p){return p.type==='vert'?p.vi:this._splitEdgeInsertVertex(p.ei,p.t);},
+
+  // Any CURRENT face containing both vertex indices on its boundary — search order favors the
+  // two points' own tapped faces (hint1/hint2) so an ambiguous shared-vertex case still cuts the
+  // face the user was actually looking at.
+  _facesWithBoth:function(va,vb,hint1,hint2){
+    if(hint1!=null){var f1=this.F[hint1];if(f1&&f1.vi.indexOf(va)>=0&&f1.vi.indexOf(vb)>=0)return hint1;}
+    if(hint2!=null){var f2=this.F[hint2];if(f2&&f2.vi.indexOf(va)>=0&&f2.vi.indexOf(vb)>=0)return hint2;}
+    for(var fi=0;fi<this.F.length;fi++){var f=this.F[fi];if(f.vi.indexOf(va)>=0&&f.vi.indexOf(vb)>=0)return fi;}
+    return -1;},
+
+  // Splits polygon `fi`'s boundary loop into two new faces along the chord va→vb (both must
+  // already be vertices of that face's vi[] loop — n-gons welcome). No-op (false) if va/vb are
+  // already adjacent in the loop (nothing to cut) or either isn't part of the face.
+  _splitFaceAtVerts:function(fi,va,vb){
+    var f=this.F[fi];if(!f||va===vb)return false;
+    var vi=f.vi,ia=vi.indexOf(va),ib=vi.indexOf(vb);
+    if(ia<0||ib<0||ia===ib)return false;
+    var loopA=[],loopB=[],k;
+    for(k=ia;;k=(k+1)%vi.length){loopA.push(vi[k]);if(k===ib)break;}
+    for(k=ib;;k=(k+1)%vi.length){loopB.push(vi[k]);if(k===ia)break;}
+    if(loopA.length<3||loopB.length<3)return false;
+    f.vi=loopA;f.sel=true;this.F.push({vi:loopB,sel:true});
+    return true;},
+
+  // Core knife op — callable directly with synthetic points, no pointer events needed (used by
+  // both Knife.confirm and the verification suite). `points` is 2+ already-resolved cut points:
+  // {type:'vert',vi,fi} or {type:'edge',ei,t,fi}. Cuts every face the chain crosses by walking
+  // consecutive point pairs; each pair's target face is whichever CURRENT face contains both
+  // materialized endpoints (see _facesWithBoth), so a chain that crosses from one face into its
+  // neighbor (sharing an edge-snapped point) naturally splits both faces in turn.
+  knifeCore:function(points){
+    if(!points||points.length<2)return false;
+    var self=this,_b=this._topoSnapshot();
+    var matVi=points.map(function(p){return self._materializeKnifePoint(p);});
+    var cuts=0;
+    for(var i=0;i<points.length-1;i++){
+      var va=matVi[i],vb=matVi[i+1];
+      if(va<0||vb<0||va===vb)continue;
+      var fi=this._facesWithBoth(va,vb,points[i].fi,points[i+1].fi);
+      if(fi<0)continue;
+      if(this._splitFaceAtVerts(fi,va,vb))cuts++;}
+    if(!cuts){this._topoRestore(_b);return false;}
+    this.clearSel();this.V.forEach(function(v,i){if(matVi.indexOf(i)>=0)v.sel=true;});
+    this._buildEdges();this._refresh();this._pushTopo(_b);
+    return true;},
+
+  // ─── Wave A2: Spin (lathe revolve) / Screw (helical sweep) ──────────────────────────
+  // Both share this one sweep builder: revolve the selected profile chain around `axisVec`
+  // (through `origin`) by `angleDeg` in `totalSteps` equal steps, translating each successive
+  // ring by `offsetPerRev` for every full 360° swept (0 = pure Spin, nonzero = Screw). Builds
+  // the same swept quad-grid construction as _quadCylinder. A profile vertex sitting exactly ON
+  // the rotation axis stays put every ring (rotating a vector parallel to its own axis is a
+  // no-op), so those columns degrade to a triangle fan instead of a degenerate quad; a full
+  // 360° spin with zero offset reuses the ORIGINAL profile verts for the final ring instead of
+  // new coincident ones, so the seam is welded by construction rather than float-epsilon luck.
+
+  // Order the current selection into a profile: an open edge-chain if in Edge mode (walks
+  // selected edges endpoint to endpoint), else the natural index order of selected verts
+  // (Vert mode), else the unique verts touched by selected faces (Face mode fallback).
+  _profileChain:function(){
+    if(editState.mode==='edge'){
+      var sel=this.E.filter(function(e){return e.sel;});
+      if(sel.length){
+        var adj={};sel.forEach(function(e){(adj[e.a]=adj[e.a]||[]).push(e.b);(adj[e.b]=adj[e.b]||[]).push(e.a);});
+        var keys=Object.keys(adj).map(Number),start=-1;
+        for(var k=0;k<keys.length;k++)if(adj[keys[k]].length===1){start=keys[k];break;}
+        if(start<0)start=keys[0];
+        function ek(a,b){return Math.min(a,b)+'_'+Math.max(a,b);}
+        var chain=[start],used={},cur=start,guard=0;
+        while(guard++<sel.length+2){
+          var nbrs=adj[cur]||[],next=-1;
+          for(var i=0;i<nbrs.length;i++){var kk=ek(cur,nbrs[i]);if(!used[kk]){next=nbrs[i];used[kk]=1;break;}}
+          if(next<0)break;chain.push(next);cur=next;}
+        if(chain.length>=2)return chain;}}
+    var arr=[];this.V.forEach(function(v,i){if(v.sel)arr.push(i);});
+    if(arr.length)return arr;
+    var seen={};this.F.forEach(function(f){if(f.sel)f.vi.forEach(function(vi){if(!seen[vi]){seen[vi]=1;arr.push(vi);}});});
+    return arr;},
+
+  _spinScrew:function(axisVec,origin,angleDeg,totalSteps,offsetPerRev){
+    var chain=this._profileChain();
+    if(chain.length<2){toast('Select a connected profile (2+ verts/edges) first');return false;}
+    totalSteps=Math.max(1,Math.round(totalSteps));
+    var self=this,_b=this._topoSnapshot(),angleRad=angleDeg*Math.PI/180;
+    var onAxis=chain.map(function(vi){
+      var p=self.V[vi].clone().sub(origin),t=p.dot(axisVec);
+      return p.addScaledVector(axisVec,-t).length()<1e-4;});
+    var seamClose=Math.abs(angleDeg%360)<1e-6&&Math.abs(angleDeg)>1e-6&&Math.abs(offsetPerRev)<1e-9;
+    var grid=[chain.slice()];
+    for(var s=1;s<=totalSteps;s++){
+      if(s===totalSteps&&seamClose){grid.push(chain.slice());continue;}
+      var ang=angleRad*s/totalSteps,off=offsetPerRev*(s/totalSteps)*(angleDeg/360),ring=[];
+      for(var j=0;j<chain.length;j++){
+        var p=self.V[chain[j]].clone().sub(origin);
+        p.applyAxisAngle(axisVec,ang);p.add(origin).addScaledVector(axisVec,off);p.sel=true;
+        self.V.push(p);ring.push(self.V.length-1);}
+      grid.push(ring);}
+    var n=chain.length,added=0;
+    for(var s2=0;s2<grid.length-1;s2++)for(var j2=0;j2<n-1;j2++){
+      var a=grid[s2][j2],b=grid[s2][j2+1],c=grid[s2+1][j2+1],d=grid[s2+1][j2];
+      if(onAxis[j2]&&onAxis[j2+1]){continue;}
+      else if(onAxis[j2])this.F.push({vi:[a,b,c],sel:false});
+      else if(onAxis[j2+1])this.F.push({vi:[a,b,d],sel:false});
+      else this.F.push({vi:[a,b,c,d],sel:false});
+      added++;}
+    if(!added){this._topoRestore(_b);toast('Nothing to sweep — profile has fewer than 2 verts off the axis');return false;}
+    this.clearSel();for(var s3=1;s3<grid.length;s3++)grid[s3].forEach(function(vi){self.V[vi].sel=true;});
+    this._weld(1e-4);this._buildEdges();this._refresh();this._pushTopo(_b);
+    return true;},
+
+  spin:function(){
+    var es=editState,axisVec=new THREE.Vector3(es.spinAxis===0?1:0,es.spinAxis===1?1:0,es.spinAxis===2?1:0);
+    var origin=es.spinOriginWorld?new THREE.Vector3(0,0,0):this._selCentroid(this._selVertSet());
+    if(this._spinScrew(axisVec,origin,es.spinAngle,es.spinSteps,0)){renderPanel();toast('Spun '+es.spinAngle+'° in '+es.spinSteps+' steps');}},
+
+  screw:function(){
+    var es=editState,axisVec=new THREE.Vector3(es.spinAxis===0?1:0,es.spinAxis===1?1:0,es.spinAxis===2?1:0);
+    var origin=es.spinOriginWorld?new THREE.Vector3(0,0,0):this._selCentroid(this._selVertSet());
+    var totalAngle=360*es.screwRevs,totalSteps=Math.max(1,Math.round(es.spinSteps*es.screwRevs));
+    if(this._spinScrew(axisVec,origin,totalAngle,totalSteps,es.screwOffset)){renderPanel();toast('Screwed '+es.screwRevs+' rev × offset '+es.screwOffset.toFixed(2));}},
+
   exportToModel:function(){
     // With a source texture, export using the carried per-vertex UVs so the original
     // wrapping survives the edit session; otherwise use the unique per-face atlas.
@@ -2416,6 +2568,63 @@ var EM={
 
   _faceCenter:function(fi){
     var f=this.F[fi],c=new THREE.Vector3();f.vi.forEach(function(vi){c.add(this.V[vi]);},this);return c.divideScalar(f.vi.length);}
+};
+
+// ─── Wave A2: Knife tool interactive layer (mobile tap-tap-confirm) ─────────────────────
+// Each tap raycasts the live edit mesh, then snaps the hit point to the nearest vertex or edge
+// of the tapped face (screen-space threshold, reusing EM._pickVert/_pickEdge — the same helpers
+// Select uses) so every cut point is always a well-defined vertex or a point on an existing
+// edge. That keeps EM.knifeCore's job simple and always watertight: it only ever inserts new
+// verts on CROSSED EDGES (per the spec), never a truly free-floating face-interior vertex.
+var Knife={
+  pts:[],_dotsObj:null,_lineObj:null,
+  // Fallback when nothing is within the normal pick threshold: the closest point on ANY
+  // boundary edge of the tapped face, so a tap always resolves to something cuttable even on
+  // a huge, sparsely-tessellated face.
+  _nearestEdgeOfFace:function(fi,p){
+    var f=EM.F[fi];if(!f)return -1;var best=-1,bestD=Infinity;
+    for(var i=0;i<f.vi.length;i++){
+      var a=f.vi[i],b=f.vi[(i+1)%f.vi.length],ei=EM._edgeIndexFor(a,b);if(ei<0)continue;
+      var A=EM.V[a],B=EM.V[b],t=closestPointT(p,A,B),d=A.clone().lerp(B,t).distanceTo(p);
+      if(d<bestD){bestD=d;best=ei;}}
+    return best;},
+  tap:function(e){
+    if(!EM._meshObj)return;
+    var r=dom.getBoundingClientRect();
+    var ray=new THREE.Raycaster();ray.setFromCamera({x:((e.clientX-r.left)/r.width)*2-1,y:-((e.clientY-r.top)/r.height)*2+1},active.vs.cam);
+    var hit=ray.intersectObject(EM._meshObj,false)[0];if(!hit)return;
+    var fi=EM._triMap[hit.faceIndex];if(fi==null)return;
+    var sx=e.clientX-r.left,sy=e.clientY-r.top,cam=active.vs.cam,W=r.width,H=r.height;
+    var vi=EM._pickVert(sx,sy,cam,W,H,hit),pt;
+    if(vi>=0)pt={type:'vert',vi:vi,fi:fi,pos:EM.V[vi].clone()};
+    else{
+      var ei=EM._pickEdge(sx,sy,cam,W,H,hit);
+      if(ei<0)ei=this._nearestEdgeOfFace(fi,hit.point);
+      if(ei<0)return;
+      var e2=EM.E[ei],A=EM.V[e2.a],B=EM.V[e2.b],t=closestPointT(hit.point,A,B);
+      pt={type:'edge',ei:ei,t:t,fi:fi,pos:A.clone().lerp(B,t)};}
+    this.pts.push(pt);this._updatePreview();renderEditHud();if(active.view==='edit')renderPanel();},
+  undoPoint:function(){this.pts.pop();this._updatePreview();renderEditHud();},
+  cancel:function(){this.pts=[];this._updatePreview();renderEditHud();toast('Knife cancelled');},
+  confirm:function(){
+    if(this.pts.length<2){toast('Tap 2+ points on the mesh first');return;}
+    var ok=EM.knifeCore(this.pts);
+    this.pts=[];this._updatePreview();renderEditHud();
+    toast(ok?'Cut applied':'Nothing to cut — points did not span any face boundary');},
+  _ensureObjs:function(){
+    if(!this._dotsObj){var g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute([],3));
+      this._dotsObj=new THREE.Points(g,new THREE.PointsMaterial({color:0x54e6c8,size:12,sizeAttenuation:false,depthTest:false,transparent:true,opacity:.95}));
+      this._dotsObj.renderOrder=21;editScene.add(this._dotsObj);}
+    if(!this._lineObj){var g2=new THREE.BufferGeometry();g2.setAttribute('position',new THREE.Float32BufferAttribute([],3));
+      this._lineObj=new THREE.Line(g2,new THREE.LineBasicMaterial({color:0x54e6c8,depthTest:false,transparent:true,opacity:.9}));
+      this._lineObj.renderOrder=21;editScene.add(this._lineObj);}},
+  _updatePreview:function(){
+    this._ensureObjs();var pos=[];this.pts.forEach(function(p){pos.push(p.pos.x,p.pos.y,p.pos.z);});
+    this._dotsObj.geometry.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+    this._dotsObj.visible=pos.length>0;
+    this._lineObj.geometry.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+    this._lineObj.visible=pos.length>=6;
+    invalidate(2);}
 };
 
 /* Rebuild any mesh's UVs into a per-face atlas so every triangle gets its
@@ -2615,23 +2824,35 @@ function toggleSlide(){editState.slide=!editState.slide;renderEditHud();renderPa
 var SHEAR_PAIRS=[[0,1],[0,2],[1,0],[1,2],[2,0],[2,1]];
 function shearPairLabel(){var p=SHEAR_PAIRS[editState.shearPair];return 'XYZ'[p[0]]+'∝'+'XYZ'[p[1]];}
 function cycleShearPair(){editState.shearPair=(editState.shearPair+1)%SHEAR_PAIRS.length;renderEditHud();renderPanel();toast('Shear axis '+shearPairLabel());}
+// Spin/Screw axis cycles Off-less X→Y→Z (mobile has no keyboard axis-lock keys) — same single-
+// button pattern as cycleMirror/cycleShearPair. Origin is a separate on/off toggle: selection
+// centroid (default) or world 0,0,0.
+function cycleSpinAxis(){editState.spinAxis=(editState.spinAxis+1)%3;renderEditHud();renderPanel();toast('Spin axis '+'XYZ'[editState.spinAxis]);}
+function spinAxisLabel(){return 'Axis '+'XYZ'[editState.spinAxis];}
+function toggleSpinOrigin(){editState.spinOriginWorld=!editState.spinOriginWorld;renderEditHud();renderPanel();toast(editState.spinOriginWorld?'Spin origin: world 0,0,0':'Spin origin: selection centroid');}
+function spinOriginLabel(){return editState.spinOriginWorld?'Origin: World':'Origin: Centroid';}
 function renderEditHud(){
   var hud=$('#editHud');if(!hud)return;
   hud.innerHTML='';
   var has=EM.V.length>0;
   hud.classList.toggle('on',has);
   if(!has)return;
-  var selN=EM.selCount(),mode=editState.mode,sculpting=editState.tool==='sculpt';
+  var selN=EM.selCount(),mode=editState.mode,sculpting=editState.tool==='sculpt',knifing=editState.tool==='knife';
   var mobile=window.innerWidth<=820;
 
   if(mobile){
     /* MOBILE: compact single scrollable row + collapsible secondary rows */
     var r1=el('div',{class:'hud-row hud-compact'});
-    r1.appendChild(el('button',{class:'hud-btn'+(!sculpting?' on':''),text:'Sel',onclick:function(){editState.tool='select';renderEditHud();renderPanel();}}));
+    r1.appendChild(el('button',{class:'hud-btn'+(editState.tool==='select'?' on':''),text:'Sel',onclick:function(){editState.tool='select';renderEditHud();renderPanel();}}));
     r1.appendChild(el('button',{class:'hud-btn'+(sculpting?' on':''),text:'Sculpt',onclick:function(){editState.tool='sculpt';EM.clearSel();EM._refresh();renderEditHud();renderPanel();}}));
+    r1.appendChild(el('button',{class:'hud-btn'+(knifing?' on':''),title:'Tap points on the mesh to build a cut chain, then Confirm  [K]',text:'Knife',onclick:function(){editState.tool='knife';Knife.pts=[];Knife._updatePreview();renderEditHud();renderPanel();}}));
     if(sculpting){
       [['draw','Draw'],['carve','Carve'],['crease','Crease'],['inflate','Inflate'],['smooth','Smooth'],['grab','Grab'],['flatten','Flatten'],['pinch','Pinch']].forEach(function(p){
         r1.appendChild(el('button',{class:'hud-btn'+(Sculpt.brush===p[0]?' on':''),text:p[1],onclick:function(){Sculpt.brush=p[0];renderEditHud();}}));});
+    }else if(knifing){
+      r1.appendChild(el('button',{class:'hud-btn',title:'Cut every face the point chain crosses',text:'Confirm ('+Knife.pts.length+')',onclick:function(){Knife.confirm();renderPanel();}}));
+      r1.appendChild(el('button',{class:'hud-btn',title:'Remove the last placed point',text:'Undo pt',onclick:function(){Knife.undoPoint();renderPanel();}}));
+      r1.appendChild(el('button',{class:'hud-btn',title:'Clear all placed points',text:'Cancel',onclick:function(){Knife.cancel();renderPanel();}}));
     }else{
       ['face','vert','edge'].forEach(function(m){
         r1.appendChild(el('button',{class:'hud-btn'+(mode===m?' on':''),text:m[0].toUpperCase()+m.slice(1),onclick:function(){editState.mode=m;EM.clearSel();EM._refresh();renderPanel();}}));});
@@ -2653,7 +2874,7 @@ function renderEditHud(){
         hud.appendChild(hudSlider('Size',.05,1.2,Sculpt.radius,.01,function(x){Sculpt.radius=x;}));
         hud.appendChild(hudSlider('Strength',.05,1,Sculpt.strength,.01,function(x){Sculpt.strength=x;}));
         var se2=el('div',{class:'hud-row'});se2.appendChild(el('button',{class:'hud-btn',text:'Save as model →',onclick:function(){EM.exportToModel();}}));hud.appendChild(se2);
-      }else{
+      }else if(!knifing){
         var mr2=el('div',{class:'hud-row hud-compact'});
         mr2.appendChild(el('button',{class:'hud-btn',text:'All',onclick:function(){EM.selAll();}}));
         mr2.appendChild(el('button',{class:'hud-btn',text:'None',onclick:function(){EM.clearSel();EM._refresh();renderPanel();}}));
@@ -2676,11 +2897,15 @@ function renderEditHud(){
           mr2.appendChild(el('button',{class:'hud-btn',title:'Duplicate + detach a seam (Vert/Edge: face-fan split, Face: split from neighbors)',text:'Rip',onclick:function(){EM.rip();}}));
           mr2.appendChild(el('button',{class:'hud-btn',title:'Cycle the Shear axis pair',text:'Sh '+shearPairLabel(),onclick:cycleShearPair}));
           mr2.appendChild(el('button',{class:'hud-btn',title:'Shear the selection about its own centroid',text:'Shear',onclick:function(){EM.shearSelection(editState.shearAmt);}}));
+          mr2.appendChild(el('button',{class:'hud-btn',title:'Cycle the Spin/Screw axis',text:spinAxisLabel(),onclick:cycleSpinAxis}));
+          mr2.appendChild(el('button',{class:'hud-btn',title:'Toggle Spin/Screw origin: selection centroid or world 0,0,0',text:spinOriginLabel(),onclick:toggleSpinOrigin}));
+          mr2.appendChild(el('button',{class:'hud-btn',title:'Revolve the selected profile (Vert/Edge) around the axis',text:'Spin',onclick:function(){EM.spin();}}));
+          mr2.appendChild(el('button',{class:'hud-btn',title:'Spin + a per-revolution axis offset — helical sweep',text:'Screw',onclick:function(){EM.screw();}}));
         }
         mr2.appendChild(el('button',{class:'hud-btn',text:'Save →',onclick:function(){EM.exportToModel();}}));
         hud.appendChild(mr2);
       }
-    }else if(!sculpting&&selN>0){
+    }else if(!sculpting&&!knifing&&selN>0){
       /* quick ops row even when collapsed */
       var qr=el('div',{class:'hud-row hud-compact'});
       if(mode==='face'){qr.appendChild(el('button',{class:'hud-btn',text:'Extrude',onclick:function(){EM.extrude();}}));qr.appendChild(el('button',{class:'hud-btn',text:'Inset',onclick:function(){EM.inset();}}));}
@@ -2698,8 +2923,9 @@ function renderEditHud(){
 
   /* DESKTOP: multi-row layout */
   var tr=el('div',{class:'hud-row'});
-  tr.appendChild(el('button',{class:'hud-btn'+(!sculpting?' on':''),text:'Select',onclick:function(){editState.tool='select';renderEditHud();renderPanel();}}));
+  tr.appendChild(el('button',{class:'hud-btn'+(editState.tool==='select'?' on':''),text:'Select',onclick:function(){editState.tool='select';renderEditHud();renderPanel();}}));
   tr.appendChild(el('button',{class:'hud-btn'+(sculpting?' on':''),text:'Sculpt',onclick:function(){editState.tool='sculpt';EM.clearSel();EM._refresh();renderEditHud();renderPanel();}}));
+  tr.appendChild(el('button',{class:'hud-btn'+(knifing?' on':''),title:'Tap points on the mesh to build a cut chain, then Confirm  [K]',text:'Knife',onclick:function(){editState.tool='knife';Knife.pts=[];Knife._updatePreview();renderEditHud();renderPanel();}}));
   hud.appendChild(tr);
 
   if(sculpting){
@@ -2716,6 +2942,16 @@ function renderEditHud(){
     var er2=el('div',{class:'hud-row'});
     er2.appendChild(el('button',{class:'hud-btn',text:'Save as model →',onclick:function(){EM.exportToModel();}}));
     hud.appendChild(er2);
+    return;
+  }
+
+  if(knifing){
+    hud.appendChild(el('div',{class:'hud-sel',text:Knife.pts.length+' cut point'+(Knife.pts.length===1?'':'s')+' — tap the mesh to add more, then Confirm'}));
+    var kr=el('div',{class:'hud-row'});
+    kr.appendChild(el('button',{class:'hud-btn',text:'Confirm Cut',onclick:function(){Knife.confirm();renderPanel();}}));
+    kr.appendChild(el('button',{class:'hud-btn',text:'Undo Point',onclick:function(){Knife.undoPoint();renderPanel();}}));
+    kr.appendChild(el('button',{class:'hud-btn',text:'Cancel',onclick:function(){Knife.cancel();renderPanel();}}));
+    hud.appendChild(kr);
     return;
   }
 
@@ -2768,6 +3004,10 @@ function renderEditHud(){
     or.appendChild(el('button',{class:'hud-btn',title:'Duplicate + detach a seam  [V]',text:'Rip',onclick:function(){EM.rip();}}));
     or.appendChild(el('button',{class:'hud-btn',title:'Cycle the Shear axis pair',text:'Shear axis '+shearPairLabel(),onclick:cycleShearPair}));
     or.appendChild(el('button',{class:'hud-btn',title:'Shear the selection about its own centroid',text:'Shear',onclick:function(){EM.shearSelection(editState.shearAmt);}}));
+    or.appendChild(el('button',{class:'hud-btn',title:'Cycle the Spin/Screw axis',text:spinAxisLabel(),onclick:cycleSpinAxis}));
+    or.appendChild(el('button',{class:'hud-btn',title:'Toggle Spin/Screw origin: selection centroid or world 0,0,0',text:spinOriginLabel(),onclick:toggleSpinOrigin}));
+    or.appendChild(el('button',{class:'hud-btn',title:'Revolve the selected profile (Vert/Edge) around the axis',text:'Spin',onclick:function(){EM.spin();}}));
+    or.appendChild(el('button',{class:'hud-btn',title:'Spin + a per-revolution axis offset — helical sweep',text:'Screw',onclick:function(){EM.screw();}}));
     hud.appendChild(or);
   }
 
@@ -2793,8 +3033,8 @@ function panelEdit(b){
 
   b.appendChild(el('div',{class:'section-title',text:'Tool'}));
   var toolRow=el('div',{class:'chiprow'});
-  [['select','Select / Move'],['sculpt','Sculpt']].forEach(function(t){
-    toolRow.appendChild(el('button',{class:'chip'+(editState.tool===t[0]?' on':''),text:t[1],onclick:function(){editState.tool=t[0];if(t[0]==='sculpt'){EM.clearSel();EM._refresh();}renderEditHud();renderPanel();}}));});
+  [['select','Select / Move'],['sculpt','Sculpt'],['knife','Knife']].forEach(function(t){
+    toolRow.appendChild(el('button',{class:'chip'+(editState.tool===t[0]?' on':''),text:t[1],onclick:function(){editState.tool=t[0];if(t[0]==='sculpt'){EM.clearSel();EM._refresh();}else if(t[0]==='knife'){Knife.pts=[];Knife._updatePreview();}renderEditHud();renderPanel();}}));});
   b.appendChild(toolRow);
   if(editState.tool==='sculpt'){
     b.appendChild(el('p',{class:'small muted',style:'margin:6px 0',text:'Drag on the surface to sculpt. RotBall orbits, two fingers zoom/pan.'}));
@@ -2810,6 +3050,16 @@ function panelEdit(b){
     b.appendChild(el('p',{class:'small muted',style:'margin-top:6px',text:'Tip: add a Subdivide Smooth modifier first for more clay-like detail.'}));
     b.appendChild(el('hr',{class:'sep'}));
     b.appendChild(el('button',{class:'pri',style:'width:100%',text:'Save mesh as model',onclick:function(){EM.exportToModel();}}));
+    return;
+  }
+  if(editState.tool==='knife'){
+    b.appendChild(el('p',{class:'small muted',style:'margin:6px 0',text:'Tap points on the mesh surface to build a straight cut chain — each point snaps to the nearest vertex or edge. Confirm cuts every face the chain crosses; new verts are inserted on the crossed edges so the mesh stays watertight.  [K] toggles Knife.'}));
+    b.appendChild(el('div',{class:'card',style:'text-align:center;margin:8px 0;color:var(--pink)'},[el('span',{text:Knife.pts.length+' point'+(Knife.pts.length===1?'':'s')+' placed'})]));
+    b.appendChild(el('div',{class:'grid2'},[
+      el('button',{class:'pri',text:'Confirm Cut',onclick:function(){Knife.confirm();renderPanel();}}),
+      el('button',{text:'Undo Point',onclick:function(){Knife.undoPoint();renderPanel();}})
+    ]));
+    b.appendChild(el('button',{style:'width:100%;margin-top:6px',text:'Cancel',onclick:function(){Knife.cancel();renderPanel();}}));
     return;
   }
 
@@ -2925,9 +3175,23 @@ function panelEdit(b){
   b.appendChild(slider('Shear amount',-1,1,editState.shearAmt,.01,function(x){editState.shearAmt=x;}));
   b.appendChild(el('button',{style:'width:100%',text:'Apply Shear',onclick:function(){EM.shearSelection(editState.shearAmt);}}));
 
+  b.appendChild(el('div',{class:'section-title',text:'Spin / Screw (lathe revolve)'}));
+  b.appendChild(el('p',{class:'small muted',style:'margin-bottom:6px',text:'Select a connected profile (Vert or Edge mode) and revolve it around an axis to build a swept quad grid — Spin sweeps in place, Screw adds a per-revolution offset along the axis for helical sweeps (springs, screw threads). A profile vertex sitting exactly on the axis stays put and closes into a triangle fan instead of a degenerate quad.'}));
+  b.appendChild(el('div',{class:'grid2'},[
+    el('button',{text:'Axis: '+'XYZ'[editState.spinAxis],title:'Cycle the revolve axis X → Y → Z',onclick:cycleSpinAxis}),
+    el('button',{text:spinOriginLabel(),title:'Toggle between the selection centroid and world origin (0,0,0)',onclick:toggleSpinOrigin})
+  ]));
+  b.appendChild(slider('Spin angle (deg)',1,720,editState.spinAngle,1,function(x){editState.spinAngle=x;}));
+  b.appendChild(slider('Spin steps',2,64,editState.spinSteps,1,function(x){editState.spinSteps=Math.round(x);}));
+  b.appendChild(el('button',{class:'pri',style:'width:100%',text:'Spin (revolve profile)',onclick:function(){EM.spin();}}));
+  b.appendChild(el('hr',{class:'sep',style:'margin:10px 0'}));
+  b.appendChild(slider('Screw offset per revolution',-4,4,editState.screwOffset,.01,function(x){editState.screwOffset=x;}));
+  b.appendChild(slider('Screw revolutions',1,8,editState.screwRevs,1,function(x){editState.screwRevs=Math.round(x);}));
+  b.appendChild(el('button',{style:'width:100%',text:'Screw (helical sweep)',onclick:function(){EM.screw();}}));
+
   b.appendChild(el('hr',{class:'sep'}));
   b.appendChild(el('div',{class:'section-title',text:'Keyboard shortcuts (desktop)'}));
-  b.appendChild(el('p',{class:'small muted',text:'E=Extrude  I=Inset  S=Subdivide  B=Bevel  L=Loop Select  N=Recalc Normals  D=Duplicate  X=Delete  A=Select All  M=Multi-select  V=Rip  R=Randomize  drag selected → move  6=Open this tab'}));
+  b.appendChild(el('p',{class:'small muted',text:'E=Extrude  I=Inset  S=Subdivide  B=Bevel  L=Loop Select  N=Recalc Normals  D=Duplicate  X=Delete  A=Select All  M=Multi-select  V=Rip  R=Randomize  K=Knife  drag selected → move  6=Open this tab'}));
 
   b.appendChild(el('hr',{class:'sep'}));
   b.appendChild(el('div',{class:'section-title',text:'Export to library'}));
@@ -2993,6 +3257,7 @@ window.addEventListener('keydown',function(e){var tag=(e.target&&e.target.tagNam
     else if(z==='m'){editState.multiSel=!editState.multiSel;renderEditHud();renderPanel();toast('Multi-select '+(editState.multiSel?'on':'off'));}
     else if(z==='v'&&!e.ctrlKey&&!e.metaKey){EM.rip();}
     else if(z==='r'&&!e.ctrlKey&&!e.metaKey){e.preventDefault();EM.randomize(editState.randAmt,editState.randSeed++);renderPanel();}
+    else if(z==='k'&&!e.ctrlKey&&!e.metaKey){e.preventDefault();editState.tool=editState.tool==='knife'?'select':'knife';Knife.pts=[];Knife._updatePreview();renderEditHud();renderPanel();}
   }});
 $('#fabBuild').addEventListener('click',function(){addPrim('Cube');openSheet(true);});
 $('#fabScene').addEventListener('click',function(){if(state.models.length){addPlacement(state.models[0].userData.id);openSheet(true);}else toast('No models yet');});
