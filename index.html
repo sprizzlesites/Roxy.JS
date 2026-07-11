@@ -26,7 +26,7 @@ button.pri{background:var(--pink);color:#2a141d;border-color:transparent;font-we
 button.pri:hover{background:#ffa3c0}
 button.on{background:rgba(255,143,177,.18);border-color:rgba(255,143,177,.45);color:var(--pinkInk)}
 input[type=range]{width:100%;accent-color:var(--pink)}
-input[type=text],input[type=number],select{font-family:inherit;font-size:13px;color:var(--ink);background:rgba(0,0,0,.28);
+input[type=text],input[type=number],select{font-family:inherit;font-size:13px;color:var(--ink);background:rgba(0,0,0,.055);
   border:1px solid var(--line);border-radius:9px;padding:8px 9px;width:100%}
 input[type=color]{width:34px;height:30px;border:1px solid var(--line);border-radius:8px;background:none;padding:2px}
 label.fld{display:block;font-size:11px;letter-spacing:.04em;color:var(--muted);margin:0 0 5px}
@@ -2829,7 +2829,7 @@ function syncZoomKnob(){
 })();
 RotBall.init();
 var _restored=tryRestoreAutosave();
-setView(_restored?'viewer':'edit');updUndo();
+setView('edit');updUndo();
 loop();
 boot.style.display='none';
 })();
