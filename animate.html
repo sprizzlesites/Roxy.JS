@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"/>
+<title>Roxy Animate</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,600;1,9..144,500&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  /* Same light "liquid glass" chrome as index.html over a dark 3D viewport. Kept in sync
+     by hand (single-file constraint — see docs/ORCHESTRATION.md §1) rather than shared. */
+  --bg:#f3f4f6;--ink:#14161a;--muted:#6b7280;--faint:#9aa1ab;--line:rgba(0,0,0,.10);
+  --panel:rgba(255,255,255,.86);--card:rgba(0,0,0,.045);--pink:#ff8fb1;--pink2:#ff6f9c;--pinkInk:#c2386a;--ok:#2f8f5b;--err:#d94b4b;
+  --rail:64px;--side:320px;--bar:48px;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}
+html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--ink);
+  font-family:"Space Grotesk",system-ui,sans-serif;font-size:14px}
+button{font-family:inherit;color:var(--ink);cursor:pointer;border:1px solid var(--line);background:var(--card);
+  border-radius:10px;padding:9px 11px;font-size:13px;transition:background .14s,border-color .14s,transform .04s}
+button:hover{background:rgba(0,0,0,.055)}button:active{transform:translateY(1px)}
+button:focus-visible{outline:2px solid var(--pink);outline-offset:2px}
+button:disabled{opacity:.45;cursor:default}
+button.pri{background:var(--pink);color:#2a141d;border-color:transparent;font-weight:600}
+button.pri:hover{background:#ffa3c0}
+button.on{background:rgba(255,143,177,.18);border-color:rgba(255,143,177,.45);color:var(--pinkInk)}
+input[type=range]{width:100%;accent-color:var(--pink)}
+input[type=text],input[type=number],select{font-family:inherit;font-size:13px;color:var(--ink);background:rgba(0,0,0,.055);
+  border:1px solid var(--line);border-radius:9px;padding:8px 9px;width:100%}
+label.fld{display:block;font-size:11px;letter-spacing:.04em;color:var(--muted);margin:0 0 5px}
+.tap-edit{cursor:pointer;border-bottom:1px dashed var(--faint);padding-bottom:1px}
+.tap-edit:hover{color:var(--ink);border-bottom-color:var(--pink)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:11px}
+.muted{color:var(--muted)}.small{font-size:11.5px}
+hr.sep{border:none;border-top:1px solid var(--line);margin:12px 0}
+
+#app{position:fixed;inset:0;display:grid;grid-template-columns:var(--rail) 1fr var(--side);grid-template-rows:var(--bar) 1fr;
+  grid-template-areas:"bar bar bar" "rail stage panel";}
+#bar{grid-area:bar;display:flex;align-items:center;gap:10px;padding:0 12px;border-bottom:1px solid var(--line);
+  background:linear-gradient(rgba(255,255,255,.82),rgba(244,245,247,.68));
+  backdrop-filter:blur(18px) saturate(1.6);-webkit-backdrop-filter:blur(18px) saturate(1.6);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.7);z-index:5}
+#bar .logo{font:600 14px/1 "Space Grotesk",sans-serif;letter-spacing:.08em;text-transform:uppercase}
+#bar .vtitle{font-size:12px;color:var(--muted);letter-spacing:.16em;text-transform:uppercase}
+#bar .sp{flex:1}
+#bar .act,#bar a.act{padding:7px 9px;font-size:12px}
+#bar a.act{display:inline-flex;align-items:center;text-decoration:none;border:1px solid var(--line);background:var(--card);
+  border-radius:10px;color:var(--ink)}
+
+#rail{grid-area:rail;display:flex;flex-direction:column;gap:4px;padding:8px 6px;border-right:1px solid var(--line);background:var(--panel)}
+#rail .tab{display:flex;flex-direction:column;align-items:center;gap:4px;background:none;border:none;border-radius:12px;
+  padding:9px 4px;color:var(--muted);font-size:9.5px;letter-spacing:.04em}
+#rail .tab .ic{width:22px;height:22px;display:block}
+#rail .tab.on{color:var(--ink);background:var(--card)}
+#rail .tab.on .ic{filter:drop-shadow(0 0 6px rgba(255,143,177,.5))}
+
+#stage{grid-area:stage;position:relative;overflow:hidden;-webkit-touch-callout:none;background:
+  radial-gradient(120% 120% at 50% 20%, #1c1f25 0%, #12141a 60%, #0b0c0f 100%)}
+.view{position:absolute;inset:0;display:none}
+.view.on{display:block}
+.gl-slot{position:absolute;inset:0}
+canvas{display:block;touch-action:none}
+
+#panel{grid-area:panel;border-left:1px solid var(--line);background:var(--panel);overflow:auto;padding:14px}
+#panel h2{font:600 13px/1.1 "Space Grotesk";margin:0 0 2px}
+#panel .sub{font-size:11.5px;color:var(--muted);margin:0 0 12px}
+.section-title{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint);margin:14px 0 8px}
+
+#tabbar{display:none}
+#navMask{display:none}
+#sheetHandle{display:none}
+
+.toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:rgba(255,255,255,.86);border:1px solid rgba(0,0,0,.10);
+  backdrop-filter:blur(16px) saturate(1.6);-webkit-backdrop-filter:blur(16px) saturate(1.6);
+  box-shadow:0 8px 24px rgba(0,0,0,.16),inset 0 1px 0 rgba(255,255,255,.7);
+  color:var(--ink);padding:9px 14px;border-radius:999px;font-size:12.5px;z-index:50;opacity:0;transition:opacity .2s;pointer-events:none}
+.toast.show{opacity:1}
+#boot{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:var(--bg);z-index:99;
+  font-size:14px;color:var(--muted);text-align:center;padding:24px}
+
+#zoomKnob{position:absolute;right:18px;top:100px;display:none;flex-direction:column;align-items:center;gap:3px;z-index:8;width:28px;
+  padding:5px 0;border-radius:999px;background:rgba(255,255,255,.72);border:1px solid rgba(0,0,0,.10);
+  backdrop-filter:blur(16px) saturate(1.6);-webkit-backdrop-filter:blur(16px) saturate(1.6);
+  box-shadow:0 6px 18px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.7)}
+.zk-btn{width:26px;height:26px;border-radius:50%;background:transparent;border:none;color:rgba(20,22,26,.8);font-size:17px;cursor:pointer;display:flex;align-items:center;justify-content:center;touch-action:manipulation;line-height:1;padding:0;font-family:inherit}
+#zkSlider{writing-mode:vertical-lr;direction:rtl;width:26px;height:80px;cursor:ns-resize;accent-color:rgba(255,143,177,.8);touch-action:none}
+#zoomKnob.on{display:flex}
+
+#rotBall{position:absolute;right:12px;top:12px;width:80px;height:80px;cursor:grab;display:none;z-index:8;touch-action:none;border-radius:50%}
+
+#emptyBanner{position:absolute;left:12px;right:98px;top:12px;z-index:8;display:none;
+  padding:10px 14px;border-radius:14px;background:rgba(255,255,255,.85);border:1px solid rgba(0,0,0,.10);
+  backdrop-filter:blur(16px) saturate(1.6);-webkit-backdrop-filter:blur(16px) saturate(1.6);
+  box-shadow:0 6px 18px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.7);font-size:12px;color:var(--ink)}
+#emptyBanner.show{display:flex;align-items:center;gap:10px}
+#emptyBanner button{padding:5px 9px;font-size:11px}
+
+.scrubRange{width:100%;height:42px;touch-action:none;accent-color:var(--pink);cursor:ew-resize;margin:6px 0}
+
+/* ---------- mobile ---------- */
+@media (max-width:820px){
+  :root{--side:0px;--bar:52px}
+  #app{grid-template-columns:1fr;grid-template-rows:var(--bar) 1fr;grid-template-areas:"bar" "stage"}
+  #rail{display:none}
+  button{min-height:42px;font-size:13.5px}
+  #bar{gap:6px;padding:0 8px}
+  #bar .vtitle{display:none}
+  #bar .act,#bar a.act{min-height:38px;padding:8px 10px}
+  input[type=text],input[type=number],select{min-height:42px;font-size:14px}
+  .zk-btn{width:32px;height:32px;min-height:32px;font-size:19px}
+  #zoomKnob{width:34px}
+  #zkSlider{width:32px;height:min(96px,max(24px,calc(100vh - 320px)))}
+  #panel{position:fixed;left:8px;right:8px;bottom:calc(78px + env(safe-area-inset-bottom));top:auto;height:60vh;
+    border:1px solid rgba(0,0,0,.10);border-radius:24px;
+    background:linear-gradient(rgba(255,255,255,.82),rgba(247,248,249,.9));
+    backdrop-filter:blur(26px) saturate(1.7);-webkit-backdrop-filter:blur(26px) saturate(1.7);
+    transform:translateY(calc(100% - 48px));transition:transform .26s cubic-bezier(.2,.8,.2,1);z-index:20;
+    box-shadow:0 18px 48px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.8)}
+  #panel.open{transform:translateY(0)}
+  #sheetHandle{display:flex;align-items:center;justify-content:center;gap:8px;height:38px;margin:-6px -14px 6px;cursor:grab;touch-action:none}
+  #sheetHandle .bar{width:48px;height:5px;border-radius:99px;background:var(--faint)}
+  #sheetHandle .lbl{font-size:11px;color:var(--muted);letter-spacing:.1em;text-transform:uppercase}
+  #navMask{display:block;position:fixed;left:0;right:0;bottom:0;height:calc(78px + env(safe-area-inset-bottom));
+    background:var(--bg);z-index:25;pointer-events:none}
+  #tabbar{display:flex;position:fixed;left:10px;right:10px;bottom:calc(10px + env(safe-area-inset-bottom));height:62px;
+    border:1px solid rgba(0,0,0,.10);border-radius:26px;padding:0 4px;
+    background:linear-gradient(rgba(255,255,255,.85),rgba(248,249,250,.92));
+    backdrop-filter:blur(26px) saturate(1.8);-webkit-backdrop-filter:blur(26px) saturate(1.8);
+    box-shadow:0 12px 34px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.8);z-index:30}
+  #tabbar .tab{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;background:none;
+    border:none;color:var(--muted);font-size:9.5px;letter-spacing:.03em;margin:6px 2px;border-radius:20px;
+    transition:background .18s,color .18s}
+  #tabbar .tab .ic{width:21px;height:21px}
+  #tabbar .tab.on{color:var(--pinkInk);background:rgba(255,143,177,.16);box-shadow:inset 0 1px 0 rgba(255,255,255,.5)}
+  .toast{bottom:calc(86px + env(safe-area-inset-bottom))}
+  #emptyBanner{right:12px;top:8px}
+}
+@media (max-width:820px){ .desktop-only{display:none} }
+@media (min-width:821px){ .mobile-only{display:none} }
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important;scroll-behavior:auto!important}
+}
+</style>
+</head>
+<body>
+<div id="boot">loading studio…</div>
+
+<div id="app" aria-hidden="false">
+  <header id="bar">
+    <span class="logo">ROXY ANIMATE</span>
+    <span class="vtitle" id="vtitle">Pose</span>
+    <span class="sp"></span>
+    <button class="act" id="btnImportProj" title="Import a project.json exported from the modeler">Import</button>
+    <a class="act" href="index.html" title="Back to the modeling suite">◀ Modeler</a>
+  </header>
+
+  <nav id="rail"></nav>
+
+  <main id="stage">
+    <section class="view on" data-view="pose"><div class="gl-slot" id="slot-pose"></div></section>
+    <section class="view" data-view="timeline"><div class="gl-slot" id="slot-timeline"></div></section>
+    <section class="view" data-view="export"></section>
+    <canvas id="rotBall" width="80" height="80" role="img" aria-label="Orbit gizmo — drag to rotate the view"></canvas>
+    <div id="zoomKnob">
+      <button class="zk-btn" id="zkIn" title="Zoom in">+</button>
+      <input id="zkSlider" type="range" min="1" max="100" value="50">
+      <button class="zk-btn" id="zkOut" title="Zoom out">−</button>
+    </div>
+    <div id="emptyBanner">
+      <span>No modeling-suite autosave found — loaded a demo figure. Import a project.json or build one in the Modeler.</span>
+      <button id="emptyBannerClose">✕</button>
+    </div>
+  </main>
+
+  <aside id="panel">
+    <div id="sheetHandle"><span class="bar"></span><span class="lbl" id="sheetLbl">Tools</span></div>
+    <div id="panelBody"></div>
+  </aside>
+
+  <div id="navMask"></div>
+  <nav id="tabbar"></nav>
+</div>
+
+<input type="file" id="fileProj" accept=".json" style="display:none">
+<div class="toast" id="toast"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"
+ onerror="document.getElementById('boot').textContent='Could not load Three.js (CDN blocked). Open this file in a normal browser tab.'"></script>
+<script>
+(function(){
+"use strict";
+var $=function(s,r){return (r||document).querySelector(s);};
+var $$=function(s,r){return Array.prototype.slice.call((r||document).querySelectorAll(s));};
+var boot=$('#boot');
+if(typeof THREE==='undefined'){boot.textContent='Three.js failed to load.';return;}
+function el(t,a,kids){var n=document.createElement(t);a=a||{};for(var k in a){if(k==='class')n.className=a[k];
+  else if(k==='html')n.innerHTML=a[k];else if(k==='text')n.textContent=a[k];else if(k.slice(0,2)==='on')n.addEventListener(k.slice(2).toLowerCase(),a[k]);
+  else n.setAttribute(k,a[k]);}(kids||[]).forEach(function(c){if(c==null)return;n.appendChild(typeof c==='string'?document.createTextNode(c):c);});return n;}
+var toastT;function toast(m){var t=$('#toast');t.textContent=m;t.classList.add('show');clearTimeout(toastT);toastT=setTimeout(function(){t.classList.remove('show');},1800);}
+function clamp(x,a,b){return Math.max(a,Math.min(b,x));}
+function icon(p){return '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">'+p+'</svg>';}
+var ICONS={
+ pose:'<circle cx="12" cy="5" r="2"/><path d="M12 7v6M12 13l-4 6M12 13l4 6M8 10h8"/>',
+ timeline:'<path d="M4 12h16"/><circle cx="8" cy="12" r="2.2"/><circle cx="17" cy="12" r="2.2"/>',
+ export:'<path d="M12 3v12"/><path d="M7 9l5 5 5-5"/><path d="M4 19h16"/>'
+};
+var VIEWS=[['pose','Pose'],['timeline','Timeline'],['export','Export']];
+
+/* ---------------- renderer (matches index.html: ACESFilmic, sRGB, on-demand render) ---------------- */
+var renderer=new THREE.WebGLRenderer({antialias:true,alpha:true,preserveDrawingBuffer:true});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+renderer.outputEncoding=THREE.sRGBEncoding;renderer.toneMapping=THREE.ACESFilmicToneMapping;renderer.toneMappingExposure=1.1;
+renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+var pmrem=new THREE.PMREMGenerator(renderer);
+var dom=renderer.domElement;
+
+/* ---------------- env / ground / lights (same "Night Blue" preset + approach as index.html) ---------------- */
+function buildNightEnvTex(){var c=el('canvas');c.width=1024;c.height=512;var g=c.getContext('2d');
+  var gr=g.createLinearGradient(0,0,0,512);gr.addColorStop(0,'#48618f');gr.addColorStop(.5,'#1b2740');gr.addColorStop(1,'#05070d');
+  g.fillStyle=gr;g.fillRect(0,0,1024,512);
+  [[300,140,200,.6],[760,160,160,.4]].forEach(function(cd){var rg=g.createRadialGradient(cd[0],cd[1],0,cd[0],cd[1],cd[2]);
+    rg.addColorStop(0,'rgba(255,255,255,'+cd[3]+')');rg.addColorStop(1,'rgba(255,255,255,0)');g.fillStyle=rg;g.beginPath();g.arc(cd[0],cd[1],cd[2],0,7);g.fill();});
+  var t=new THREE.CanvasTexture(c);t.mapping=THREE.EquirectangularReflectionMapping;t.encoding=THREE.sRGBEncoding;
+  var env=pmrem.fromEquirectangular(t).texture;t.dispose();return env;}
+function applyNightEnv(scene){scene.environment=buildNightEnvTex();scene.background=new THREE.Color('#06080f');}
+function studioLights(scene){
+  var k=new THREE.DirectionalLight(0xfff0db,2.0);k.position.set(3.2,5,2.4);k.castShadow=true;
+  k.shadow.mapSize.set(2048,2048);k.shadow.camera.near=.5;k.shadow.camera.far=20;
+  k.shadow.camera.left=-5;k.shadow.camera.right=5;k.shadow.camera.top=5;k.shadow.camera.bottom=-5;k.shadow.bias=-.0004;k.shadow.radius=6;
+  scene.add(k);var r=new THREE.DirectionalLight(0xa9c2ff,.6);r.position.set(-3,2.2,-3.4);scene.add(r);
+  scene.add(new THREE.HemisphereLight(0xfff3e6,0x2a1d12,.22));}
+function addGround(scene){var g=new THREE.Mesh(new THREE.PlaneGeometry(60,60),new THREE.ShadowMaterial({opacity:.32}));
+  g.rotation.x=-Math.PI/2;g.position.y=-0.001;g.receiveShadow=true;scene.add(g);
+  var grid=new THREE.GridHelper(20,20,0x767c85,0x33383f);grid.position.y=0;scene.add(grid);}
+
+var poseScene=new THREE.Scene();studioLights(poseScene);applyNightEnv(poseScene);addGround(poseScene);
+poseScene.userData.modelHolder=new THREE.Group();poseScene.add(poseScene.userData.modelHolder);
+
+/* ---------------- camera + orbit (single shared view — Pose and Timeline show the same scene) ---------------- */
+function mkCam(){return new THREE.PerspectiveCamera(40,1,.05,500);}
+var vs={th:.7,ph:1.0,rad:4,tx:0,ty:1,tz:0,cam:mkCam()};
+var active={view:'pose'};
+
+var renderFrames=8;function invalidate(n){renderFrames=Math.max(renderFrames,n||4);}
+
+function frameObject(obj,v){var box=new THREE.Box3().setFromObject(obj);if(box.isEmpty())return;var s=new THREE.Vector3();box.getSize(s);
+  var c=new THREE.Vector3();box.getCenter(c);var r=Math.max(s.x,s.y,s.z)*0.5||1;v.tx=c.x;v.ty=c.y;v.tz=c.z;v.rad=r*3.2;}
+
+/* ---------------- pointer handling: drag orbit, pinch-zoom, two-finger pan, tap-select, double-tap-frame ---------------- */
+var ptrs=new Map(),lastDist=0,lastMid=null,clickStart=null,lastTap=null;
+dom.addEventListener('pointerdown',function(e){
+  dom.setPointerCapture(e.pointerId);ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  clickStart={x:e.clientX,y:e.clientY,t:Date.now(),id:e.pointerId};invalidate();});
+dom.addEventListener('pointermove',function(e){
+  var p=ptrs.get(e.pointerId);if(!p)return;
+  var dx=e.clientX-p.x,dy=e.clientY-p.y;p.x=e.clientX;p.y=e.clientY;
+  if(ptrs.size===1){
+    vs.th+=dx*.005;vs.ph=clamp(vs.ph-dy*.005,.1,1.5);
+    if(clickStart&&Math.hypot(e.clientX-clickStart.x,e.clientY-clickStart.y)>6)clickStart=null;}
+  else if(ptrs.size===2){
+    var v=Array.from(ptrs.values());var d=Math.hypot(v[0].x-v[1].x,v[0].y-v[1].y);var mid={x:(v[0].x+v[1].x)/2,y:(v[0].y+v[1].y)/2};
+    if(lastDist)vs.rad=clamp(vs.rad*(lastDist/d),.6,60);lastDist=d;
+    if(lastMid){var sp=Math.sin(vs.ph);var rightx=Math.cos(vs.th+Math.PI/2),rightz=Math.sin(vs.th+Math.PI/2);var k=vs.rad*.0016;
+      vs.tx+=(mid.x-lastMid.x)*k*rightx;vs.tz+=(mid.x-lastMid.x)*k*rightz;vs.ty+=(mid.y-lastMid.y)*k;}
+    lastMid=mid;clickStart=null;}
+  invalidate();});
+function endPtr(e){
+  ptrs.delete(e.pointerId);lastDist=0;lastMid=null;
+  if(clickStart&&clickStart.id===e.pointerId&&Date.now()-clickStart.t<350&&Math.hypot(e.clientX-clickStart.x,e.clientY-clickStart.y)<6){
+    var now=Date.now();
+    if(lastTap&&now-lastTap.t<350&&Math.hypot(e.clientX-lastTap.x,e.clientY-lastTap.y)<40){frameCurrent();toast('Framed');lastTap=null;}
+    else{onViewportTap(e);lastTap={x:e.clientX,y:e.clientY,t:now};}}
+  clickStart=null;}
+dom.addEventListener('pointerup',endPtr);dom.addEventListener('pointercancel',endPtr);
+dom.addEventListener('wheel',function(e){e.preventDefault();vs.rad=clamp(vs.rad*(1+e.deltaY*.0012),.6,60);syncZoomKnob();invalidate();},{passive:false});
+function onViewportTap(e){if(active.view!=='pose'&&active.view!=='timeline')return;var r=dom.getBoundingClientRect();
+  var mx=((e.clientX-r.left)/r.width)*2-1,my=-((e.clientY-r.top)/r.height)*2+1;
+  var ray=new THREE.Raycaster();ray.setFromCamera({x:mx,y:my},vs.cam);
+  var hit=ray.intersectObjects(poseScene.userData.modelHolder.children,true)[0];
+  if(hit){var o=hit.object;while(o&&!o.userData.targetId)o=o.parent;
+    if(o&&o.userData.targetId){state.selTarget=o.userData.targetId;renderPanel();toast('Selected '+o.userData.targetId);}}}
+function frameCurrent(){frameObject(poseScene.userData.modelHolder,vs);syncZoomKnob();invalidate();}
+
+function updateCam(){var sp=Math.sin(vs.ph);
+  vs.cam.position.set(vs.tx+vs.rad*sp*Math.cos(vs.th),vs.ty+vs.rad*Math.cos(vs.ph),vs.tz+vs.rad*sp*Math.sin(vs.th));vs.cam.lookAt(vs.tx,vs.ty,vs.tz);}
+function curSlot(){if(active.view==='export')return null;return $('#slot-'+active.view);}
+function resizeActive(){var slot=curSlot();if(!slot)return;var r=slot.getBoundingClientRect();if(r.width<2||r.height<2)return;
+  renderer.setSize(r.width,r.height);vs.cam.aspect=r.width/r.height;vs.cam.updateProjectionMatrix();}
+
+/* ---------------- RotBall orbit gizmo (same math as index.html, scoped to the single `vs`) ---------------- */
+var RotBall={el:null,ctx:null,_px:null,_py:null,
+  init:function(){this.el=$('#rotBall');if(!this.el)return;this.ctx=this.el.getContext('2d');var self=this;
+    this.el.addEventListener('pointerdown',function(e){e.stopPropagation();self.el.setPointerCapture(e.pointerId);self._px=e.clientX;self._py=e.clientY;});
+    this.el.addEventListener('pointermove',function(e){if(self._px==null)return;var dx=e.clientX-self._px,dy=e.clientY-self._py;self._px=e.clientX;self._py=e.clientY;
+      vs.th+=dx*.013;vs.ph=clamp(vs.ph-dy*.013,.1,1.5);updateCam();self.draw();invalidate();});
+    this.el.addEventListener('pointerup',function(){self._px=self._py=null;});
+    this.el.addEventListener('pointercancel',function(){self._px=self._py=null;});},
+  show:function(v){if(this.el)this.el.style.display=v?'block':'none';},
+  draw:function(){
+    if(!this.el||!this.ctx)return;var c=this.ctx,S=80,cx=40,cy=40,R=34;
+    c.clearRect(0,0,S,S);
+    c.fillStyle='rgba(255,255,255,.78)';c.beginPath();c.arc(cx,cy,R,0,Math.PI*2);c.fill();
+    c.strokeStyle='rgba(0,0,0,.12)';c.lineWidth=1;c.beginPath();c.arc(cx,cy,R,0,Math.PI*2);c.stroke();
+    var cam=vs.cam;
+    var items=[
+      {dir:new THREE.Vector3().setFromMatrixColumn(cam.matrix,0),l:'X',fc:'#ff6b78',bc:'#f0c9ce'},
+      {dir:new THREE.Vector3().setFromMatrixColumn(cam.matrix,1),l:'Y',fc:'#3fae72',bc:'#cfe9d8'},
+      {dir:new THREE.Vector3().setFromMatrixColumn(cam.matrix,2).negate(),l:'Z',fc:'#2a8fd6',bc:'#cfe3f5'}
+    ].map(function(a){return {x:cx+a.dir.x*(R-12),y:cy-a.dir.y*(R-12),z:a.dir.z,l:a.l,fc:a.fc,bc:a.bc};});
+    items.slice().sort(function(a,b){return a.z-b.z;}).forEach(function(it){
+      var front=it.z>=0,col=front?it.fc:it.bc,r=front?6:4;
+      c.strokeStyle=col;c.lineWidth=front?2.5:1.5;
+      c.beginPath();c.moveTo(cx,cy);c.lineTo(it.x,it.y);c.stroke();
+      c.fillStyle=col;c.beginPath();c.arc(it.x,it.y,r,0,Math.PI*2);c.fill();
+      if(front){c.fillStyle='rgba(0,0,0,.8)';c.font='bold 9px sans-serif';c.textAlign='center';c.textBaseline='middle';c.fillText(it.l,it.x,it.y);}});}};
+
+/* ═══════════════════════════════════════════════════════
+   MODEL SYSTEM + BRIDGE (reads/writes the same project-JSON
+   shape and AUTOSAVE_KEY as index.html — see buildProjectData/
+   loadProject there. Deform modifiers are NOT re-applied here;
+   this scaffold consumes each part's baked base geometry only.)
+   ═══════════════════════════════════════════════════════ */
+var AUTOSAVE_KEY='roxyAutosave'; // same key index.html autosaves the modeling project under
+var state={models:[],activeId:null,selTarget:null};
+var idc=1;function uid(){return 'm'+(idc++);}
+var Registry={}; // targetId -> live THREE.Object3D, the whole animation system resolves against this
+function registerTarget(id,obj){Registry[id]=obj;obj.userData.targetId=id;}
+function resolveTarget(id){return Registry[id];}
+
+function clearModels(){var h=poseScene.userData.modelHolder;while(h.children.length)h.remove(h.children[0]);
+  state.models.length=0;state.activeId=null;state.selTarget=null;
+  for(var k in Registry)delete Registry[k];} // clear in place (not a reassign) so outstanding refs stay live
+
+function partsToModel(md){
+  var grp=new THREE.Group();grp.name=md.name||'Model';
+  (md.parts||[]).forEach(function(pp){
+    var g=new THREE.BufferGeometry();
+    g.setAttribute('position',new THREE.Float32BufferAttribute(pp.pos||[],3));
+    if(pp.uv)g.setAttribute('uv',new THREE.Float32BufferAttribute(pp.uv,2));
+    if(pp.index)g.setIndex(pp.index);
+    g.computeVertexNormals();
+    var mat=new THREE.MeshPhysicalMaterial({color:pp.color?new THREE.Color(pp.color).getHex():0xcfcfcf,
+      roughness:pp.rough!=null?pp.rough:.65,metalness:pp.metal||0,envMapIntensity:1});
+    if(pp.emissive)mat.emissive.set(pp.emissive);
+    if(pp.emInt!=null)mat.emissiveIntensity=pp.emInt;
+    if(pp.opacity!=null)mat.opacity=pp.opacity;
+    if(pp.transmission&&'transmission' in mat)mat.transmission=pp.transmission;
+    if(pp.clearcoat&&'clearcoat' in mat)mat.clearcoat=pp.clearcoat;
+    mat.transparent=(mat.opacity<1)||(mat.transmission>0);
+    if(pp.map){var im=new Image();im.onload=function(){var tx=new THREE.Texture(im);tx.encoding=THREE.sRGBEncoding;tx.needsUpdate=true;
+      mat.map=tx;mat.color.setHex(0xffffff);mat.needsUpdate=true;invalidate();};im.src=pp.map;}
+    var mesh=new THREE.Mesh(g,mat);mesh.castShadow=true;mesh.receiveShadow=true;grp.add(mesh);});
+  return grp;}
+
+function loadProjectData(data){
+  if(!data||!data.models||!data.models.length)return false;
+  clearModels();
+  data.models.forEach(function(md){
+    var grp=partsToModel(md);
+    poseScene.userData.modelHolder.add(grp);
+    state.models.push(grp);
+    var gid=md.id||uid();
+    registerTarget(gid,grp);
+    grp.children.forEach(function(mesh,i){registerTarget(gid+'.part'+i,mesh);});});
+  state.activeId=state.models[0].userData.targetId;
+  state.selTarget=state.activeId;
+  frameObject(poseScene.userData.modelHolder,vs);
+  invalidate();return true;}
+
+function bridgeLoadModelProject(){
+  var raw;try{raw=localStorage.getItem(AUTOSAVE_KEY);}catch(e){return false;}
+  if(!raw)return false;
+  var data;try{data=JSON.parse(raw);}catch(e){return false;}
+  return loadProjectData(data);}
+
+/* built-in demo figure: a simple multi-part primitive humanoid so every later wave
+   (armatures, IK, keyframing) has something to rig even with no modeler autosave yet */
+function buildDemoFigure(){
+  clearModels();
+  function mat(c){return new THREE.MeshPhysicalMaterial({color:c,roughness:.6,metalness:.05,envMapIntensity:1});}
+  var root=new THREE.Group();root.name='Demo Figure';
+  var torso=new THREE.Mesh(new THREE.BoxGeometry(.5,.7,.3),mat(0xffb3c6));torso.position.set(0,1.15,0);
+  var head=new THREE.Mesh(new THREE.SphereGeometry(.22,20,16),mat(0xffe0c2));head.position.set(0,1.75,0);
+  var armL=new THREE.Mesh(new THREE.CylinderGeometry(.07,.07,.6,10),mat(0xffb3c6));armL.position.set(-.36,1.2,0);armL.rotation.z=.15;
+  var armR=new THREE.Mesh(new THREE.CylinderGeometry(.07,.07,.6,10),mat(0xffb3c6));armR.position.set(.36,1.2,0);armR.rotation.z=-.15;
+  var legL=new THREE.Mesh(new THREE.CylinderGeometry(.09,.09,.7,10),mat(0x6cc6ff));legL.position.set(-.16,.45,0);
+  var legR=new THREE.Mesh(new THREE.CylinderGeometry(.09,.09,.7,10),mat(0x6cc6ff));legR.position.set(.16,.45,0);
+  var parts={torso:torso,head:head,armL:armL,armR:armR,legL:legL,legR:legR};
+  Object.keys(parts).forEach(function(k){var m=parts[k];m.castShadow=true;m.receiveShadow=true;root.add(m);registerTarget('demo.'+k,m);});
+  registerTarget('demo',root);
+  poseScene.userData.modelHolder.add(root);
+  state.models=[root];state.activeId='demo';state.selTarget='demo.torso';
+  frameObject(root,vs);invalidate();
+  return root;}
+
+/* ═══════════════════════════════════════════════════════
+   ANIMATION CORE (Wave D1 seed) — the load-bearing data model
+   every later wave (dope sheet, graph editor, camera/path anim,
+   action clips, onion skin, video/code export) builds on.
+
+   Anim   = { fps, start, end, time, playing, tracks:[Track] }
+   Track  = { id, targetId, path, keys:[{ t, v, interp }] }
+     - targetId resolves through Registry (targetId -> live Object3D)
+     - path is a dotted accessor ('position.x', 'rotation.y', ...)
+       resolved against the live object via resolvePath()
+     - v is currently always a number (scalar tracks only — this
+       seed does not yet store quaternion/vector keys as one unit)
+   ═══════════════════════════════════════════════════════ */
+var trackIdc=1;
+var Anim={fps:24,start:0,end:96,time:0,playing:false,tracks:[]};
+
+// Resolve a dotted path ('position.x') against a live object into {obj,key}
+// so callers can do obj[key] to read or obj[key]=v to write.
+function resolvePath(target,path){
+  var segs=path.split('.'),obj=target;
+  for(var i=0;i<segs.length-1;i++){obj=obj[segs[i]];if(obj==null)return null;}
+  return {obj:obj,key:segs[segs.length-1]};}
+
+Anim.getValue=function(targetId,path){var t=resolveTarget(targetId);if(!t)return null;
+  var r=resolvePath(t,path);return r?r.obj[r.key]:null;};
+Anim.setValue=function(targetId,path,v){var t=resolveTarget(targetId);if(!t)return;
+  var r=resolvePath(t,path);if(r)r.obj[r.key]=v;};
+Anim.findTrack=function(targetId,path){for(var i=0;i<this.tracks.length;i++){
+  var tr=this.tracks[i];if(tr.targetId===targetId&&tr.path===path)return tr;}return null;};
+
+// Insert (or overwrite, if one already sits at t) a key at time t, reading the CURRENT
+// live value off the resolved object — this is what every "Key ___" UI action calls.
+Anim.insertKey=function(targetId,path,t){
+  var v=this.getValue(targetId,path);
+  if(v==null||typeof v!=='number')return null; // scalar tracks only in this seed
+  var tr=this.findTrack(targetId,path);
+  if(!tr){tr={id:'trk'+(trackIdc++),targetId:targetId,path:path,keys:[]};this.tracks.push(tr);}
+  var eps=1e-6,existIdx=-1;
+  for(var i=0;i<tr.keys.length;i++){if(Math.abs(tr.keys[i].t-t)<eps){existIdx=i;break;}}
+  var key={t:t,v:v,interp:'linear'};
+  if(existIdx>=0)tr.keys[existIdx]=key;else{tr.keys.push(key);tr.keys.sort(function(a,b){return a.t-b.t;});}
+  scheduleAnimAutosave();
+  return tr;};
+
+// Evaluate every track at `time` and write the interpolated value through the path
+// resolver. Binary-searches the surrounding key pair per track, then lerps (scalar).
+Anim.sample=function(time){
+  var self=this;
+  this.tracks.forEach(function(tr){
+    var keys=tr.keys;if(!keys.length)return;
+    if(keys.length===1){self.setValue(tr.targetId,tr.path,keys[0].v);return;}
+    if(time<=keys[0].t){self.setValue(tr.targetId,tr.path,keys[0].v);return;}
+    if(time>=keys[keys.length-1].t){self.setValue(tr.targetId,tr.path,keys[keys.length-1].v);return;}
+    var lo=0,hi=keys.length-1;
+    while(hi-lo>1){var mid=(lo+hi)>>1;if(keys[mid].t<=time)lo=mid;else hi=mid;}
+    var a=keys[lo],b=keys[hi],span=b.t-a.t,f=span>1e-9?(time-a.t)/span:0,val;
+    if(a.interp==='constant')val=a.v;
+    else val=a.v+(b.v-a.v)*f; // linear lerp — TODO(D-later): quaternion tracks should slerp here instead
+    self.setValue(tr.targetId,tr.path,val);});
+  this.time=time;};
+
+// Convenience for the Timeline "Key Position" button: key all three axes at once.
+function insertPositionKey(targetId,t){
+  ['position.x','position.y','position.z'].forEach(function(p){Anim.insertKey(targetId,p,t);});}
+
+/* ---------------- animation autosave (own key, separate from the modeler's) ---------------- */
+var ANIM_AUTOSAVE_KEY='roxyAnimAutosave',animAutosaveTimer=null;
+function scheduleAnimAutosave(){clearTimeout(animAutosaveTimer);animAutosaveTimer=setTimeout(doAnimAutosave,600);}
+function doAnimAutosave(){try{localStorage.setItem(ANIM_AUTOSAVE_KEY,JSON.stringify(
+  {fps:Anim.fps,start:Anim.start,end:Anim.end,tracks:Anim.tracks}));}catch(e){}}
+function tryRestoreAnimAutosave(){
+  var raw;try{raw=localStorage.getItem(ANIM_AUTOSAVE_KEY);}catch(e){return false;}
+  if(!raw)return false;
+  var data;try{data=JSON.parse(raw);}catch(e){return false;}
+  if(!data)return false;
+  Anim.fps=data.fps||24;Anim.start=data.start||0;Anim.end=data.end!=null?data.end:96;Anim.tracks=data.tracks||[];
+  var maxId=0;Anim.tracks.forEach(function(tr){var n=+(''+tr.id).replace(/\D/g,'');if(n>maxId)maxId=n;});trackIdc=maxId+1;
+  return true;}
+
+/* ---------------- playback clock: fixed-timestep accumulation over requestAnimationFrame ---------------- */
+var pbLast=null,pbAcc=0;
+function stepPlayback(now){
+  if(!Anim.playing){pbLast=null;pbAcc=0;return;}
+  if(pbLast==null){pbLast=now;return;}
+  var dt=(now-pbLast)/1000;pbLast=now;pbAcc+=dt;
+  var stepDur=1/Math.max(1,Anim.fps),moved=false;
+  while(pbAcc>=stepDur){pbAcc-=stepDur;Anim.time+=1;moved=true;
+    if(Anim.time>Anim.end)Anim.time=Anim.start;} // loop
+  if(moved){Anim.sample(Anim.time);syncScrubUI();invalidate();}}
+
+function syncScrubUI(){var s=$('#tlScrub');if(s)s.value=Anim.time;
+  var l=$('#tlTimeLbl');if(l)l.textContent='t='+Anim.time.toFixed(0)+'  ('+(Anim.time/Math.max(1,Anim.fps)).toFixed(2)+'s)';}
+function clampTime(){if(Anim.time<Anim.start)Anim.time=Anim.start;if(Anim.time>Anim.end)Anim.time=Anim.end;}
+
+/* ---------------- numeric field + tap-to-type slider (same pattern as index.html's slider()) ---------------- */
+function slider(label,min,max,val,step,on){
+  var out=el('span',{class:'muted small tap-edit',text:(+val).toFixed(2),title:'Tap to enter an exact value'});
+  var r=el('input',{type:'range',min:min,max:max,step:step||.01,value:val,
+    oninput:function(e){out.textContent=(+e.target.value).toFixed(2);on(+e.target.value);invalidate();}});
+  out.addEventListener('click',function(){
+    var sv=+r.value,input=prompt(label.replace(/\s+$/,'')+' (range '+min+' to '+max+'):',sv);
+    if(input==null)return;var nv=+input;if(!isFinite(nv))return;
+    nv=Math.max(min,Math.min(max,nv));r.value=nv;out.textContent=nv.toFixed(2);on(nv);invalidate();});
+  return el('div',{},[el('label',{class:'fld'},[label+'  ',out]),r]);}
+function numField(label,val,step,on){
+  var inp=el('input',{type:'number',value:val,step:step||1,onchange:function(e){on(+e.target.value);}});
+  return el('div',{},[el('label',{class:'fld',text:label}),inp]);}
+
+/* ---------------- VIEW SWITCH + PANELS ---------------- */
+function setView(v){active.view=v;
+  $$('.view').forEach(function(s){s.classList.toggle('on',s.getAttribute('data-view')===v);});
+  $$('#rail .tab').forEach(function(t){t.classList.toggle('on',t.getAttribute('data-v')===v);});
+  $$('#tabbar .tab').forEach(function(t){t.classList.toggle('on',t.getAttribute('data-v')===v);});
+  $('#vtitle').textContent=VIEWS.filter(function(x){return x[0]===v;})[0][1];
+  var slot=curSlot();if(slot)slot.appendChild(dom);
+  RotBall.show(v==='pose'||v==='timeline');if(v==='pose'||v==='timeline'){RotBall.draw();syncZoomKnob();}
+  var zk=$('#zoomKnob');if(zk)zk.classList.toggle('on',v==='pose'||v==='timeline');
+  renderPanel();setTimeout(resizeActive,30);}
+
+function renderPanel(){var b=$('#panelBody');b.innerHTML='';var v=active.view;
+  if(v==='pose')panelPose(b);else if(v==='timeline')panelTimeline(b);else panelExport(b);
+  $('#sheetLbl').textContent=$('#vtitle').textContent+' Tools';invalidate();}
+
+function targetSelect(onchange){
+  var sel=el('select',{onchange:function(e){state.selTarget=e.target.value;onchange&&onchange(e.target.value);}});
+  Object.keys(Registry).forEach(function(id){sel.appendChild(el('option',{value:id,text:id}));});
+  if(state.selTarget)sel.value=state.selTarget;
+  return sel;}
+
+function panelPose(b){
+  b.appendChild(el('h2',{text:'Pose'}));
+  b.appendChild(el('p',{class:'sub',text:'Armatures (C1), skin binding (C2), FK/IK (C3) and constraints (C4) land in the next waves. For now, pick a target and nudge it — Timeline can keyframe whatever you set here.'}));
+  if(state.usingDemo)b.appendChild(el('div',{class:'card small',style:'margin-bottom:10px'},
+    ['No modeling-suite autosave was found, so a demo figure is loaded. Build/save a project in the Modeler, or Import a project.json above, then reload this page.']));
+  b.appendChild(el('div',{class:'section-title',text:'Target'}));
+  b.appendChild(targetSelect(function(){renderPanel();}));
+  var obj=resolveTarget(state.selTarget);
+  if(obj){
+    b.appendChild(el('div',{class:'section-title',text:'Transform (placeholder — real bone posing arrives in C1/C3)'}));
+    b.appendChild(slider('Pos X',-4,4,obj.position.x,.01,function(v){obj.position.x=v;}));
+    b.appendChild(slider('Pos Y',-4,4,obj.position.y,.01,function(v){obj.position.y=v;}));
+    b.appendChild(slider('Pos Z',-4,4,obj.position.z,.01,function(v){obj.position.z=v;}));
+    b.appendChild(slider('Rot Y',-3.14,3.14,obj.rotation.y,.01,function(v){obj.rotation.y=v;}));
+  }else{
+    b.appendChild(el('p',{class:'small muted',text:'No targets registered yet.'}));
+  }}
+
+function panelTimeline(b){
+  b.appendChild(el('h2',{text:'Timeline'}));
+  b.appendChild(el('p',{class:'sub',text:'Keyframe core (D1, this wave). Dope sheet (D3) and graph editor (D4) arrive in later waves.'}));
+  b.appendChild(el('div',{class:'section-title',text:'Playback'}));
+  b.appendChild(el('div',{class:'grid2'},[
+    numField('FPS',Anim.fps,1,function(v){Anim.fps=Math.max(1,Math.round(v));scheduleAnimAutosave();renderPanel();}),
+    numField('Start',Anim.start,1,function(v){Anim.start=Math.round(v);clampTime();scheduleAnimAutosave();renderPanel();})]));
+  b.appendChild(numField('End',Anim.end,1,function(v){Anim.end=Math.round(v);clampTime();scheduleAnimAutosave();renderPanel();}));
+
+  b.appendChild(el('div',{class:'section-title',text:'Target'}));
+  b.appendChild(targetSelect());
+
+  b.appendChild(el('div',{class:'section-title',text:'Scrub'}));
+  b.appendChild(el('span',{class:'muted small',id:'tlTimeLbl',
+    text:'t='+Anim.time.toFixed(0)+'  ('+(Anim.time/Math.max(1,Anim.fps)).toFixed(2)+'s)'}));
+  b.appendChild(el('input',{type:'range',id:'tlScrub',class:'scrubRange',min:Anim.start,max:Anim.end,step:1,value:Anim.time,
+    oninput:function(e){Anim.time=+e.target.value;Anim.sample(Anim.time);syncScrubUI();invalidate();}}));
+  b.appendChild(el('div',{class:'grid2'},[
+    el('button',{class:'pri',text:Anim.playing?'Pause':'Play',onclick:function(){Anim.playing=!Anim.playing;renderPanel();}}),
+    el('button',{text:'Stop',onclick:function(){Anim.playing=false;Anim.time=Anim.start;Anim.sample(Anim.time);renderPanel();invalidate();}})]));
+
+  b.appendChild(el('div',{class:'section-title',text:'Author'}));
+  b.appendChild(el('button',{style:'width:100%',text:'Key Position — '+(state.selTarget||'no target'),onclick:function(){
+    if(!state.selTarget){toast('No target selected');return;}
+    insertPositionKey(state.selTarget,Anim.time);toast('Keyed position @ t='+Anim.time);renderPanel();}}));
+
+  if(Anim.tracks.length){
+    b.appendChild(el('div',{class:'section-title',text:'Tracks'}));
+    Anim.tracks.forEach(function(tr){
+      b.appendChild(el('div',{class:'card small',style:'margin-bottom:6px'},[tr.targetId+' · '+tr.path+' — '+tr.keys.length+' key'+(tr.keys.length===1?'':'s')]));});
+    b.appendChild(el('button',{style:'width:100%',text:'Clear all keyframes',onclick:function(){
+      Anim.tracks=[];scheduleAnimAutosave();toast('Cleared');renderPanel();}}));
+  }}
+
+function panelExport(b){
+  b.appendChild(el('h2',{text:'Export'}));
+  b.appendChild(el('p',{class:'sub',text:'Output tools are Phase E — they build on the Timeline\'s Track/sampler runtime above.'}));
+  b.appendChild(el('div',{class:'section-title',text:'Video'}));
+  b.appendChild(el('button',{style:'width:100%',disabled:'disabled',text:'Render to MP4/WebM — coming in Wave E1'}));
+  b.appendChild(el('div',{class:'section-title',text:'Code'}));
+  b.appendChild(el('button',{style:'width:100%',disabled:'disabled',text:'Copy standalone Three.js code — coming in Wave E2'}));}
+
+/* ---------------- nav build (rail desktop / tabbar + bottom sheet mobile, same as index.html) ---------------- */
+function buildNav(){var rail=$('#rail'),tab=$('#tabbar');VIEWS.forEach(function(v){
+  rail.appendChild(el('button',{class:'tab','data-v':v[0],html:icon(ICONS[v[0]])+'<span>'+v[1]+'</span>',onclick:function(){setView(v[0]);}}));
+  tab.appendChild(el('button',{class:'tab','data-v':v[0],html:icon(ICONS[v[0]])+'<span>'+v[1]+'</span>',
+    onclick:function(){if(active.view===v[0])openSheet();else setView(v[0]);}}));});}
+function openSheet(on){var p=$('#panel');if(on==null)on=!p.classList.contains('open');p.classList.toggle('open',on);}
+(function(){var h=$('#sheetHandle'),p=$('#panel');
+  var drag=false,moved=false,sy=0,y0=0,travel=0,vel=0,lastY=0,lastT=0;
+  h.addEventListener('pointerdown',function(e){h.setPointerCapture(e.pointerId);
+    travel=Math.max(1,p.getBoundingClientRect().height-48);
+    y0=p.classList.contains('open')?0:travel;
+    sy=lastY=e.clientY;lastT=performance.now();vel=0;drag=true;moved=false;
+    p.style.transition='none';});
+  h.addEventListener('pointermove',function(e){if(!drag)return;
+    var dy=e.clientY-sy;if(Math.abs(dy)>6)moved=true;
+    var t=performance.now(),dt=t-lastT;
+    if(dt>0){vel=(e.clientY-lastY)/dt;lastY=e.clientY;lastT=t;}
+    var y=Math.max(0,Math.min(travel,y0+dy));
+    p.style.transform='translateY('+y+'px)';});
+  function settle(e){if(!drag)return;drag=false;p.style.transition='';
+    if(!moved){p.style.transform='';openSheet();return;}
+    var y=Math.max(0,Math.min(travel,y0+(e.clientY-sy)));
+    var open=Math.abs(vel)>.35?vel<0:y<travel*.5;
+    p.classList.toggle('open',open);p.style.transform='';}
+  h.addEventListener('pointerup',settle);
+  h.addEventListener('pointercancel',function(){drag=false;p.style.transition='';p.style.transform='';});
+})();
+
+/* ---------------- zoom knob ---------------- */
+function syncZoomKnob(){var sl=$('#zkSlider');if(!sl)return;var t=Math.log(vs.rad/0.6)/Math.log(100);sl.value=Math.round(100-clamp(t,0,1)*99);}
+(function(){var sl=$('#zkSlider'),zi=$('#zkIn'),zo=$('#zkOut');if(!sl)return;
+  function radFromSlider(v){var t=(100-+v)/99;return .6*Math.pow(100,t);}
+  sl.addEventListener('input',function(){vs.rad=clamp(radFromSlider(this.value),.6,60);updateCam();invalidate();});
+  zi.addEventListener('click',function(){vs.rad=clamp(vs.rad*.82,.6,60);updateCam();syncZoomKnob();invalidate();});
+  zo.addEventListener('click',function(){vs.rad=clamp(vs.rad/0.82,.6,60);updateCam();syncZoomKnob();invalidate();});})();
+
+/* ---------------- import project.json / back to modeler ---------------- */
+$('#btnImportProj').addEventListener('click',function(){$('#fileProj').click();});
+$('#fileProj').addEventListener('change',function(e){var f=e.target.files[0];if(!f)return;var rd=new FileReader();
+  rd.onload=function(){try{var data=JSON.parse(rd.result);
+    if(loadProjectData(data)){state.usingDemo=false;$('#emptyBanner').classList.remove('show');toast('Project imported');setView(active.view);}
+    else toast('No models in that file');}
+    catch(err){toast('Bad project file');console.error(err);}};
+  rd.readAsText(f);e.target.value='';});
+$('#emptyBannerClose').addEventListener('click',function(){$('#emptyBanner').classList.remove('show');});
+
+window.addEventListener('resize',resizeActive);
+
+/* ---------------- main loop ---------------- */
+function loop(){requestAnimationFrame(loop);stepPlayback(performance.now());updateCam();
+  var slot=curSlot();var act=ptrs.size>0;
+  if((renderFrames>0||act)&&slot&&slot.contains(dom))renderer.render(poseScene,vs.cam);
+  if(renderFrames>0&&!act)renderFrames--;
+  if(RotBall.el&&RotBall.el.style.display!=='none')RotBall.draw();}
+
+/* ---------------- init ---------------- */
+buildNav();
+RotBall.init();
+tryRestoreAnimAutosave();
+var bridged=bridgeLoadModelProject();
+state.usingDemo=!bridged;
+if(!bridged){buildDemoFigure();$('#emptyBanner').classList.add('show');}
+if(!state.selTarget){var ks=Object.keys(Registry);if(ks.length)state.selTarget=ks[0];}
+clampTime();
+Anim.sample(Anim.time);
+setView('pose');
+loop();
+boot.style.display='none';
+})();
+</script>
+</body>
+</html>
