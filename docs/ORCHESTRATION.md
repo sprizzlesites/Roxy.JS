@@ -85,7 +85,7 @@ Wave definitions live in `docs/GAP_ANALYSIS.md` §4 — this table only tracks s
 | A1 | Slide/Shrink-Fatten/Rip/Randomize/Shear edit ops | DONE | 9740368 | +5 checks (suite now 66); also fixed a latent `_pushVertHistory` undo crash |
 | C0 | animate.html scaffold: theme/chrome parity, localStorage model bridge, Track/keyframe core seed (Anim.sample/insertKey), timeline scrub+play proof, own suite tests/verify_animate.js (18 checks) | DONE | ab6ec0b | not in original roadmap — added to de-risk C1/D1. Track shape: `{id,targetId,path,keys:[{t,v,interp}]}`, registry targetId→Object3D |
 | A2 | Knife / Spin / Screw | DONE | 4c3c0eb | suite now 70; knife core is pointer-free (`EM.knifeCore`), K shortcut; knife points snap to verts/edges (no face-interior points — noted deviation) |
-| A3 | Vertex-bevel, N-loop bridge, loop-cut slide, bevel width/segments, Symmetrize | TODO | | |
+| A3 | Vertex-bevel, N-loop bridge, loop-cut slide, bevel width/segments, Symmetrize | DONE | f78f077+94a652f | suite now 75; bevel width is a fraction (.02-.49) not world units; symmetrize drops strictly-crossing faces (documented) |
 | A4 | Seams, project-from-view unwrap, pack islands, UV editor mode | TODO | | |
 | A5 | Vertex groups (+ assign UI) — Phase B/C dependency | TODO | | |
 | A6 | Decimate, true Catmull-Clark subsurf, texture displace | TODO | | |
