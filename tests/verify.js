@@ -282,6 +282,196 @@ const server = http.createServer((req, res) => {
     if (Math.abs(totalRise - expectedRise) > 1e-4) throw new Error('total screw rise ' + totalRise + ' does not match offset×revolutions=' + expectedRise);
   }));
 
+  // ---- Wave A3: bevel width/segments / vertex bevel / N-loop bridge / loop-cut slide / symmetrize ----
+  await step('bevel segments=3 builds a ROUNDED profile: segs+1 verts per row on the arc, interior verts off both face planes', () => page.evaluate(() => {
+    var R = __R, EM = R.EM;
+    EM.fromPrim('Cube');
+    R.editState.mode = 'edge'; EM.clearSel();
+    // pick a true corner edge (its two faces perpendicular) — only there is a rounded profile meaningful
+    var ei = -1;
+    for (var i = 0; i < EM.E.length; i++) {
+      var e0 = EM.E[i];
+      if (e0.fi.length !== 2) continue;
+      if (Math.abs(EM._faceNormal(e0.fi[0]).dot(EM._faceNormal(e0.fi[1]))) < 0.1) { ei = i; break; }
+    }
+    if (ei < 0) throw new Error('test setup: no perpendicular-faces (corner) edge found on the cube');
+    var e = EM.E[ei], f1 = EM.F[e.fi[0]], f2 = EM.F[e.fi[1]];
+    // both adjacent face planes, captured BEFORE the bevel
+    var n1 = EM._faceNormal(e.fi[0]).clone(), p1 = EM.V[f1.vi[0]].clone();
+    var n2 = EM._faceNormal(e.fi[1]).clone(), p2 = EM.V[f2.vi[0]].clone();
+    var Pa = EM.V[e.a].clone(), Pb = EM.V[e.b].clone(); // original edge-end positions (arc centers)
+    var segs = 3, width = 0.3, vBefore = EM.V.length, fBefore = EM.F.length;
+    e.sel = true;
+    EM.bevelEdges(width, segs);
+    // vert count matches segments: one row of segs+1 verts per edge end
+    if (EM.V.length !== vBefore + 2 * (segs + 1)) throw new Error('expected +' + (2 * (segs + 1)) + ' profile verts (segs+1 per row), got +' + (EM.V.length - vBefore));
+    if (EM.F.length < fBefore + segs) throw new Error('expected at least ' + segs + ' new strip faces, got +' + (EM.F.length - fBefore));
+    // rows are appended rowA (around e.a) then rowB (around e.b)
+    var rowA = [], rowB = [];
+    for (var k = 0; k <= segs; k++) { rowA.push(EM.V[vBefore + k]); rowB.push(EM.V[vBefore + segs + 1 + k]); }
+    // ROUNDED, not chamfered: every profile vert sits at the SAME radius from the original
+    // edge end (a circular arc); a straight chamfer's interior verts would be strictly closer
+    var rA = rowA[0].distanceTo(Pa), rB = rowB[0].distanceTo(Pb);
+    rowA.forEach(function (v, k) { if (Math.abs(v.distanceTo(Pa) - rA) > 1e-4) throw new Error('rowA[' + k + '] is off the arc radius (chamfer, not rounded): ' + v.distanceTo(Pa) + ' vs ' + rA); });
+    rowB.forEach(function (v, k) { if (Math.abs(v.distanceTo(Pb) - rB) > 1e-4) throw new Error('rowB[' + k + '] is off the arc radius (chamfer, not rounded)'); });
+    // interior profile verts must be coplanar with NEITHER adjacent face plane
+    for (var k2 = 1; k2 < segs; k2++) {
+      var d1 = Math.abs(n1.dot(rowA[k2].clone().sub(p1))), d2 = Math.abs(n2.dot(rowA[k2].clone().sub(p2)));
+      if (d1 < 1e-3 || d2 < 1e-3) throw new Error('interior profile vert ' + k2 + ' is coplanar with an adjacent face (d1=' + d1 + ' d2=' + d2 + ')');
+    }
+    // row endpoints DO land on their respective face planes (the arc spans plane to plane)
+    if (Math.abs(n1.dot(rowA[0].clone().sub(p1))) > 1e-6) throw new Error('rowA[0] should lie on face 1\'s plane');
+    if (Math.abs(n2.dot(rowA[segs].clone().sub(p2))) > 1e-6) throw new Error('rowA[segs] should lie on face 2\'s plane');
+  }));
+
+  await step('vertex bevel replaces a cube corner with a 3-vert n-gon cap, mesh stays closed', () => page.evaluate(() => {
+    var R = __R, EM = R.EM;
+    EM.fromPrim('Cube');
+    R.editState.mode = 'vert'; EM.clearSel();
+    var h = 0.5; // fromPrim('Cube') builds a size-1 quad box — corners at ±0.5
+    var ci = -1;
+    for (var i = 0; i < EM.V.length; i++) { var v = EM.V[i]; if (Math.abs(Math.abs(v.x) - h) < 1e-6 && Math.abs(Math.abs(v.y) - h) < 1e-6 && Math.abs(Math.abs(v.z) - h) < 1e-6) { ci = i; break; } }
+    if (ci < 0) throw new Error('test setup: no corner vertex found on the cube');
+    var P = EM.V[ci].clone(), center = new THREE.Vector3(0, 0, 0);
+    var vBefore = EM.V.length, fBefore = EM.F.length, width = 0.3;
+    EM.V[ci].sel = true;
+    EM.bevelVerts(width);
+    // 3 outgoing edges → +3 chamfer verts, −1 removed corner vert, +1 cap face
+    if (EM.V.length !== vBefore + 2) throw new Error('expected net +2 verts (3 new − 1 corner removed), got ' + (EM.V.length - vBefore));
+    if (EM.F.length !== fBefore + 1) throw new Error('expected exactly +1 cap face, got +' + (EM.F.length - fBefore));
+    var cap = EM.F[EM.F.length - 1];
+    if (cap.vi.length !== 3) throw new Error('cube corner (3 outgoing edges) should cap with a 3-vert n-gon, got ' + cap.vi.length);
+    // cap verts sit `width` of the way from the corner toward each neighbor (2-seg cube:
+    // mid-edge neighbors are h=0.5 away, so expected distance = width*h)
+    cap.vi.forEach(function (vi) {
+      var d = EM.V[vi].distanceTo(P);
+      if (Math.abs(d - width * h) > 1e-6) throw new Error('cap vert not at the bevel width from the corner: ' + d + ' expected ' + width * h);
+    });
+    // the original corner vertex is gone
+    if (EM.V.some(function (v) { return v.distanceTo(P) < 1e-6; })) throw new Error('original corner vertex still present');
+    // cap faces outward (away from the cube center) and the closed mesh stays closed
+    var capN = EM._faceNormal(EM.F.length - 1), capC = EM._faceCenter(EM.F.length - 1);
+    if (capN.dot(capC.clone().sub(center)) <= 0) throw new Error('corner cap is wound inward');
+    if (EM.E.some(function (e) { return e.fi.length !== 2; })) throw new Error('vertex bevel opened a boundary on a closed cube');
+  }));
+
+  await step('bridge joins two 4-edge boundary loops with 4 untwisted outward quads and closes the gap', () => page.evaluate(() => {
+    var R = __R, EM = R.EM;
+    EM.fromPrim('Plane'); EM.clear();
+    // two open square rings (outward-wound side walls): ring1 y∈[0,1], ring2 y∈[2,3]
+    var C = [[1, 1], [1, -1], [-1, -1], [-1, 1]], V = [], F = [];
+    function ring(y0, y1) {
+      var base = V.length;
+      for (var k = 0; k < 4; k++) V.push(new THREE.Vector3(C[k][0], y0, C[k][1]));
+      for (var k = 0; k < 4; k++) V.push(new THREE.Vector3(C[k][0], y1, C[k][1]));
+      for (var k = 0; k < 4; k++) F.push({ vi: [base + k, base + (k + 1) % 4, base + 4 + (k + 1) % 4, base + 4 + k], sel: false });
+    }
+    ring(0, 1); ring(2, 3);
+    EM.V = V; EM.F = F; EM._buildEdges(); EM._refresh();
+    // sanity: the hand-built walls must actually be outward-wound
+    EM.F.forEach(function (f, fi) {
+      var c = EM._faceCenter(fi), n = EM._faceNormal(fi);
+      if (new THREE.Vector3(c.x, 0, c.z).normalize().dot(n) < 0.5) throw new Error('test setup: ring wall ' + fi + ' is not outward-wound');
+    });
+    R.editState.mode = 'edge'; EM.clearSel();
+    var nSel = 0;
+    EM.E.forEach(function (e) {
+      var ya = EM.V[e.a].y, yb = EM.V[e.b].y;
+      if ((ya === 1 && yb === 1) || (ya === 2 && yb === 2)) { e.sel = true; nSel++; }
+    });
+    if (nSel !== 8) throw new Error('test setup: expected to select 2 loops × 4 edges, got ' + nSel);
+    var fBefore = EM.F.length; // 8 walls
+    EM.bridgeEdges();
+    if (EM.F.length !== fBefore + 4) throw new Error('expected exactly 4 bridging quads, got +' + (EM.F.length - fBefore));
+    for (var fi = fBefore; fi < EM.F.length; fi++) {
+      var f = EM.F[fi];
+      if (f.vi.length !== 4) throw new Error('bridge face ' + fi + ' is not a quad');
+      // no twist: the 2 quad edges that span the gap must connect the SAME (x,z) corner on
+      // both loops — a twisted band pairs different corners, making these edges diagonal
+      var vertical = 0;
+      for (var k = 0; k < 4; k++) {
+        var u = EM.V[f.vi[k]], w = EM.V[f.vi[(k + 1) % 4]];
+        if (Math.abs(u.y - w.y) > 1e-9) {
+          vertical++;
+          if (Math.abs(u.x - w.x) > 1e-9 || Math.abs(u.z - w.z) > 1e-9) throw new Error('bridge quad ' + fi + ' has a diagonal cross-gap edge — the band is twisted');
+        }
+      }
+      if (vertical !== 2) throw new Error('bridge quad ' + fi + ' should have exactly 2 cross-gap edges, got ' + vertical);
+      // consistent outward winding with the walls it joins
+      var c = EM._faceCenter(fi), n = EM._faceNormal(fi);
+      if (new THREE.Vector3(c.x, 0, c.z).normalize().dot(n) < 0.5) throw new Error('bridge quad ' + fi + ' is wound inward (twist/flip)');
+    }
+    // no remaining boundary between the loops: every y=1/y=2 edge is now shared by 2 faces
+    EM.E.forEach(function (e) {
+      if (e.fi.length !== 1) return;
+      var ya = EM.V[e.a].y, yb = EM.V[e.b].y;
+      if ((ya === 1 && yb === 1) || (ya === 2 && yb === 2)) throw new Error('boundary edge left between the bridged loops at y=' + ya);
+    });
+    // only the tube's far ends stay open
+    var open = EM.E.filter(function (e) { return e.fi.length === 1; }).length;
+    if (open !== 8) throw new Error('expected 8 remaining boundary edges (y=0 and y=3 rims), got ' + open);
+  }));
+
+  await step('loop-cut slide places the cut at the exact lerped positions for factors 0 / .5 / 1, never cumulatively', () => page.evaluate(() => {
+    var R = __R, EM = R.EM;
+    EM.fromPrim('Plane');
+    R.editState.mode = 'face'; EM.clearSel();
+    var f = EM.F[0]; f.sel = true;
+    // the two rails the cut slides between, captured independently before the cut
+    var A0 = EM.V[f.vi[0]].clone(), B0 = EM.V[f.vi[1]].clone();
+    var A1 = EM.V[f.vi[3]].clone(), B1 = EM.V[f.vi[2]].clone();
+    var vBefore = EM.V.length;
+    EM.loopCut();
+    if (EM.V.length !== vBefore + 2) throw new Error('cutting one selected quad should add exactly 2 verts, got +' + (EM.V.length - vBefore));
+    var mi = vBefore, mj = vBefore + 1;
+    function expect(fac, t) {
+      EM.loopCutSlide(fac);
+      var e0 = A0.clone().lerp(B0, t), e1 = A1.clone().lerp(B1, t);
+      if (EM.V[mi].distanceTo(e0) > 1e-9) throw new Error('factor ' + fac + ': first cut vert at ' + JSON.stringify(EM.V[mi]) + ', expected lerp(' + t + ')');
+      if (EM.V[mj].distanceTo(e1) > 1e-9) throw new Error('factor ' + fac + ': second cut vert not at the exact lerped position');
+    }
+    expect(0, 0.5);   // centered
+    expect(0.5, 0.75);
+    expect(1, 1);     // all the way onto the second rail
+    expect(0, 0.5);   // scrubbing BACK must return exactly — re-lerped from stored endpoints, not cumulative
+    expect(-1, 0);    // and all the way onto the first rail
+  }));
+
+  await step('symmetrize rebuilds the − side as a welded mirror of the + side (every vert has a counterpart, no boundary)', () => page.evaluate(() => {
+    var R = __R, EM = R.EM;
+    EM.fromPrim('Cube');
+    R.editState.mode = 'vert'; EM.clearSel();
+    // make BOTH sides asymmetric so the op provably keeps + and rebuilds −
+    var pi = -1, ni = -1;
+    for (var i = 0; i < EM.V.length; i++) { if (pi < 0 && EM.V[i].x > 0.25) pi = i; if (ni < 0 && EM.V[i].x < -0.25) ni = i; }
+    if (pi < 0 || ni < 0) throw new Error('test setup: missing a +X or −X vertex');
+    EM.V[pi].x += 0.4; EM.V[pi].y += 0.2;   // positive-side feature that must survive + get mirrored
+    EM.V[ni].y -= 0.7;                       // negative-side junk that must vanish
+    var bumped = EM.V[pi].clone(), junk = EM.V[ni].clone();
+    R.editState.symmAxis = 0;
+    EM.symmetrize();
+    // plane symmetry: every vert has a mirrored counterpart within tolerance
+    for (var a = 0; a < EM.V.length; a++) {
+      var v = EM.V[a], found = false;
+      for (var b = 0; b < EM.V.length; b++) {
+        var w = EM.V[b];
+        if (Math.abs(w.x + v.x) < 1e-4 && Math.abs(w.y - v.y) < 1e-4 && Math.abs(w.z - v.z) < 1e-4) { found = true; break; }
+      }
+      if (!found) throw new Error('vertex ' + a + ' has no mirrored counterpart — result is not plane-symmetric');
+    }
+    // + side survived verbatim; its mirror exists; the − junk is gone
+    if (!EM.V.some(function (v) { return v.distanceTo(bumped) < 1e-6; })) throw new Error('positive-side vertex was altered by symmetrize');
+    if (!EM.V.some(function (v) { return Math.abs(v.x + bumped.x) < 1e-6 && Math.abs(v.y - bumped.y) < 1e-6 && Math.abs(v.z - bumped.z) < 1e-6; })) throw new Error('mirror of the positive-side vertex is missing');
+    if (EM.V.some(function (v) { return v.distanceTo(junk) < 1e-6; })) throw new Error('negative-side geometry survived symmetrize');
+    // welded seam: closed input stays closed — in particular no boundary edges on the plane
+    var openOnPlane = EM.E.filter(function (e) { return e.fi.length === 1 && Math.abs(EM.V[e.a].x) < 1e-6 && Math.abs(EM.V[e.b].x) < 1e-6; }).length;
+    if (openOnPlane) throw new Error(openOnPlane + ' boundary edge(s) left ON the symmetry plane — seam not welded');
+    if (EM.E.some(function (e) { return e.fi.length !== 2; })) throw new Error('symmetrize left a boundary edge on a closed cube');
+    // and the weld left no coincident duplicates
+    for (var a2 = 0; a2 < EM.V.length; a2++) for (var b2 = a2 + 1; b2 < EM.V.length; b2++)
+      if (EM.V[a2].distanceTo(EM.V[b2]) < 1e-5) throw new Error('duplicate unwelded verts at ' + a2 + ',' + b2);
+  }));
+
   await step('sculpt dabs all brushes actually move geometry', () => page.evaluate(() => {
     var R = __R, EM = R.EM;
     ['draw', 'carve', 'crease', 'inflate', 'smooth', 'flatten', 'pinch'].forEach(function (br) {
