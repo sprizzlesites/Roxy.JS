@@ -328,3 +328,78 @@ Phase letters match `docs/ORCHESTRATION.md` §3 (A=modeling, B=foundations, C=ri
 3. **No true UV unwrap** — the current per-face atlas is clever for non-destructive painting but produces unusable UVs for anything else (baking, external tools, clean texel density). LSCM itself is HARD; the planar-projection-per-island approximation (§2.6) is the pragmatic middle ground.
 4. **Boolean and Decimate are the two modeling ops most likely to be requested and are absent** — both FEASIBLE but nontrivial (L and M respectively); sequence them after the cheaper edit-ops wins in A1-A4.
 5. **Both "unique" output requirements (video export, standalone code export) are entirely unbuilt** but rate as FEASIBLE — they're naturally the very last waves since they depend on the animation runtime existing first.
+
+---
+
+## 6. Node systems (added by user request — supersedes §2.5's "node-graph shader editor: out of scope" verdict)
+
+The user explicitly requested **full Blender node capabilities**. That means three node systems: **shader nodes**, **geometry nodes**, and **compositor nodes**. All three share one generic graph-editor widget, so the widget is its own foundational wave. Everything below respects the standing constraints (vanilla JS, Three.js r128, single-file, mobile-first).
+
+### 6.1 Shared node-graph editor widget (Wave G0 — foundational)
+
+One reusable, embeddable graph editor used by all three systems:
+- Canvas-2D-rendered graph (nodes as rounded cards, typed color-coded sockets, bezier links) — canvas, not DOM, so hundreds of nodes stay cheap on mobile.
+- **Touch model:** tap a socket then tap a compatible socket to connect (NO drag-wires as the primary flow — fat-finger-proof; drag-to-connect allowed as a desktop nicety). Tap node → select; drag body → move; long-press or dedicated HUD button → delete/duplicate. Pinch to zoom graph, two-finger pan (reuse the viewport `ptrs` Map pattern). "Add node" via a searchable bottom-sheet catalog (reuse `openSheet` + the assets search pattern).
+- Data model: `Graph = {nodes:[{id,type,params:{},x,y}], links:[{from:[nodeId,socket], to:[nodeId,socket]}]}`; per-system node type registries (`SHADER_NODES`, `GEO_NODES`, `COMP_NODES`) with declared socket types so the editor is 100% system-agnostic.
+- Node params use the existing `slider()` tap-to-type pattern inside a node-inspector sheet (tap a node → its params appear in the panel/sheet, NOT inline in tiny node widgets — mobile-first decision).
+- Evaluation is per-system (pull-based DAG walk from the output node, cycle-guarded, memoized per dirty-flag).
+
+### 6.2 Shader nodes (Waves G1-G2) — in `index.html`
+
+| Blender feature | Feasibility | Approach |
+|---|---|---|
+| Principled BSDF output | FEASIBLE | node graph terminates in a "Material Output/Principled" node whose scalar/color inputs map onto the existing `MeshPhysicalMaterial` params |
+| Texture nodes: Noise, Voronoi, Wave, Checker, Gradient, Magic, Brick, Image | FEASIBLE (G1, baked) | evaluate per-pixel into canvas textures (the `fbm`/`paintPattern` machinery generalized), assigned as map/roughnessMap/metalnessMap/normalMap/emissiveMap |
+| Utility nodes: ColorRamp, Mix(Color), Math, Vector Math, Map Range, Clamp, Separate/Combine XYZ & RGB, Value/RGB inputs | FEASIBLE (G1) | pure functions in the baker's per-pixel evaluation |
+| Input nodes: TexCoord (UV/Object/Generated), Fresnel/LayerWeight, Geometry (normal/position) | PARTIAL | UV-space inputs bake exactly; view-dependent ones (Fresnel) cannot bake into a static map — G1 approximates (bake-time constant + warning badge on the node), G2 does them properly |
+| **True per-pixel GLSL compile** (no baking) | FEASIBLE-HARD (G2) | compile the node DAG to a GLSL function chain injected via `onBeforeCompile` into MeshPhysicalMaterial (r128 supports it) — full fidelity incl. Fresnel/view-dependent nodes; baking (G1) remains the fallback and the export-compatible path |
+| Displacement output | FEASIBLE (G1) | feeds the existing texture-displace modifier path (A6) |
+
+**Bake-vs-compile note for export:** baked maps flow through the existing GLB/OBJ texture export unchanged; G2 GLSL materials must fall back to a bake for GLB export (bake button on the output node).
+
+### 6.3 Geometry nodes (Waves G3a-G3c) — in `index.html`
+
+The interpreter evaluates a graph into geometry parts; a "Geometry Nodes" modifier slot on a model hosts a graph (non-destructive, like `kind:'gen'` modifiers today, Apply bakes it).
+
+| Node group | Nodes (initial registry) | Feasibility |
+|---|---|---|
+| Inputs | Group Input (base mesh), Value, Vector, Position, Normal, Index, Random Value | FEASIBLE |
+| Primitives | Cube, UV Sphere, Cylinder, Cone, Grid, Ico Sphere, Curve Line/Circle | FEASIBLE — wraps `PRIMS`/quad builders |
+| Mesh ops | Transform, Join, Extrude Mesh, Subdivide, Triangulate, Flip/Recalc Normals, Merge by Distance, Solidify, Displace (set position + offset) | FEASIBLE — wraps existing `EM`/`MODDB`/`solidifyVF` cores (the big reuse win) |
+| Instancing | Distribute Points on Faces, Instance on Points, Realize Instances, Rotate/Scale Instances | FEASIBLE — wraps the `sprinkles`/scatter raycast machinery |
+| Curves | Curve to Mesh, Resample Curve, Fillet, Curve to Points | FEASIBLE after A9 (curve system) |
+| Booleans | Mesh Boolean | after A8 (CSG) |
+| Fields/selection | named attributes, selection-by-position/normal math feeding op selections | FEASIBLE (simplified: per-vertex float attributes, not Blender's full field semantics — documented approximation) |
+| Simulation zones, volumes, repeat zones | HARD — out of scope; note in UI docs | |
+
+**Honest scope statement:** Blender ships 200+ geometry nodes. The plan builds the interpreter + the ~35-node core registry above (covers the large majority of practical graphs); the registry is designed so each additional node is a small self-contained entry (S each), added on demand in later F/G polish waves rather than blocking parity on all 200.
+
+### 6.4 Compositor nodes (Wave G4) — render post-FX, in BOTH files
+
+| Node | Feasibility | Approach |
+|---|---|---|
+| Blur (gaussian/bokeh-ish), Glare/Bloom, Vignette, Lens Distortion, Chromatic Aberration | FEASIBLE | full-screen quad shader passes (manual render-to-target chain, no EffectComposer needed in r128) or canvas2d filters for the simple ones |
+| Color Balance, RGB Curves, Hue/Sat, Brightness/Contrast, Exposure, Mix, Invert, B&W | FEASIBLE | per-pixel LUT/shader passes |
+| Render Layers input / Composite output | FEASIBLE | input = the rendered frame; output = what `renderScenePNG`, `#btnShot`, and E1's video encoder consume — the compositor chain slots between render and encode so **videos get graded too** |
+| Z/depth-based nodes (Defocus by depth, Mist) | FEASIBLE-M | needs a depth render target pass |
+| Cryptomatte, denoisers | HARD — out of scope | |
+
+### 6.5 Node-system animation bridge (Wave G5) — in `animate.html`
+
+Every node param gets a Registry targetId (`model3/geograph/node7.scale`), making node params keyframeable through the existing Track model — this is how "animated procedural geometry" and "animated materials" fall out of the architecture for free. Requires the graph evaluator to re-run on sampled param changes (dirty-flag per node, already in G0's design).
+
+### 6.6 Node waves summary
+
+| Wave | Complexity | Content |
+|---|---|---|
+| **G0** | L | shared touch node-graph editor widget + registry/eval architecture (build once in index.html, copy into animate.html when G4/G5 need it) |
+| **G1** | L | shader nodes: baked-map path, full utility/texture node set, Principled output |
+| **G2** | L | shader nodes: true GLSL compile via onBeforeCompile, bake-for-export fallback |
+| **G3a** | L | geometry nodes: interpreter + inputs/primitives/mesh-op nodes (wrapping EM/MODDB cores) |
+| **G3b** | M | geometry nodes: instancing/scatter + attribute/selection fields |
+| **G3c** | M | geometry nodes: curve nodes (after A9) + boolean node (after A8) |
+| **G4** | M-L | compositor: pass-chain runtime + core grade/blur/glare nodes, wired into still render AND E1 video export |
+| **G5** | M | keyframeable node params via Track/Registry bridge |
+
+Dependency notes: G0 blocks all others; G1/G3a can run in parallel lanes after G0 (different subsystems, same file — must be sequential commits, not parallel agents); G4 should land before or with E1 so video export includes the compositor hook from day one; A8/A9 gate G3c only.
+

@@ -36,6 +36,7 @@ Detailed feature-by-feature roadmap lives in `docs/GAP_ANALYSIS.md` (written by 
 - **Phase D — `animate.html`: animation.** Keyframes on any animatable property (bone pose, object TRS, material params, light params, camera), dope sheet, graph editor with bezier/linear/constant interpolation + easing presets, timeline with touch scrubbing, playback transport, action clips, path-follow, onion skinning.
 - **Phase E — Output.** (1) MP4 export: render loop → `canvas.captureStream()` → MediaRecorder (webm fallback where mp4 unsupported; WebCodecs + mp4 mux where available — no external mux libs, so if a pure-JS minimal mp4 muxer is too big, ship webm + clearly label it and offer per-frame PNG zip as the lossless path). (2) **Three.js code export:** generate a self-contained `<script>` snippet embedding geometry (compressed JSON), materials, skeleton, and keyframe tracks as `THREE.AnimationClip` code targeting current three versions, with a version banner and copy button.
 - **Phase F — Polish/parity sweeps.** Physics-lite stretch goals per GAP_ANALYSIS, perf passes (mesh > 50k tris), theming consistency, docs.
+- **Phase G — Node systems** (added by user request: full Blender node capabilities). Shared touch node-graph editor widget, then shader nodes (baked-map path, then true GLSL compile), geometry nodes (interpreter wrapping the existing EM/MODDB cores + ~35-node core registry), compositor nodes (post-FX chain feeding stills AND E1 video export), and a Track/Registry bridge making node params keyframeable. Full specs: GAP_ANALYSIS §6. Sequencing: G0 first; G1/G3a after it (same file — sequential, never parallel agents); G4 lands before or with E1; A8/A9 gate G3c only.
 
 Phases can overlap: Phase A waves may continue while C/D are being built, since they touch different files after Phase B lands.
 
@@ -83,7 +84,7 @@ Wave definitions live in `docs/GAP_ANALYSIS.md` §4 — this table only tracks s
 | T | Verification suite into repo (`tests/`) | DONE | 52deb2f | `cd tests && npm i && node verify.js` |
 | A1 | Slide/Shrink-Fatten/Rip/Randomize/Shear edit ops | DONE | 9740368 | +5 checks (suite now 66); also fixed a latent `_pushVertHistory` undo crash |
 | C0 | animate.html scaffold: theme/chrome parity, localStorage model bridge, Track/keyframe core seed (Anim.sample/insertKey), timeline scrub+play proof, own suite tests/verify_animate.js (18 checks) | DONE | ab6ec0b | not in original roadmap — added to de-risk C1/D1. Track shape: `{id,targetId,path,keys:[{t,v,interp}]}`, registry targetId→Object3D |
-| A2 | Knife / Spin / Screw | TODO | | |
+| A2 | Knife / Spin / Screw | DONE | 4c3c0eb | suite now 70; knife core is pointer-free (`EM.knifeCore`), K shortcut; knife points snap to verts/edges (no face-interior points — noted deviation) |
 | A3 | Vertex-bevel, N-loop bridge, loop-cut slide, bevel width/segments, Symmetrize | TODO | | |
 | A4 | Seams, project-from-view unwrap, pack islands, UV editor mode | TODO | | |
 | A5 | Vertex groups (+ assign UI) — Phase B/C dependency | TODO | | |
@@ -108,6 +109,14 @@ Wave definitions live in `docs/GAP_ANALYSIS.md` §4 — this table only tracks s
 | D5 | Camera animation + path-follow | TODO | | |
 | D6 | Action clips (NLA-lite) | TODO | | |
 | D7 | Onion skinning | TODO | | |
+| G0 | Shared touch node-graph editor widget + registry/eval core | TODO | | blocks all other G waves |
+| G1 | Shader nodes: baked-map path (texture/utility nodes, Principled output) | TODO | | |
+| G2 | Shader nodes: true GLSL compile (onBeforeCompile) + bake-for-export | TODO | | |
+| G3a | Geometry nodes: interpreter + inputs/primitives/mesh-op nodes | TODO | | |
+| G3b | Geometry nodes: instancing/scatter + attribute fields | TODO | | |
+| G3c | Geometry nodes: curve + boolean nodes | TODO | | after A8+A9 |
+| G4 | Compositor nodes (stills + video export hook) | TODO | | land before/with E1 |
+| G5 | Keyframeable node params (Track/Registry bridge) | TODO | | |
 | E1 | Video export (WebM guaranteed, MP4 progressive) | TODO | | |
 | E2 | Standalone Three.js code export | TODO | | |
 | F1-F7 | Polish & stretch (see GAP_ANALYSIS §4 Phase F) | TODO | | |
