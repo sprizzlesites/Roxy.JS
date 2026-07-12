@@ -259,7 +259,15 @@ dom.addEventListener('pointerdown',function(e){
     var hj=hitJoint(e);
     if(hj){dom.setPointerCapture(e.pointerId);jointDrag={be:hj.be,which:hj.which,ptId:e.pointerId,px:e.clientX,py:e.clientY};invalidate();return;}
   }
-  if(active.view==='pose'&&Arm.mode==='pose'){
+  if(active.view==='pose'&&Arm.mode==='pose'&&Arm.ikOn){
+    // IK armed: an IK-handle drag takes precedence over selecting a new chain tip,
+    // which itself takes precedence over the plain-FK poseDrag below (see ikSelectTip).
+    var hik=hitIkHandle(e);
+    if(hik){dom.setPointerCapture(e.pointerId);ikDrag={which:hik,ptId:e.pointerId,px:e.clientX,py:e.clientY};invalidate();return;}
+    var hb2=hitBoneMesh(e);
+    if(hb2){dom.setPointerCapture(e.pointerId);selectBone(hb2.rig,hb2.id);ikSelectTip(hb2.rig,hb2.id);renderPanel();invalidate();return;}
+  }
+  if(active.view==='pose'&&Arm.mode==='pose'&&!Arm.ikOn){
     var hb=hitBoneMesh(e);
     if(hb){dom.setPointerCapture(e.pointerId);selectBone(hb.rig,hb.id);
       poseDrag={be:hb.be,px:e.clientX,py:e.clientY,ptId:e.pointerId};renderPanel();invalidate();return;}
@@ -268,6 +276,7 @@ dom.addEventListener('pointerdown',function(e){
   clickStart={x:e.clientX,y:e.clientY,t:Date.now(),id:e.pointerId};invalidate();});
 dom.addEventListener('pointermove',function(e){
   if(jointDrag&&jointDrag.ptId===e.pointerId){dragJointMove(e);return;}
+  if(ikDrag&&ikDrag.ptId===e.pointerId){dragIkMove(e);return;}
   if(poseDrag&&poseDrag.ptId===e.pointerId){dragPoseMove(e);return;}
   var p=ptrs.get(e.pointerId);if(!p)return;
   var dx=e.clientX-p.x,dy=e.clientY-p.y;p.x=e.clientX;p.y=e.clientY;
@@ -283,6 +292,7 @@ dom.addEventListener('pointermove',function(e){
   invalidate();});
 function endPtr(e){
   if(jointDrag&&jointDrag.ptId===e.pointerId){jointDrag=null;invalidate();return;}
+  if(ikDrag&&ikDrag.ptId===e.pointerId){ikDrag=null;invalidate();return;} // release: solved pose simply stays (bone quats), target handle stays too
   if(poseDrag&&poseDrag.ptId===e.pointerId){poseDrag=null;invalidate();return;}
   ptrs.delete(e.pointerId);lastDist=0;lastMid=null;
   if(clickStart&&clickStart.id===e.pointerId&&Date.now()-clickStart.t<350&&Math.hypot(e.clientX-clickStart.x,e.clientY-clickStart.y)<6){
@@ -523,7 +533,7 @@ function addBoneWithId(rig,id,name,head,tail,parentId){
   var numId=+(''+id).replace(/\D/g,'');if(!isNaN(numId)&&numId>=boneIdc)boneIdc=numId+1;
   name=uniqueBoneName(rig,name||'Bone',null);
   var bone=new THREE.Bone();bone.name=name;
-  var be={id:id,name:name,head:head.clone(),tail:tail.clone(),parentId:parentId||null,bone:bone,rig:rig};
+  var be={id:id,name:name,head:head.clone(),tail:tail.clone(),parentId:parentId||null,bone:bone,rig:rig,limits:null};
   rig.bones.push(be);
   var parentObj=rig.root,parentHead=new THREE.Vector3(0,0,0);
   if(parentId){var pe=findBone(rig,parentId);if(pe){parentObj=pe.bone;parentHead=pe.head;}}
@@ -611,10 +621,13 @@ function selectBone(rig,boneId){
 /* ---------------- edit-mode tool state + chain-extend / parent-pick flows ----------------
    "Add Bone"/"Add Child" mirror EM.extrude's click-to-extend mobile UX (GAP_ANALYSIS §3):
    arm the tool, then each viewport TAP extends the chain by one more bone. */
-var Arm={mode:'edit',rigId:null,selBoneId:null,chainActive:false,chainRigId:null,chainAnchor:null,chainLastBoneId:null,parentPickActive:false};
+var Arm={mode:'edit',rigId:null,selBoneId:null,chainActive:false,chainRigId:null,chainAnchor:null,chainLastBoneId:null,parentPickActive:false,
+  axisMode:'free', // Wave C3: 'free' (trackball drag, C1 behavior) | 'x'|'y'|'z' (constrain FK drag to one local axis)
+  ikOn:false,ikChainLen:2,ikChainBoneIds:null,ikTargetPos:null,ikPoleOn:false,ikPolePos:null}; // Wave C3: IK toggle state
 function setArmMode(mode){
   var rig=Rigs[Arm.rigId];
   if(mode==='edit'){Arm.chainActive=false;Arm.parentPickActive=false;
+    if(Arm.ikOn)setIkOn(false); // IK handles are a Pose-mode-only overlay
     if(rig)rig.bones.forEach(function(b){b.bone.quaternion.identity();});} // Edit mode always shows/edits the bind pose (see file header note)
   Arm.mode=mode;renderPanel();invalidate();}
 
@@ -683,10 +696,15 @@ function dragJointMove(e){
 // bone about the camera's current up vector, drag up/down about its current right vector,
 // both re-expressed in the bone's PARENT-local frame so the result composes correctly
 // through the FK chain regardless of how the parent itself is currently posed.
+// Wave C3 adds Arm.axisMode: when not 'free', the drag is constrained to one of the
+// bone's own local axes instead (more controllable on touch for e.g. elbow bends) — see
+// applyAxisRotationStep below.
 function dragPoseMove(e){
   var dx=e.clientX-poseDrag.px,dy=e.clientY-poseDrag.py;poseDrag.px=e.clientX;poseDrag.py=e.clientY;
   if(!dx&&!dy)return;
-  var be=poseDrag.be,k=.01,parent=be.bone.parent;
+  var be=poseDrag.be,k=.01;
+  if(Arm.axisMode!=='free'){applyAxisRotationStep(be,Arm.axisMode,dx*k);return;}
+  var parent=be.bone.parent;
   parent.updateWorldMatrix(true,false);
   var pq=new THREE.Quaternion();parent.getWorldQuaternion(pq);var pqInv=pq.clone().invert();
   var camRight=new THREE.Vector3().setFromMatrixColumn(vs.cam.matrix,0).applyQuaternion(pqInv);
@@ -694,20 +712,239 @@ function dragPoseMove(e){
   var qYaw=new THREE.Quaternion().setFromAxisAngle(camUp,-dx*k),qPitch=new THREE.Quaternion().setFromAxisAngle(camRight,-dy*k);
   var delta=qYaw.multiply(qPitch);
   be.bone.quaternion.copy(delta.multiply(be.bone.quaternion)).normalize();
+  clampBoneRotation(be);
   scheduleAnimAutosave();invalidate();}
+
+/* ═══════════════════════════════════════════════════════
+   Wave C3 — per-axis FK, rotation limits, CCD IK, pole target.
+
+   - Arm.axisMode constrains dragPoseMove to one local axis (applyAxisRotationStep).
+   - setBoneEulerAxisDeg is the tap-to-type numeric fallback for exact-degree posing
+     (drives the three "Rot X/Y/Z °" sliders in panelArmPose — each is itself
+     tap-to-type via slider()'s label, per the app-wide numeric-entry convention).
+   - be.limits = {x:[min,max]|null, y:..., z:...} (radians), default null per axis
+     (unlimited). Enforced by clampBoneRotation after every FK drag/type AND inside
+     every solveIK iteration (see below) — this is deliberately the same clamp
+     entry point FK and IK both go through, so it doubles as C4's future "Limit
+     Rotation" constraint groundwork. Approach: decompose the live quaternion to
+     Euler XYZ, clamp any axis that has a limit, recompose — a known simplification
+     (gimbal-order-dependent near ±90° on other axes) acceptable for a posing tool.
+   ═══════════════════════════════════════════════════════ */
+var AX_X=new THREE.Vector3(1,0,0),AX_Y=new THREE.Vector3(0,1,0),AX_Z=new THREE.Vector3(0,0,1);
+
+function clampBoneRotation(be){
+  if(!be||!be.limits)return;
+  var lim=be.limits,changed=false;
+  var e=new THREE.Euler().setFromQuaternion(be.bone.quaternion,'XYZ');
+  ['x','y','z'].forEach(function(ax){var L=lim[ax];if(L){var v=clamp(e[ax],L[0],L[1]);
+    if(Math.abs(v-e[ax])>1e-9){e[ax]=v;changed=true;}}});
+  if(changed)be.bone.quaternion.setFromEuler(e);}
+
+function setBoneLimit(be,axis,min,max){ // min/max in radians; either null clears that axis's limit
+  if(!be.limits)be.limits={x:null,y:null,z:null};
+  be.limits[axis]=(min==null||max==null)?null:[min,max];
+  clampBoneRotation(be);scheduleAnimAutosave();invalidate();}
+
+// Pure rotation step around one of the bone's own LOCAL axes (post-multiplied, so the
+// axis is expressed in the bone's currently-rotated frame — i.e. repeated calls rotate
+// around the bone's own current local X/Y/Z, matching how the axis chip is described:
+// "constrain the drag rotation to the bone's local axis").
+function applyAxisRotationStep(be,axis,angle){
+  var axisVec=axis==='x'?AX_X:(axis==='y'?AX_Y:AX_Z);
+  var dq=new THREE.Quaternion().setFromAxisAngle(axisVec,angle);
+  be.bone.quaternion.multiply(dq).normalize();
+  clampBoneRotation(be);
+  scheduleAnimAutosave();invalidate();return be.bone.quaternion;}
+
+function boneEulerDeg(be){var e=new THREE.Euler().setFromQuaternion(be.bone.quaternion,'XYZ');
+  return {x:e.x*180/Math.PI,y:e.y*180/Math.PI,z:e.z*180/Math.PI};}
+function setBoneEulerAxisDeg(be,axis,deg){ // tap-to-type exact-degree entry for one axis, others held at their current decomposed value
+  var e=new THREE.Euler().setFromQuaternion(be.bone.quaternion,'XYZ');
+  e[axis]=deg*Math.PI/180;
+  be.bone.quaternion.setFromEuler(e);
+  clampBoneRotation(be);scheduleAnimAutosave();invalidate();}
+
+/* ---------------- CCD IK solver (Wave C3) ----------------
+   solveIK(chainBEs, targetPos, iterations, opts): cyclic coordinate descent over an
+   N-bone chain. chainBEs is ROOT -> TIP ordered (2-4 Bone records, see buildIkChain).
+   Each iteration sweeps from the TIP-most rotatable joint back to the ROOT: for joint i,
+   rotate be[i]'s LOCAL quaternion by the minimal-angle rotation that swings the current
+   chain-tip position toward targetPos, pivoting about that joint's head. The per-step
+   angle is clamped (opts.maxStep, default .35 rad) for stability on long/fast drags, and
+   every joint rotation is immediately re-clamped by clampBoneRotation so IK respects the
+   same per-bone limits FK does. The sweep repeats for `iterations` passes or until the
+   tip is within opts.tolerance (default .01 world units) of the target — whichever first;
+   an unreachable target simply straightens the chain to point at it (classic CCD
+   behavior), it does not diverge or NaN.
+   opts.pole (optional THREE.Vector3, world space): bias the chain's bend PLANE toward a
+   pole target after each sweep — see applyPoleBend for the approach and its documented
+   2-3-bone-chain scope. */
+function solveIK(chainBEs,targetPos,iterations,opts){
+  opts=opts||{};
+  var maxStep=opts.maxStep!=null?opts.maxStep:.35;
+  var tol=opts.tolerance!=null?opts.tolerance:.01;
+  var pole=opts.pole||null;
+  if(!chainBEs||chainBEs.length<2||!targetPos)return;
+  var rig=chainBEs[0].rig;
+  rig.root.updateMatrixWorld(true);
+  var tipBE=chainBEs[chainBEs.length-1];
+  for(var iter=0;iter<iterations;iter++){
+    for(var i=chainBEs.length-1;i>=0;i--){
+      var be=chainBEs[i];
+      be.bone.updateMatrixWorld(true);
+      var jointPos=new THREE.Vector3();be.headJoint.getWorldPosition(jointPos);
+      var tipPos=new THREE.Vector3();tipBE.tailJoint.getWorldPosition(tipPos);
+      var toTip=tipPos.clone().sub(jointPos),toTarget=targetPos.clone().sub(jointPos);
+      if(toTip.lengthSq()<1e-10||toTarget.lengthSq()<1e-10)continue;
+      toTip.normalize();toTarget.normalize();
+      var dot=clamp(toTip.dot(toTarget),-1,1),angle=Math.acos(dot);
+      if(angle<1e-6)continue;
+      var axis=new THREE.Vector3().crossVectors(toTip,toTarget);
+      if(axis.lengthSq()<1e-10)continue; // toTip/toTarget anti-parallel: no well-defined swing axis, skip this joint this pass
+      axis.normalize();
+      angle=Math.min(angle,maxStep);
+      var worldQ=new THREE.Quaternion().setFromAxisAngle(axis,angle);
+      var curWorldQ=new THREE.Quaternion();be.bone.getWorldQuaternion(curWorldQ);
+      var newWorldQ=worldQ.multiply(curWorldQ);
+      var parentWorldQ=new THREE.Quaternion();if(be.bone.parent)be.bone.parent.getWorldQuaternion(parentWorldQ);
+      var newLocalQ=parentWorldQ.clone().invert().multiply(newWorldQ);
+      be.bone.quaternion.copy(newLocalQ).normalize();
+      clampBoneRotation(be);
+      be.bone.updateMatrixWorld(true);
+    }
+    if(pole)applyPoleBend(chainBEs,pole);
+    var tp2=new THREE.Vector3();tipBE.tailJoint.getWorldPosition(tp2);
+    if(tp2.distanceTo(targetPos)<tol)break;
+  }
+  rig.root.updateMatrixWorld(true);}
+
+// Pole vector / bend-direction bias: standard pole-vector IK re-derives each internal
+// joint's swing around the root-tip axis individually; as a FEASIBLE simplification for
+// a compact mobile posing tool (2-3 bone chains, per GAP_ANALYSIS §4 C3) this instead
+// rotates the whole chain's ROOT bone about the root->tip axis by just enough to swing
+// the chain's single dominant "elbow" (the middle bone's head joint) onto the pole's
+// side of the root-tip line. For a 4-bone chain only that first internal joint is
+// biased — documented scope, not a full per-joint pole solve. Called once per solveIK
+// sweep so it composes with the CCD tip-correction on the next sweep.
+function applyPoleBend(chainBEs,polePos){
+  if(!chainBEs||chainBEs.length<2||!polePos)return;
+  var rootBE=chainBEs[0],tipBE=chainBEs[chainBEs.length-1],midBE=chainBEs[Math.floor(chainBEs.length/2)];
+  rootBE.bone.updateMatrixWorld(true);
+  var rootPos=new THREE.Vector3();rootBE.headJoint.getWorldPosition(rootPos);
+  var tipPos=new THREE.Vector3();tipBE.tailJoint.getWorldPosition(tipPos);
+  var midPos=new THREE.Vector3();midBE.headJoint.getWorldPosition(midPos);
+  var axis=tipPos.clone().sub(rootPos);if(axis.lengthSq()<1e-10)return;axis.normalize();
+  function offAxis(p){var d=p.clone().sub(rootPos);return d.sub(axis.clone().multiplyScalar(d.dot(axis)));}
+  var poleProj=offAxis(polePos),midProj=offAxis(midPos);
+  if(poleProj.lengthSq()<1e-10||midProj.lengthSq()<1e-10)return;
+  poleProj.normalize();midProj.normalize();
+  var dot=clamp(midProj.dot(poleProj),-1,1),cross=new THREE.Vector3().crossVectors(midProj,poleProj);
+  var sign=cross.dot(axis)>=0?1:-1,angle=sign*Math.acos(dot);
+  if(!isFinite(angle)||Math.abs(angle)<1e-6)return;
+  var worldQ=new THREE.Quaternion().setFromAxisAngle(axis,angle);
+  var curWorldQ=new THREE.Quaternion();rootBE.bone.getWorldQuaternion(curWorldQ);
+  var newWorldQ=worldQ.multiply(curWorldQ);
+  var parentWorldQ=new THREE.Quaternion();if(rootBE.bone.parent)rootBE.bone.parent.getWorldQuaternion(parentWorldQ);
+  var newLocalQ=parentWorldQ.clone().invert().multiply(newWorldQ);
+  rootBE.bone.quaternion.copy(newLocalQ).normalize();
+  clampBoneRotation(rootBE);
+  rootBE.bone.updateMatrixWorld(true);}
+
+/* ---------------- IK interaction: chain selection + draggable target/pole handles (Wave C3) ----------------
+   Arm.ikOn arms IK inside Pose mode. With it on, tapping a bone in the viewport defines
+   that bone as the CHAIN TIP (ikSelectTip): the chain is that bone plus its nearest
+   Arm.ikChainLen-1 ancestors (buildIkChain), root->tip. A small sphere "IK target"
+   handle (yellow) appears at the chain's current tip world position; dragging it
+   re-solves the chain live every pointermove (dragIkMove -> runIkSolve -> solveIK). On
+   release nothing needs to be "applied" — the solved pose already IS the bones' current
+   quaternions, so it is immediately keyable via the normal FK "Key Rotation" button and
+   slerp-samples through Anim like any other pose (see panelArmPose's Key Rotation, and
+   Anim.sample's quaternion slerp path). An optional second sphere handle (green) defines
+   the pole/bend-direction target (only offered for chains of 2-3 bones, see
+   applyPoleBend). The target/pole handles are scene gizmos, not part of the rig data
+   model — they persist only while Arm.ikOn is true and clear on toggle-off, per the
+   "keep the target as a scene handle while IK toggle is on, clear on toggle off" spec. */
+var IK_HANDLE_GEO=null;
+function ikHandleGeo(){if(IK_HANDLE_GEO)return IK_HANDLE_GEO;IK_HANDLE_GEO=new THREE.SphereGeometry(1,12,10);return IK_HANDLE_GEO;}
+var ikTargetMesh=null,ikPoleMesh=null,ikDrag=null;
+function ensureIkHandles(){
+  if(!ikTargetMesh){ikTargetMesh=new THREE.Mesh(ikHandleGeo(),new THREE.MeshBasicMaterial({color:0xffe066,depthTest:false,transparent:true,opacity:.92}));
+    ikTargetMesh.scale.setScalar(.045);ikTargetMesh.renderOrder=1002;ikTargetMesh.visible=false;
+    ikTargetMesh.userData.ikHandle='target';poseScene.userData.armatureHolder.add(ikTargetMesh);}
+  if(!ikPoleMesh){ikPoleMesh=new THREE.Mesh(ikHandleGeo(),new THREE.MeshBasicMaterial({color:0x8fffb0,depthTest:false,transparent:true,opacity:.92}));
+    ikPoleMesh.scale.setScalar(.035);ikPoleMesh.renderOrder=1002;ikPoleMesh.visible=false;
+    ikPoleMesh.userData.ikHandle='pole';poseScene.userData.armatureHolder.add(ikPoleMesh);}}
+function buildIkChain(rig,tipBoneId,len){ // returns [rootId...tipId], up to `len` bones, root-most bone first
+  var chain=[],cur=findBone(rig,tipBoneId);
+  while(cur&&chain.length<len){chain.unshift(cur.id);cur=cur.parentId?findBone(rig,cur.parentId):null;}
+  return chain;}
+function ikSelectTip(rig,boneId){
+  ensureIkHandles();
+  var chain=buildIkChain(rig,boneId,Arm.ikChainLen);
+  if(chain.length<2){toast('Need a parent bone to form an IK chain');Arm.ikChainBoneIds=null;
+    ikTargetMesh.visible=false;ikPoleMesh.visible=false;return;}
+  Arm.ikChainBoneIds=chain;
+  var tipBE=findBone(rig,chain[chain.length-1]);
+  rig.root.updateMatrixWorld(true);
+  var tp=new THREE.Vector3();tipBE.tailJoint.getWorldPosition(tp);
+  Arm.ikTargetPos=tp;ikTargetMesh.position.copy(tp);ikTargetMesh.visible=true;
+  if(Arm.ikPoleOn&&chain.length<=3){
+    if(!Arm.ikPolePos){var rootBE=findBone(rig,chain[0]);var rp=new THREE.Vector3();rootBE.headJoint.getWorldPosition(rp);
+      Arm.ikPolePos=rp.clone().add(new THREE.Vector3(0,0,1));}
+    ikPoleMesh.position.copy(Arm.ikPolePos);ikPoleMesh.visible=true;
+  }else ikPoleMesh.visible=false;
+  toast('IK chain: '+chain.length+' bones — drag the yellow target');invalidate();}
+function setIkOn(on){
+  Arm.ikOn=!!on;
+  if(!Arm.ikOn){Arm.ikChainBoneIds=null;Arm.ikTargetPos=null;Arm.ikPolePos=null;
+    if(ikTargetMesh)ikTargetMesh.visible=false;if(ikPoleMesh)ikPoleMesh.visible=false;}
+  renderPanel();invalidate();}
+function setIkPoleOn(on){
+  Arm.ikPoleOn=!!on;
+  if(!Arm.ikPoleOn){Arm.ikPolePos=null;if(ikPoleMesh)ikPoleMesh.visible=false;}
+  else if(Arm.ikChainBoneIds&&Arm.ikChainBoneIds.length<=3){var rig=Rigs[Arm.rigId];
+    if(rig)ikSelectTip(rig,Arm.ikChainBoneIds[Arm.ikChainBoneIds.length-1]);}
+  renderPanel();invalidate();}
+function setIkChainLen(n){
+  Arm.ikChainLen=clamp(Math.round(n)||2,2,4);
+  if(Arm.ikChainBoneIds&&Arm.ikChainBoneIds.length){var rig=Rigs[Arm.rigId];
+    if(rig)ikSelectTip(rig,Arm.ikChainBoneIds[Arm.ikChainBoneIds.length-1]);}
+  renderPanel();}
+function runIkSolve(){
+  var rig=Rigs[Arm.rigId];if(!rig||!Arm.ikChainBoneIds||!Arm.ikTargetPos)return;
+  var chainBEs=Arm.ikChainBoneIds.map(function(id){return findBone(rig,id);}).filter(Boolean);
+  if(chainBEs.length<2)return;
+  var opts={};if(Arm.ikPoleOn&&Arm.ikPolePos&&chainBEs.length<=3)opts.pole=Arm.ikPolePos;
+  solveIK(chainBEs,Arm.ikTargetPos,12,opts);
+  scheduleAnimAutosave();invalidate();}
+function hitIkHandle(e){
+  var objs=[];if(ikTargetMesh&&ikTargetMesh.visible)objs.push(ikTargetMesh);if(ikPoleMesh&&ikPoleMesh.visible)objs.push(ikPoleMesh);
+  if(!objs.length)return null;
+  var ray=new THREE.Raycaster();ray.setFromCamera(ndcFromEvent(e),vs.cam);
+  var h=ray.intersectObjects(objs,false)[0];return h?h.object.userData.ikHandle:null;}
+function dragIkMove(e){
+  var dx=e.clientX-ikDrag.px,dy=e.clientY-ikDrag.py;ikDrag.px=e.clientX;ikDrag.py=e.clientY;
+  var delta=screenDeltaToWorld(dx,dy);
+  if(ikDrag.which==='target'){Arm.ikTargetPos.add(delta);ikTargetMesh.position.copy(Arm.ikTargetPos);}
+  else{Arm.ikPolePos.add(delta);ikPoleMesh.position.copy(Arm.ikPolePos);}
+  runIkSolve();invalidate();}
 
 /* ---------------- serialize / restore (rides in the anim autosave — see doAnimAutosave) ---------------- */
 function serializeRigs(){return Object.keys(Rigs).map(function(rid){var rig=Rigs[rid];
   return {id:rig.id,name:rig.name,bones:rig.bones.map(function(b){
-    return {id:b.id,name:b.name,parentId:b.parentId,head:[b.head.x,b.head.y,b.head.z],tail:[b.tail.x,b.tail.y,b.tail.z],
-      quat:[b.bone.quaternion.x,b.bone.quaternion.y,b.bone.quaternion.z,b.bone.quaternion.w]};})};});}
+    var bd={id:b.id,name:b.name,parentId:b.parentId,head:[b.head.x,b.head.y,b.head.z],tail:[b.tail.x,b.tail.y,b.tail.z],
+      quat:[b.bone.quaternion.x,b.bone.quaternion.y,b.bone.quaternion.z,b.bone.quaternion.w]};
+    if(b.limits&&(b.limits.x||b.limits.y||b.limits.z))bd.limits=b.limits; // v3 (Wave C3): rotation limits, omitted when fully unlimited
+    return bd;})};});}
 function rebuildRigFromSerialized(rd){
   var rig=newRigWithId(rd.id,rd.name),list=rd.bones||[];
   list.forEach(function(bd){ // pass 1: create every bone as a temporary root (guarantees all ids exist for pass 2's parent lookups)
     addBoneWithId(rig,bd.id,bd.name,new THREE.Vector3().fromArray(bd.head),new THREE.Vector3().fromArray(bd.tail),null);});
-  list.forEach(function(bd){ // pass 2: real parenting (keep-offset) + restore pose quaternion
+  list.forEach(function(bd){ // pass 2: real parenting (keep-offset) + restore pose quaternion + limits (v2 saves simply lack the field)
     if(bd.parentId)setBoneParent(rig,bd.id,bd.parentId);
-    var be=findBone(rig,bd.id);if(be&&bd.quat)be.bone.quaternion.set(bd.quat[0],bd.quat[1],bd.quat[2],bd.quat[3]);});
+    var be=findBone(rig,bd.id);if(!be)return;
+    if(bd.limits)be.limits={x:bd.limits.x||null,y:bd.limits.y||null,z:bd.limits.z||null};
+    if(bd.quat)be.bone.quaternion.set(bd.quat[0],bd.quat[1],bd.quat[2],bd.quat[3]);});
   syncSkeleton(rig);return rig;}
 
 /* ═══════════════════════════════════════════════════════
@@ -795,8 +1032,11 @@ function scheduleAnimAutosave(){clearTimeout(animAutosaveTimer);animAutosaveTime
 // v2 (Wave C1): adds `rigs` (serialized armatures — see serializeRigs/rebuildRigFromSerialized
 // above). v1 saves (no `rigs` key, no `v` tag at all) still load fine: tryRestoreAnimAutosave
 // only rebuilds rigs when the field is present.
+// v3 (Wave C3): bones may carry a `limits` field (per-axis rotation clamps). v2 saves load
+// unchanged (missing field -> unlimited), and a v3 save read by v2 code simply ignores it —
+// the bump is additive, no migration needed.
 function doAnimAutosave(){try{localStorage.setItem(ANIM_AUTOSAVE_KEY,JSON.stringify(
-  {v:2,fps:Anim.fps,start:Anim.start,end:Anim.end,tracks:Anim.tracks,rigs:serializeRigs()}));}catch(e){}}
+  {v:3,fps:Anim.fps,start:Anim.start,end:Anim.end,tracks:Anim.tracks,rigs:serializeRigs()}));}catch(e){}}
 function tryRestoreAnimAutosave(){
   var raw;try{raw=localStorage.getItem(ANIM_AUTOSAVE_KEY);}catch(e){return false;}
   if(!raw)return false;
@@ -860,7 +1100,7 @@ function targetSelect(onchange){
 
 function panelPose(b){
   b.appendChild(el('h2',{text:'Pose'}));
-  b.appendChild(el('p',{class:'sub',text:'Build an armature in Edit Bones, then switch to Pose to rotate bones by dragging them in the viewport. Skin binding (C2), IK (C3) and constraints (C4) land in later waves.'}));
+  b.appendChild(el('p',{class:'sub',text:'Build an armature in Edit Bones, then switch to Pose to rotate bones (FK drag, exact degrees, or IK targets). Skin binding (C2) and constraints (C4) land in later waves.'}));
   if(state.usingDemo)b.appendChild(el('div',{class:'card small',style:'margin-bottom:10px'},
     ['No modeling-suite autosave was found, so a demo figure is loaded. Build/save a project in the Modeler, or Import a project.json above, then reload this page.']));
 
@@ -929,17 +1169,74 @@ function panelArmEdit(b,rig){
       onclick:function(){setBoneParent(rig,be.id,null);renderPanel();invalidate();}}));
   }}
 
+// Compact per-axis limit control: one button per axis, tap-to-type "min,max" degrees
+// (blank input clears back to unlimited) — prompt()-based like slider()'s tap-to-type.
+function limitBtn(be,axis){
+  var L=be.limits&&be.limits[axis];
+  var lbl=axis.toUpperCase()+': '+(L?(Math.round(L[0]*180/Math.PI)+'° … '+Math.round(L[1]*180/Math.PI)+'°'):'free');
+  return el('button',{class:L?'on':'',style:'width:100%',text:lbl,onclick:function(){
+    var cur=L?Math.round(L[0]*180/Math.PI)+','+Math.round(L[1]*180/Math.PI):'';
+    var input=prompt('Limit '+axis.toUpperCase()+' rotation: min,max in degrees (blank = unlimited):',cur);
+    if(input==null)return;
+    input=input.trim();
+    if(!input){setBoneLimit(be,axis,null,null);renderPanel();return;}
+    var parts=input.split(/[,;\s]+/).map(Number);
+    if(parts.length<2||!isFinite(parts[0])||!isFinite(parts[1])){toast('Enter two numbers, e.g. -45,45');return;}
+    var mn=Math.min(parts[0],parts[1])*Math.PI/180,mx=Math.max(parts[0],parts[1])*Math.PI/180;
+    setBoneLimit(be,axis,mn,mx);toast('Limit '+axis.toUpperCase()+' set');renderPanel();}});}
+
 function panelArmPose(b,rig){
   b.appendChild(el('div',{class:'section-title',text:'Pose'}));
   var be=Arm.selBoneId?findBone(rig,Arm.selBoneId):null;
-  if(!be){b.appendChild(el('p',{class:'small muted',text:'Tap a bone in the viewport, then drag it to rotate (trackball-style).'}));return;}
-  b.appendChild(el('div',{class:'card small',style:'margin-bottom:8px'},['Selected: '+be.name+' — drag the bone in the viewport to rotate it.']));
-  var row=el('div',{class:'grid2'});
+  if(!be){b.appendChild(el('p',{class:'small muted',text:'Tap a bone in the viewport, then drag it to rotate. Toggle IK to drag a target instead.'}));return;}
+  b.appendChild(el('div',{class:'card small',style:'margin-bottom:8px'},
+    ['Selected: '+be.name+(Arm.ikOn?' — drag the yellow IK target in the viewport.':' — drag the bone in the viewport to rotate it.')]));
+
+  // FK rotation axis chips: Free (trackball) / X / Y / Z (constrain drag to that local axis)
+  b.appendChild(el('div',{class:'section-title',text:'Rotate Axis (drag constraint)'}));
+  var axRow=el('div',{style:'display:flex;gap:6px'});
+  [['free','Free'],['x','X'],['y','Y'],['z','Z']].forEach(function(a){
+    axRow.appendChild(el('button',{class:Arm.axisMode===a[0]?'on':'',style:'flex:1',text:a[1],
+      onclick:function(){Arm.axisMode=a[0];renderPanel();}}));});
+  b.appendChild(axRow);
+
+  // Exact-degree entry per local axis (slider() label doubles as tap-to-type)
+  b.appendChild(el('div',{class:'section-title',text:'Rotation (local °, tap value to type)'}));
+  var deg=boneEulerDeg(be);
+  ['x','y','z'].forEach(function(ax){
+    b.appendChild(slider('Rot '+ax.toUpperCase()+' °',-180,180,deg[ax],1,function(v){setBoneEulerAxisDeg(be,ax,v);}));});
+
+  var row=el('div',{class:'grid2',style:'margin-top:6px'});
   row.appendChild(el('button',{class:'pri',text:'Key Rotation',onclick:function(){
     Anim.insertKey(boneTargetId(rig.id,be.name),'quaternion',Anim.time);toast('Keyed rotation @ t='+Anim.time);renderPanel();}}));
   row.appendChild(el('button',{text:'Reset Bone',onclick:function(){resetBonePose(be);renderPanel();invalidate();}}));
   b.appendChild(row);
-  b.appendChild(el('button',{style:'width:100%;margin-top:6px',text:'Reset Pose (all bones)',onclick:function(){resetAllPose(rig);renderPanel();invalidate();}}));}
+  b.appendChild(el('button',{style:'width:100%;margin-top:6px',text:'Reset Pose (all bones)',onclick:function(){resetAllPose(rig);renderPanel();invalidate();}}));
+
+  // IK
+  b.appendChild(el('div',{class:'section-title',text:'IK (inverse kinematics)'}));
+  var ikRow=el('div',{class:'grid2'});
+  ikRow.appendChild(el('button',{class:Arm.ikOn?'on':'',text:Arm.ikOn?'IK: On':'IK: Off',onclick:function(){setIkOn(!Arm.ikOn);
+    if(Arm.ikOn&&Arm.selBoneId)ikSelectTip(rig,Arm.selBoneId);}}));
+  var poleBtn=el('button',{class:Arm.ikPoleOn?'on':'',text:Arm.ikPoleOn?'Pole: On':'Pole: Off',
+    onclick:function(){setIkPoleOn(!Arm.ikPoleOn);}});
+  if(!Arm.ikOn||(Arm.ikChainBoneIds&&Arm.ikChainBoneIds.length>3))poleBtn.disabled=true;
+  ikRow.appendChild(poleBtn);
+  b.appendChild(ikRow);
+  if(Arm.ikOn){
+    b.appendChild(el('div',{style:'margin-top:6px'},[
+      numField('Chain length (2-4 bones)',Arm.ikChainLen,1,function(v){setIkChainLen(v);})]));
+    b.appendChild(el('p',{class:'small muted',text:(Arm.ikChainBoneIds?
+      'Chain: '+Arm.ikChainBoneIds.map(function(id){var bb=findBone(rig,id);return bb?bb.name:'?';}).join(' → ')
+        +'. Drag the yellow sphere to solve'+(Arm.ikPoleOn&&Arm.ikChainBoneIds.length<=3?'; green sphere sets the bend direction':'')+'. Release keeps the pose (keyable).':
+      'Tap a bone in the viewport to set the chain tip.')}));
+  }
+
+  // Rotation limits (also enforced inside IK; C4 Limit Rotation groundwork)
+  b.appendChild(el('div',{class:'section-title',text:'Rotation Limits (tap to set min,max °)'}));
+  var limRow=el('div',{style:'display:flex;gap:6px'});
+  ['x','y','z'].forEach(function(ax){var w=el('div',{style:'flex:1'});w.appendChild(limitBtn(be,ax));limRow.appendChild(w);});
+  b.appendChild(limRow);}
 
 function panelTimeline(b){
   b.appendChild(el('h2',{text:'Timeline'}));

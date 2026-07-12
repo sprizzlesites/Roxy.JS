@@ -1,5 +1,6 @@
 // Headless verification of Roxy Animate (animate.html): boot, theme chrome, model bridge,
-// Track/keyframe core (insertKey/sample), playback, scrub bar, anim autosave, mobile chrome.
+// Track/keyframe core (insertKey/sample), playback, scrub bar, anim autosave, mobile chrome,
+// armatures (C1), FK axis constraints + rotation limits + CCD IK + pole targets (C3).
 // Modeled on tests/verify.js's harness pattern — separate suite, does not touch index.html.
 const { chromium } = require('playwright-core');
 const http = require('http');
@@ -20,7 +21,12 @@ window.__A={Anim:Anim,Registry:Registry,resolvePath:resolvePath,setView:setView,
   setBoneParent:setBoneParent,deleteBoneAndDescendants:deleteBoneAndDescendants,renameBone:renameBone,selectBone:selectBone,
   boneTargetId:boneTargetId,applyBoneEdit:applyBoneEdit,chainExtendTo:chainExtendTo,startAddBoneChain:startAddBoneChain,
   startAddChildChain:startAddChildChain,finishChain:finishChain,resetBonePose:resetBonePose,resetAllPose:resetAllPose,
-  ensureRig:ensureRig,uniqueBoneName:uniqueBoneName,serializeRigs:serializeRigs,setArmMode:setArmMode};
+  ensureRig:ensureRig,uniqueBoneName:uniqueBoneName,serializeRigs:serializeRigs,setArmMode:setArmMode,
+  solveIK:solveIK,applyPoleBend:applyPoleBend,buildIkChain:buildIkChain,ikSelectTip:ikSelectTip,setIkOn:setIkOn,
+  setIkPoleOn:setIkPoleOn,setIkChainLen:setIkChainLen,runIkSolve:runIkSolve,clampBoneRotation:clampBoneRotation,
+  setBoneLimit:setBoneLimit,applyAxisRotationStep:applyAxisRotationStep,setBoneEulerAxisDeg:setBoneEulerAxisDeg,
+  boneEulerDeg:boneEulerDeg,renderPanel:renderPanel,
+  ikHandles:function(){return {target:ikTargetMesh,pole:ikPoleMesh};}};
 `;
 
 const server = http.createServer((req, res) => {
@@ -466,6 +472,205 @@ function syntheticProject() {
     if (!res.childParentIsRoot) throw new Error('restored parentId hierarchy wrong');
     if (!res.childBoneParentMatches) throw new Error('restored THREE.Bone hierarchy wrong');
     if (Math.abs(res.childQuatW - Math.cos(0.2)) > 1e-4) throw new Error('restored pose quaternion wrong, got w=' + res.childQuatW);
+    await page.evaluate(() => localStorage.removeItem(window.__A.ANIM_AUTOSAVE_KEY));
+  });
+
+  // ==== Wave C3: per-axis FK, rotation limits, CCD IK, pole targets ====
+
+  await step('C3 FK: axis-constrained rotation only changes the chosen local-axis component (and the Free/X/Y/Z chips render)', () => page.evaluate(() => {
+    const A = window.__A, T = window.THREE;
+    const rig = A.newRig('AxisRig');
+    const be = A.addBone(rig, 'AxisBone', new T.Vector3(0, 0, 0), new T.Vector3(0, 1, 0), null);
+    be.bone.quaternion.identity();
+    A.applyAxisRotationStep(be, 'z', 0.3);
+    A.applyAxisRotationStep(be, 'z', 0.3); // second step must compose about the SAME local axis
+    const e = new T.Euler().setFromQuaternion(be.bone.quaternion, 'XYZ');
+    if (Math.abs(e.z - 0.6) > 1e-6) throw new Error('local-Z steps did not sum to 0.6 rad, got ' + e.z);
+    if (Math.abs(e.x) > 1e-9 || Math.abs(e.y) > 1e-9) throw new Error('axis-constrained rotation leaked into X/Y: ' + e.x + ',' + e.y);
+    // the Pose panel offers the Free/X/Y/Z axis chips as the touch UI for this
+    A.setView('pose'); A.setArmMode('pose'); A.selectBone(rig, be.id); A.renderPanel();
+    const texts = Array.from(document.querySelectorAll('#panelBody button')).map(b => b.textContent.trim());
+    ['Free', 'X', 'Y', 'Z'].forEach(t => { if (!texts.includes(t)) throw new Error('axis chip "' + t + '" not rendered in the Pose panel'); });
+    A.setArmMode('edit');
+  }));
+
+  await step('C3 FK: tap-to-type exact degrees sets the precise per-axis bone rotation', () => page.evaluate(() => {
+    const A = window.__A, T = window.THREE;
+    const rig = A.newRig('DegRig');
+    const be = A.addBone(rig, 'DegBone', new T.Vector3(0, 0, 0), new T.Vector3(0, 1, 0), null);
+    A.setBoneEulerAxisDeg(be, 'y', 45);
+    A.setBoneEulerAxisDeg(be, 'x', -30); // must preserve the Y set before it
+    const d = A.boneEulerDeg(be);
+    if (Math.abs(d.y - 45) > 1e-4) throw new Error('typed 45° Y not applied exactly, got ' + d.y);
+    if (Math.abs(d.x - -30) > 1e-4) throw new Error('typed -30° X not applied exactly, got ' + d.x);
+    if (Math.abs(d.z) > 1e-4) throw new Error('Z should remain 0, got ' + d.z);
+    const q = new T.Quaternion().setFromEuler(new T.Euler(-30 * Math.PI / 180, 45 * Math.PI / 180, 0, 'XYZ'));
+    if (Math.abs(Math.abs(q.dot(be.bone.quaternion)) - 1) > 1e-6) throw new Error('quaternion does not match the typed euler exactly');
+  }));
+
+  // shared helper: build a fresh 3-bone chain straight up +Y, 0.5 per bone (total reach 1.5)
+  const mkChain = `(function(){
+    const A = window.__A, T = window.THREE;
+    const rig = A.newRig('IkRig' + Math.random().toString(36).slice(2, 7));
+    const b1 = A.addBone(rig, 'C1', new T.Vector3(0, 0, 0), new T.Vector3(0, 0.5, 0), null);
+    const b2 = A.addBone(rig, 'C2', new T.Vector3(0, 0.5, 0), new T.Vector3(0, 1, 0), b1.id);
+    const b3 = A.addBone(rig, 'C3', new T.Vector3(0, 1, 0), new T.Vector3(0, 1.5, 0), b2.id);
+    return { rig, chain: [b1, b2, b3] };
+  })()`;
+
+  await step('C3 IK: CCD brings a 3-bone chain tip within tolerance of a reachable target', () => page.evaluate((mk) => {
+    const A = window.__A, T = window.THREE;
+    const { rig, chain } = eval(mk);
+    const target = new T.Vector3(0.6, 0.9, 0.3); // |target| ~1.12 < reach 1.5
+    A.solveIK(chain, target, 100, { tolerance: 0.005 });
+    rig.root.updateMatrixWorld(true);
+    const tip = new T.Vector3(); chain[2].tailJoint.getWorldPosition(tip);
+    const d = tip.distanceTo(target);
+    if (d > 0.01) throw new Error('tip did not reach the target, dist=' + d);
+    chain.forEach(be => { const q = be.bone.quaternion; [q.x, q.y, q.z, q.w].forEach(c => { if (!isFinite(c)) throw new Error('NaN in solved quaternion'); }); });
+  }, mkChain));
+
+  await step('C3 IK: unreachable target — chain straightens toward it (tip on the root-target ray, no NaNs)', () => page.evaluate((mk) => {
+    const A = window.__A, T = window.THREE;
+    const { rig, chain } = eval(mk);
+    const target = new T.Vector3(2, 2, 0); // dist ~2.83 > reach 1.5
+    A.solveIK(chain, target, 120, { tolerance: 0.005 });
+    rig.root.updateMatrixWorld(true);
+    const root = new T.Vector3(); chain[0].headJoint.getWorldPosition(root);
+    const tip = new T.Vector3(); chain[2].tailJoint.getWorldPosition(tip);
+    [tip.x, tip.y, tip.z].forEach(c => { if (!isFinite(c)) throw new Error('NaN in tip position'); });
+    const dir = target.clone().sub(root).normalize();
+    const v = tip.clone().sub(root);
+    const offRay = v.clone().sub(dir.clone().multiplyScalar(v.dot(dir))).length(); // perpendicular distance from the root->target ray
+    if (offRay > 0.05) throw new Error('tip is ' + offRay + ' off the root->target ray, chain did not straighten toward the target');
+    if (Math.abs(v.length() - 1.5) > 0.05) throw new Error('straightened chain length should be ~1.5 (full reach), got ' + v.length());
+  }, mkChain));
+
+  await step('C3 IK: per-bone rotation limits are respected inside the solve (clamped joint never exceeds max)', () => page.evaluate((mk) => {
+    const A = window.__A, T = window.THREE;
+    const { rig, chain } = eval(mk);
+    const lim = 0.2;
+    A.setBoneLimit(chain[1], 'x', -lim, lim);
+    A.setBoneLimit(chain[1], 'y', -lim, lim);
+    A.setBoneLimit(chain[1], 'z', -lim, lim);
+    A.solveIK(chain, new T.Vector3(0.7, 0.3, 0), 100, { tolerance: 0.005 }); // target needing sharp bends
+    const e = new T.Euler().setFromQuaternion(chain[1].bone.quaternion, 'XYZ');
+    ['x', 'y', 'z'].forEach(ax => {
+      if (Math.abs(e[ax]) > lim + 1e-4) throw new Error('limited joint exceeded its clamp on ' + ax + ': ' + e[ax] + ' rad (limit ±' + lim + ')');
+    });
+    // and FK drags go through the same clamp
+    A.applyAxisRotationStep(chain[1], 'z', 5);
+    const e2 = new T.Euler().setFromQuaternion(chain[1].bone.quaternion, 'XYZ');
+    if (Math.abs(e2.z) > lim + 1e-4) throw new Error('FK axis step escaped the limit: ' + e2.z);
+  }, mkChain));
+
+  await step('C3 IK: pole target flips the bend side of a 3-bone chain (mid-joint lands on the pole side)', () => page.evaluate((mk) => {
+    const A = window.__A, T = window.THREE;
+    const { rig, chain } = eval(mk);
+    const target = new T.Vector3(0.3, 1.0, 0); // closer than full reach -> chain must bend somewhere
+    const midZ = (pole) => {
+      A.resetAllPose(rig);
+      A.solveIK(chain, target, 80, { tolerance: 0.005, pole });
+      rig.root.updateMatrixWorld(true);
+      const root = new T.Vector3(); chain[0].headJoint.getWorldPosition(root);
+      const tip = new T.Vector3(); chain[2].tailJoint.getWorldPosition(tip);
+      const mid = new T.Vector3(); chain[1].headJoint.getWorldPosition(mid); // the chain's elbow joint
+      const axis = tip.clone().sub(root).normalize();
+      const v = mid.clone().sub(root);
+      return v.sub(axis.multiplyScalar(v.dot(axis))).z; // signed off-axis Z of the elbow
+    };
+    const zPlus = midZ(new T.Vector3(0, 0.5, 1));
+    const zMinus = midZ(new T.Vector3(0, 0.5, -1));
+    if (!(zPlus > 0.01)) throw new Error('with pole at +Z the elbow should sit on +Z, got off-axis z=' + zPlus);
+    if (!(zMinus < -0.01)) throw new Error('with pole at -Z the elbow should sit on -Z, got off-axis z=' + zMinus);
+  }, mkChain));
+
+  await step('C3 IK: interaction lifecycle — toggle arms target handle at the chain tip, chain length clamps 2-4, toggle-off clears', () => page.evaluate((mk) => {
+    const A = window.__A, T = window.THREE;
+    const { rig, chain } = eval(mk);
+    A.setArmMode('pose');
+    A.setIkChainLen(9); // must clamp to 4
+    if (A.Arm.ikChainLen !== 4) throw new Error('chain length did not clamp to 4, got ' + A.Arm.ikChainLen);
+    A.setIkChainLen(1); // must clamp to 2
+    if (A.Arm.ikChainLen !== 2) throw new Error('chain length did not clamp to 2, got ' + A.Arm.ikChainLen);
+    A.setIkChainLen(3);
+    A.setIkOn(true);
+    A.selectBone(rig, chain[2].id);
+    A.ikSelectTip(rig, chain[2].id);
+    if (!A.Arm.ikChainBoneIds || A.Arm.ikChainBoneIds.length !== 3) throw new Error('ikSelectTip did not build a 3-bone chain');
+    if (A.Arm.ikChainBoneIds[2] !== chain[2].id || A.Arm.ikChainBoneIds[0] !== chain[0].id) throw new Error('chain is not root->tip ordered from the tapped tip');
+    const h = A.ikHandles();
+    if (!h.target || !h.target.visible) throw new Error('IK target handle not visible after selecting a tip');
+    rig.root.updateMatrixWorld(true);
+    const tip = new T.Vector3(); chain[2].tailJoint.getWorldPosition(tip);
+    if (h.target.position.distanceTo(tip) > 1e-6) throw new Error('target handle did not spawn at the chain tip');
+    // live-drag path: move the target and run the solver like dragIkMove does
+    A.Arm.ikTargetPos.set(0.5, 1.0, 0.2);
+    A.runIkSolve();
+    rig.root.updateMatrixWorld(true);
+    const tip2 = new T.Vector3(); chain[2].tailJoint.getWorldPosition(tip2);
+    if (tip2.distanceTo(new T.Vector3(0.5, 1.0, 0.2)) > 0.05) throw new Error('runIkSolve did not pull the tip toward the dragged target');
+    const solvedQ = chain[1].bone.quaternion.clone();
+    A.setIkOn(false); // release-and-clear semantics
+    if (A.Arm.ikChainBoneIds !== null || A.Arm.ikTargetPos !== null) throw new Error('toggle-off did not clear the chain/target state');
+    if (A.ikHandles().target.visible) throw new Error('toggle-off did not hide the target handle');
+    if (Math.abs(Math.abs(solvedQ.dot(chain[1].bone.quaternion)) - 1) > 1e-9) throw new Error('toggle-off must NOT reset the solved pose');
+    A.setArmMode('edit');
+  }, mkChain));
+
+  await step('C3 IK: solved pose persists in bone quaternions and slerp-samples through Anim like any FK pose', () => page.evaluate((mk) => {
+    const A = window.__A, T = window.THREE;
+    A.Anim.tracks.length = 0;
+    const { rig, chain } = eval(mk);
+    A.solveIK(chain, new T.Vector3(0.6, 0.9, 0.3), 100, { tolerance: 0.005 });
+    const solved = chain[1].bone.quaternion.clone();
+    if (Math.abs(Math.abs(solved.dot(new T.Quaternion())) - 1) < 1e-6) throw new Error('solve left the mid bone at identity — nothing to key');
+    const tid = A.boneTargetId(rig.id, chain[1].name);
+    A.Anim.insertKey(tid, 'quaternion', 0);           // key the IK-solved pose
+    A.resetBonePose(chain[1]);
+    A.Anim.insertKey(tid, 'quaternion', 10);          // key identity
+    A.Anim.sample(0);
+    if (Math.abs(Math.abs(chain[1].bone.quaternion.dot(solved)) - 1) > 1e-4) throw new Error('sample(0) did not reproduce the keyed IK pose');
+    A.Anim.sample(5);
+    const mid = chain[1].bone.quaternion.clone();
+    const angTotal = 2 * Math.acos(Math.min(1, Math.abs(solved.dot(new T.Quaternion()))));
+    const angToStart = 2 * Math.acos(Math.min(1, Math.abs(mid.dot(solved))));
+    if (Math.abs(angToStart - angTotal / 2) > 0.05) throw new Error('midpoint sample is not the slerp halfway pose (angle to start ' + angToStart + ', total ' + angTotal + ')');
+  }, mkChain));
+
+  await step('C3: rotation limits serialize through the anim autosave round-trip (v3, graceful)', async () => {
+    await page.evaluate((mk) => {
+      const A = window.__A, T = window.THREE;
+      const { rig, chain } = eval(mk);
+      rig.name = 'LimitSaveRig';
+      A.Arm.rigId = rig.id;
+      A.setBoneLimit(chain[1], 'z', -0.3, 0.3);
+      A.doAnimAutosave();
+    }, mkChain);
+    const raw = await page.evaluate(() => localStorage.getItem(window.__A.ANIM_AUTOSAVE_KEY));
+    const saved = JSON.parse(raw);
+    if (saved.v !== 3) throw new Error('autosave should be format v3, got ' + saved.v);
+    const savedRig = saved.rigs.find(r => r.name === 'LimitSaveRig');
+    const savedBone = savedRig && savedRig.bones.find(b => b.limits);
+    if (!savedBone || !savedBone.limits.z) throw new Error('limits did not serialize into the autosave payload');
+    await page.reload({ waitUntil: 'load' });
+    await page.waitForFunction(() => window.__A && document.getElementById('boot').style.display === 'none', null, { timeout: 30000 });
+    const res = await page.evaluate(() => {
+      const A = window.__A, T = window.THREE;
+      const rig = Object.values(A.Rigs).find(r => r.name === 'LimitSaveRig');
+      if (!rig) return { found: false };
+      const be = rig.bones.find(b => b.name === 'C2');
+      if (!be || !be.limits || !be.limits.z) return { found: true, hasLimit: false };
+      // restored limits must still be functional: an over-limit pose gets clamped
+      be.bone.quaternion.setFromAxisAngle(new T.Vector3(0, 0, 1), 1.0);
+      A.clampBoneRotation(be);
+      const e = new T.Euler().setFromQuaternion(be.bone.quaternion, 'XYZ');
+      return { found: true, hasLimit: true, lim: be.limits.z, clampedZ: e.z };
+    });
+    if (!res.found) throw new Error('LimitSaveRig did not survive reload');
+    if (!res.hasLimit) throw new Error('restored bone lost its limits');
+    if (Math.abs(res.lim[0] - -0.3) > 1e-9 || Math.abs(res.lim[1] - 0.3) > 1e-9) throw new Error('restored limit values wrong: ' + JSON.stringify(res.lim));
+    if (Math.abs(res.clampedZ - 0.3) > 1e-6) throw new Error('restored limit is not enforced by clampBoneRotation, z=' + res.clampedZ);
     await page.evaluate(() => localStorage.removeItem(window.__A.ANIM_AUTOSAVE_KEY));
   });
 
