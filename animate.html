@@ -362,7 +362,7 @@ var AUTOSAVE_KEY='roxyAutosave'; // same key index.html autosaves the modeling p
 var state={models:[],activeId:null,selTarget:null};
 var idc=1;function uid(){return 'm'+(idc++);}
 var Registry={}; // targetId -> live THREE.Object3D, the whole animation system resolves against this
-function registerTarget(id,obj){Registry[id]=obj;obj.userData.targetId=id;}
+function registerTarget(id,obj){Registry[id]=obj;if(obj&&obj.userData)obj.userData.targetId=id;} // Wave C4: constraint objects are plain JS records with no userData — guard rather than crash
 function resolveTarget(id){return Registry[id];}
 
 function clearModels(){var h=poseScene.userData.modelHolder;while(h.children.length)h.remove(h.children[0]);
@@ -533,7 +533,7 @@ function addBoneWithId(rig,id,name,head,tail,parentId){
   var numId=+(''+id).replace(/\D/g,'');if(!isNaN(numId)&&numId>=boneIdc)boneIdc=numId+1;
   name=uniqueBoneName(rig,name||'Bone',null);
   var bone=new THREE.Bone();bone.name=name;
-  var be={id:id,name:name,head:head.clone(),tail:tail.clone(),parentId:parentId||null,bone:bone,rig:rig,limits:null};
+  var be={id:id,name:name,head:head.clone(),tail:tail.clone(),parentId:parentId||null,bone:bone,rig:rig,limits:null,constraints:[]};
   rig.bones.push(be);
   var parentObj=rig.root,parentHead=new THREE.Vector3(0,0,0);
   if(parentId){var pe=findBone(rig,parentId);if(pe){parentObj=pe.bone;parentHead=pe.head;}}
@@ -576,8 +576,13 @@ function deleteBoneAndDescendants(rig,boneId){
   var doomed=collectSubtree(rig,boneId),ids={};doomed.forEach(function(b){ids[b.id]=true;});
   doomed.forEach(function(b){
     var tid=boneTargetId(rig.id,b.name);delete Registry[tid];delete RigTargetIds[tid];
+    (b.constraints||[]).forEach(function(c){if(c.type!=='limitRot'){var cid=constraintTargetId(tid,c);
+      delete Registry[cid];delete RigTargetIds[cid];
+      Anim.tracks=Anim.tracks.filter(function(tr){return tr.targetId!==cid;});}});
     if(b.bone.parent)b.bone.parent.remove(b.bone);
-    Anim.tracks=Anim.tracks.filter(function(tr){return tr.targetId!==tid;});});
+    Anim.tracks=Anim.tracks.filter(function(tr){return tr.targetId!==tid;});
+    removeConstraintsTargeting(tid); // Wave C4: drop dangling references from OTHER bones/objects
+  });
   rig.bones=rig.bones.filter(function(b){return !ids[b.id];});
   if(Arm.selBoneId&&ids[Arm.selBoneId])Arm.selBoneId=null;
   syncSkeleton(rig);scheduleAnimAutosave();}
@@ -591,6 +596,12 @@ function renameBone(rig,boneId,newName){
   be.name=newName;be.bone.name=newName;
   registerRigTarget(newTid,be.bone);
   Anim.tracks.forEach(function(tr){if(tr.targetId===oldTid)tr.targetId=newTid;});
+  (be.constraints||[]).forEach(function(c){if(c.type!=='limitRot'){ // Wave C4: rekey this bone's own constraint-influence targets
+    var oldCid=oldTid+'/con:'+c.id,newCid=newTid+'/con:'+c.id;
+    if(Registry[oldCid]){delete Registry[oldCid];delete RigTargetIds[oldCid];}
+    registerRigTarget(newCid,c);
+    Anim.tracks.forEach(function(tr){if(tr.targetId===oldCid)tr.targetId=newCid;});}});
+  retargetConstraints(oldTid,newTid); // Wave C4: fix up any OTHER bone/object's constraint that targeted this bone
   if(state.selTarget===oldTid)state.selTarget=newTid;
   scheduleAnimAutosave();}
 
@@ -623,7 +634,8 @@ function selectBone(rig,boneId){
    arm the tool, then each viewport TAP extends the chain by one more bone. */
 var Arm={mode:'edit',rigId:null,selBoneId:null,chainActive:false,chainRigId:null,chainAnchor:null,chainLastBoneId:null,parentPickActive:false,
   axisMode:'free', // Wave C3: 'free' (trackball drag, C1 behavior) | 'x'|'y'|'z' (constrain FK drag to one local axis)
-  ikOn:false,ikChainLen:2,ikChainBoneIds:null,ikTargetPos:null,ikPoleOn:false,ikPolePos:null}; // Wave C3: IK toggle state
+  ikOn:false,ikChainLen:2,ikChainBoneIds:null,ikTargetPos:null,ikPoleOn:false,ikPolePos:null, // Wave C3: IK toggle state
+  addConType:null}; // Wave C4: transient — which constraint-type chip was tapped, showing the target picker now
 function setArmMode(mode){
   var rig=Rigs[Arm.rigId];
   if(mode==='edit'){Arm.chainActive=false;Arm.parentPickActive=false;
@@ -929,12 +941,246 @@ function dragIkMove(e){
   else{Arm.ikPolePos.add(delta);ikPoleMesh.position.copy(Arm.ikPolePos);}
   runIkSolve();invalidate();}
 
+/* ═══════════════════════════════════════════════════════
+   Wave C4 — Constraints (Copy Location, Copy Rotation, Track-To,
+   Limit Rotation) on bones AND scene objects.
+
+   Constraint = { id, type:'copyLoc'|'copyRot'|'trackTo'|'limitRot',
+                  targetId, influence:0..1, enabled:bool, params:{...} }
+   - Bones store their list at be.constraints (per-bone, mirroring the
+     be.limits precedent from C3). Scene objects (Registry entries that
+     are NOT bones — models/parts) store theirs at obj.userData.constraints,
+     evaluated too ("if cheap" per the brief) but NOT yet carried through
+     the anim autosave — models aren't serialized in this file at all
+     (they come fresh from the modeler bridge/demo figure each load), so
+     object-level constraints are runtime-only for now (documented
+     deviation). Bone constraints DO round-trip — see serializeRigs/
+     rebuildRigFromSerialized below, autosave v4.
+   - Evaluation order: applyConstraints(rig) walks that rig's bones
+     PARENT-BEFORE-CHILD (boneEvalOrder, a fresh BFS from the roots
+     rather than trusting rig.bones' creation-order array, which can go
+     stale after a re-parent) so a parent's constraints have already
+     settled by the time a child's run. Called once per rendered frame
+     from loop() (applyAllConstraints), AFTER Anim.sample and any live
+     FK/IK drag have written this frame's base pose, and BEFORE
+     renderer.render.
+   - 'limitRot' is a thin UI/serialization wrapper, NOT a second clamp
+     implementation: it just re-invokes C3's clampBoneRotation (which
+     reads be.limits) at its position in the constraint stack, so e.g. a
+     copyRot/trackTo constraint earlier in the list can be clamped by a
+     limitRot entry placed after it. Bone limits stay ALWAYS enforced at
+     every direct FK/IK call site regardless of whether a limitRot row
+     exists (unchanged C3 behavior) — the row only controls whether THIS
+     render pass also reclamps after other constraints have run.
+   - Cycle/self-target guard: wouldCreateCycle walks the live constraint
+     graph (constraintListFor) from the candidate target back toward the
+     constrained entity; addConstraint refuses with a toast rather than
+     crashing.
+   - Influence is keyframeable: each non-limitRot constraint gets its own
+     Registry entry at '<ownerTargetId>/con:<constraintId>' mapping
+     directly to the constraint object itself, so Anim.insertKey/
+     Anim.sample's existing dotted-path resolver can key 'influence' with
+     zero sampler changes (resolvePath just does obj['influence'] — the
+     constraint object needs no special-casing). Deviation from the
+     literal 'con:0' index example in the brief: we key by the
+     constraint's own stable id, not its array position, so deleting an
+     earlier constraint in the list never re-targets a surviving track at
+     the wrong entry.
+   ═══════════════════════════════════════════════════════ */
+var conIdc=1;
+var CONSTRAINT_LABELS={copyLoc:'Copy Location',copyRot:'Copy Rotation',trackTo:'Track To',limitRot:'Limit Rotation'};
+
+function findBoneByTargetId(targetId){
+  for(var rid in Rigs){var rig=Rigs[rid];
+    for(var i=0;i<rig.bones.length;i++)if(boneTargetId(rig.id,rig.bones[i].name)===targetId)return rig.bones[i];}
+  return null;}
+
+// Resolve the constraint list owned by ANY targetId — a bone (be.constraints) or a plain
+// scene object (obj.userData.constraints) — so the rest of this section (and the UI) never
+// needs to care which kind of thing it's looking at.
+function constraintListFor(targetId){
+  var be=findBoneByTargetId(targetId);
+  if(be){if(!be.constraints)be.constraints=[];return be.constraints;}
+  var obj=resolveTarget(targetId);
+  if(obj){if(!obj.userData.constraints)obj.userData.constraints=[];return obj.userData.constraints;}
+  return null;}
+
+function constraintTargetId(ownerTargetId,con){return ownerTargetId+'/con:'+con.id;}
+
+function wouldCreateCycle(fromId,toId){
+  if(fromId===toId)return true;
+  var visited={},stack=[toId];
+  while(stack.length){
+    var cur=stack.pop();
+    if(cur===fromId)return true;
+    if(visited[cur])continue;visited[cur]=true;
+    var list=constraintListFor(cur)||[];
+    list.forEach(function(c){if(c.targetId)stack.push(c.targetId);});}
+  return false;}
+
+function defaultConstraintParams(type){
+  if(type==='trackTo')return {axis:'auto',up:'y'}; // axis: 'auto'|'x'|'y'|'z' (aim), up: 'x'|'y'|'z' (roll reference)
+  return {};}
+
+function addConstraint(ownerTargetId,type,conTargetId){
+  var list=constraintListFor(ownerTargetId);
+  if(!list){toast('Unknown target');return null;}
+  if(type==='limitRot'){
+    if(list.some(function(c){return c.type==='limitRot';})){toast('Limit Rotation already added');return null;}
+    var lbe=findBoneByTargetId(ownerTargetId);
+    if(!lbe){toast('Limit Rotation only applies to bones');return null;}
+    if(!lbe.limits)lbe.limits={x:null,y:null,z:null};
+    var lc={id:'con'+(conIdc++),type:'limitRot',targetId:null,influence:1,enabled:true,params:{}};
+    list.push(lc);scheduleAnimAutosave();invalidate();return lc;}
+  if(!conTargetId){toast('Pick a target first');return null;}
+  if(conTargetId===ownerTargetId){toast('Cannot target self');return null;}
+  if(wouldCreateCycle(ownerTargetId,conTargetId)){toast('That would create a constraint cycle');return null;}
+  var c={id:'con'+(conIdc++),type:type,targetId:conTargetId,influence:1,enabled:true,params:defaultConstraintParams(type)};
+  list.push(c);
+  registerTarget(constraintTargetId(ownerTargetId,c),c);
+  if(RigTargetIds[ownerTargetId])RigTargetIds[constraintTargetId(ownerTargetId,c)]=true;
+  scheduleAnimAutosave();invalidate();return c;}
+
+function removeConstraint(ownerTargetId,conId){
+  var list=constraintListFor(ownerTargetId);if(!list)return;
+  var i=list.findIndex(function(c){return c.id===conId;});if(i<0)return;
+  var cid=constraintTargetId(ownerTargetId,list[i]);
+  delete Registry[cid];delete RigTargetIds[cid];
+  Anim.tracks=Anim.tracks.filter(function(tr){return tr.targetId!==cid;});
+  list.splice(i,1);
+  scheduleAnimAutosave();invalidate();}
+
+// Drop any constraint (on any bone/object) that targets `deadTid` — called when a bone is
+// deleted so other entries don't keep a dangling reference.
+function removeConstraintsTargeting(deadTid){
+  Object.keys(Rigs).forEach(function(rid){Rigs[rid].bones.forEach(function(be){
+    if(be.constraints)be.constraints=be.constraints.filter(function(c){return c.targetId!==deadTid;});});});
+  Object.keys(Registry).forEach(function(id){var o=Registry[id];
+    if(o&&o.userData&&o.userData.constraints)o.userData.constraints=o.userData.constraints.filter(function(c){return c.targetId!==deadTid;});});}
+
+// Re-point every constraint that targeted `oldTid` at `newTid` — called on bone rename.
+function retargetConstraints(oldTid,newTid){
+  Object.keys(Rigs).forEach(function(rid){Rigs[rid].bones.forEach(function(be){
+    (be.constraints||[]).forEach(function(c){if(c.targetId===oldTid)c.targetId=newTid;});});});
+  Object.keys(Registry).forEach(function(id){var o=Registry[id];
+    if(o&&o.userData&&o.userData.constraints)o.userData.constraints.forEach(function(c){if(c.targetId===oldTid)c.targetId=newTid;});});}
+
+// The "along the bone" axis for Track-To's 'auto' mode: bones are NOT rolled to align local
+// +Y with head->tail at rest (see the Armature section header), so this is a per-bone custom
+// direction, not a fixed unit axis — computed from the REST head/tail, which is constant
+// across pose changes (only be.bone.quaternion moves during posing).
+function trackToAimAxisLocal(be){
+  if(be){var d=be.tail.clone().sub(be.head);if(d.lengthSq()>1e-10)return d.normalize();}
+  return new THREE.Vector3(0,1,0);}
+function axisVecFromParam(a,fallback){
+  if(a==='x')return new THREE.Vector3(1,0,0);
+  if(a==='y')return new THREE.Vector3(0,1,0);
+  if(a==='z')return new THREE.Vector3(0,0,1);
+  return fallback||new THREE.Vector3(0,1,0);}
+
+// Best-effort roll correction: after the minimal aim-swing, rotate around the (now-aimed)
+// world axis so a reference local axis lines up with the requested world "up" direction — a
+// simplified stand-in for Blender's full Track-To roll resolution (documented C4 scope: aim
+// direction is exact, roll is an approximation).
+function applyRollToUp(worldQuat,aimAxisLocal,upWorld){
+  var ref=Math.abs(aimAxisLocal.y)>0.9?new THREE.Vector3(0,0,1):new THREE.Vector3(0,1,0);
+  var aimWorld=aimAxisLocal.clone().applyQuaternion(worldQuat).normalize();
+  var refWorld=ref.clone().applyQuaternion(worldQuat).normalize();
+  function projPerp(v){var d=v.clone().sub(aimWorld.clone().multiplyScalar(v.dot(aimWorld)));return d.lengthSq()>1e-8?d.normalize():null;}
+  var refP=projPerp(refWorld),upP=projPerp(upWorld);
+  if(!refP||!upP)return worldQuat;
+  var dot=clamp(refP.dot(upP),-1,1);
+  var cross=new THREE.Vector3().crossVectors(refP,upP);
+  var sign=cross.dot(aimWorld)>=0?1:-1,angle=sign*Math.acos(dot);
+  if(!isFinite(angle)||Math.abs(angle)<1e-6)return worldQuat;
+  var rollQ=new THREE.Quaternion().setFromAxisAngle(aimWorld,angle);
+  return rollQ.multiply(worldQuat);}
+
+// Apply one enabled constraint to `obj` (a THREE.Bone or a plain Object3D). `be` is the
+// owning bone record when obj is a bone (used for the trackTo 'auto' aim axis and the
+// limitRot clamp), null for scene objects.
+function applyOneConstraint(obj,c,be){
+  if(!c.enabled)return;
+  if(c.type==='limitRot'){if(be)clampBoneRotation(be);return;}
+  var target=resolveTarget(c.targetId);if(!target)return;
+  target.updateMatrixWorld(true);
+  var influence=clamp(c.influence==null?1:c.influence,0,1);
+  if(influence<=0)return;
+  if(c.type==='copyLoc'){
+    var curW=new THREE.Vector3();obj.getWorldPosition(curW);
+    var tgtW=new THREE.Vector3();target.getWorldPosition(tgtW);
+    var newW=curW.clone().lerp(tgtW,influence);
+    var localPos=obj.parent?obj.parent.worldToLocal(newW.clone()):newW.clone();
+    obj.position.copy(localPos);
+  }else if(c.type==='copyRot'){
+    var curQ=new THREE.Quaternion();obj.getWorldQuaternion(curQ);
+    var tgtQ=new THREE.Quaternion();target.getWorldQuaternion(tgtQ);
+    var newQ=curQ.clone().slerp(tgtQ,influence);
+    var parentQ=new THREE.Quaternion();if(obj.parent)obj.parent.getWorldQuaternion(parentQ);
+    obj.quaternion.copy(parentQ.clone().invert().multiply(newQ)).normalize();
+  }else if(c.type==='trackTo'){
+    var aimLocal=(c.params&&c.params.axis&&c.params.axis!=='auto')?axisVecFromParam(c.params.axis):trackToAimAxisLocal(be);
+    var upWorld=axisVecFromParam(c.params&&c.params.up,new THREE.Vector3(0,1,0));
+    var objW=new THREE.Vector3();obj.getWorldPosition(objW);
+    var tgtW2=new THREE.Vector3();target.getWorldPosition(tgtW2);
+    var dir=tgtW2.clone().sub(objW);if(dir.lengthSq()<1e-10)return;dir.normalize();
+    var curQ2=new THREE.Quaternion();obj.getWorldQuaternion(curQ2);
+    var curAimWorld=aimLocal.clone().applyQuaternion(curQ2).normalize();
+    var swingQ=new THREE.Quaternion().setFromUnitVectors(curAimWorld,dir);
+    var fullQ=swingQ.multiply(curQ2.clone());
+    fullQ=applyRollToUp(fullQ,aimLocal,upWorld);
+    var blendedQ=curQ2.clone().slerp(fullQ,influence);
+    var parentQ2=new THREE.Quaternion();if(obj.parent)obj.parent.getWorldQuaternion(parentQ2);
+    obj.quaternion.copy(parentQ2.clone().invert().multiply(blendedQ)).normalize();
+  }
+  obj.updateMatrixWorld(true);}
+
+// Parent-before-child bone evaluation order for a rig — a fresh BFS from the roots rather
+// than trusting rig.bones' creation-order array (which can go stale after Set Parent).
+function boneEvalOrder(rig){
+  var childrenOf={};
+  rig.bones.forEach(function(b){var k=b.parentId||'__root__';(childrenOf[k]=childrenOf[k]||[]).push(b);});
+  var order=[],queue=(childrenOf['__root__']||[]).slice();
+  while(queue.length){var b=queue.shift();order.push(b);(childrenOf[b.id]||[]).forEach(function(c){queue.push(c);});}
+  return order;}
+
+// The Wave C4 entry point named in the brief: evaluate one rig's bone constraints, parent
+// bones settled before children.
+function applyConstraints(rig){
+  if(!rig)return;
+  rig.root.updateMatrixWorld(true);
+  boneEvalOrder(rig).forEach(function(be){
+    if(!be.constraints||!be.constraints.length)return;
+    be.bone.updateMatrixWorld(true);
+    be.constraints.forEach(function(c){applyOneConstraint(be.bone,c,be);});});
+  rig.root.updateMatrixWorld(true);}
+
+function objDepth(o){var d=0;while(o&&o.parent){d++;o=o.parent;}return d;}
+// Scene-object constraints (Registry entries that are not rig-owned) — "if cheap" per the
+// brief: evaluated every frame like bone constraints, but NOT yet serialized (see file
+// header note above — models aren't carried by this file's autosave at all).
+function applyObjectConstraints(){
+  var ids=Object.keys(Registry).filter(function(id){
+    if(RigTargetIds[id]||id.indexOf('/con:')>=0)return false;
+    var o=Registry[id];return o&&o.userData&&o.userData.constraints&&o.userData.constraints.length;});
+  ids.sort(function(a,b){return objDepth(Registry[a])-objDepth(Registry[b]);}); // parents before children
+  ids.forEach(function(id){var obj=Registry[id];obj.updateMatrixWorld(true);
+    obj.userData.constraints.forEach(function(c){applyOneConstraint(obj,c,null);});});}
+
+// Render-path entry point: every rig's bone constraints, then every plain object's — called
+// once per rendered frame from loop(), after Anim.sample/live FK-IK drag, before render.
+function applyAllConstraints(){
+  Object.keys(Rigs).forEach(function(rid){applyConstraints(Rigs[rid]);});
+  applyObjectConstraints();}
+
 /* ---------------- serialize / restore (rides in the anim autosave — see doAnimAutosave) ---------------- */
 function serializeRigs(){return Object.keys(Rigs).map(function(rid){var rig=Rigs[rid];
   return {id:rig.id,name:rig.name,bones:rig.bones.map(function(b){
     var bd={id:b.id,name:b.name,parentId:b.parentId,head:[b.head.x,b.head.y,b.head.z],tail:[b.tail.x,b.tail.y,b.tail.z],
       quat:[b.bone.quaternion.x,b.bone.quaternion.y,b.bone.quaternion.z,b.bone.quaternion.w]};
     if(b.limits&&(b.limits.x||b.limits.y||b.limits.z))bd.limits=b.limits; // v3 (Wave C3): rotation limits, omitted when fully unlimited
+    if(b.constraints&&b.constraints.length)bd.constraints=b.constraints.map(function(c){ // v4 (Wave C4)
+      return {id:c.id,type:c.type,targetId:c.targetId,influence:c.influence,enabled:c.enabled,params:c.params};});
     return bd;})};});}
 function rebuildRigFromSerialized(rd){
   var rig=newRigWithId(rd.id,rd.name),list=rd.bones||[];
@@ -944,7 +1190,14 @@ function rebuildRigFromSerialized(rd){
     if(bd.parentId)setBoneParent(rig,bd.id,bd.parentId);
     var be=findBone(rig,bd.id);if(!be)return;
     if(bd.limits)be.limits={x:bd.limits.x||null,y:bd.limits.y||null,z:bd.limits.z||null};
-    if(bd.quat)be.bone.quaternion.set(bd.quat[0],bd.quat[1],bd.quat[2],bd.quat[3]);});
+    if(bd.quat)be.bone.quaternion.set(bd.quat[0],bd.quat[1],bd.quat[2],bd.quat[3]);
+    if(bd.constraints&&bd.constraints.length){ // v4 (Wave C4): v2/v3 saves simply lack the field -> stays the default []
+      be.constraints=bd.constraints.map(function(cd){return {id:cd.id,type:cd.type,targetId:cd.targetId,
+        influence:cd.influence!=null?cd.influence:1,enabled:cd.enabled!==false,params:cd.params||{}};});
+      var maxCid=0;be.constraints.forEach(function(c){var n=+(''+c.id).replace(/\D/g,'');if(n>maxCid)maxCid=n;});
+      if(maxCid>=conIdc)conIdc=maxCid+1;
+      be.constraints.forEach(function(c){if(c.type!=='limitRot')registerRigTarget(constraintTargetId(boneTargetId(rig.id,be.name),c),c);});
+    }});
   syncSkeleton(rig);return rig;}
 
 /* ═══════════════════════════════════════════════════════
@@ -1035,8 +1288,11 @@ function scheduleAnimAutosave(){clearTimeout(animAutosaveTimer);animAutosaveTime
 // v3 (Wave C3): bones may carry a `limits` field (per-axis rotation clamps). v2 saves load
 // unchanged (missing field -> unlimited), and a v3 save read by v2 code simply ignores it —
 // the bump is additive, no migration needed.
+// v4 (Wave C4): bones may carry a `constraints` field (copyLoc/copyRot/trackTo/limitRot list).
+// v2/v3 saves load unchanged (missing field -> empty constraints array). Scene-object
+// constraints are intentionally NOT part of this payload — see the C4 section header above.
 function doAnimAutosave(){try{localStorage.setItem(ANIM_AUTOSAVE_KEY,JSON.stringify(
-  {v:3,fps:Anim.fps,start:Anim.start,end:Anim.end,tracks:Anim.tracks,rigs:serializeRigs()}));}catch(e){}}
+  {v:4,fps:Anim.fps,start:Anim.start,end:Anim.end,tracks:Anim.tracks,rigs:serializeRigs()}));}catch(e){}}
 function tryRestoreAnimAutosave(){
   var raw;try{raw=localStorage.getItem(ANIM_AUTOSAVE_KEY);}catch(e){return false;}
   if(!raw)return false;
@@ -1094,13 +1350,14 @@ function renderPanel(){var b=$('#panelBody');b.innerHTML='';var v=active.view;
 
 function targetSelect(onchange){
   var sel=el('select',{onchange:function(e){state.selTarget=e.target.value;onchange&&onchange(e.target.value);}});
-  Object.keys(Registry).forEach(function(id){sel.appendChild(el('option',{value:id,text:id}));});
+  Object.keys(Registry).filter(function(id){return id.indexOf('/con:')<0;}) // Wave C4: hide constraint-influence pseudo-targets from the general picker
+    .forEach(function(id){sel.appendChild(el('option',{value:id,text:id}));});
   if(state.selTarget)sel.value=state.selTarget;
   return sel;}
 
 function panelPose(b){
   b.appendChild(el('h2',{text:'Pose'}));
-  b.appendChild(el('p',{class:'sub',text:'Build an armature in Edit Bones, then switch to Pose to rotate bones (FK drag, exact degrees, or IK targets). Skin binding (C2) and constraints (C4) land in later waves.'}));
+  b.appendChild(el('p',{class:'sub',text:'Build an armature in Edit Bones, then switch to Pose to rotate bones (FK drag, exact degrees, or IK targets). Add Copy Location/Rotation, Track-To and Limit Rotation constraints from the Constraints section below. Skin binding (C2) lands in a later wave.'}));
   if(state.usingDemo)b.appendChild(el('div',{class:'card small',style:'margin-bottom:10px'},
     ['No modeling-suite autosave was found, so a demo figure is loaded. Build/save a project in the Modeler, or Import a project.json above, then reload this page.']));
 
@@ -1134,6 +1391,7 @@ function panelPose(b){
     b.appendChild(slider('Pos Y',-4,4,obj.position.y,.01,function(v){obj.position.y=v;}));
     b.appendChild(slider('Pos Z',-4,4,obj.position.z,.01,function(v){obj.position.z=v;}));
     b.appendChild(slider('Rot Y',-3.14,3.14,obj.rotation.y,.01,function(v){obj.rotation.y=v;}));
+    if(!RigTargetIds[state.selTarget])renderConstraintsSection(b,state.selTarget,null); // bones already get this in panelArmPose above
   }else{
     b.appendChild(el('p',{class:'small muted',text:'No targets registered yet.'}));
   }}
@@ -1185,6 +1443,79 @@ function limitBtn(be,axis){
     var mn=Math.min(parts[0],parts[1])*Math.PI/180,mx=Math.max(parts[0],parts[1])*Math.PI/180;
     setBoneLimit(be,axis,mn,mx);toast('Limit '+axis.toUpperCase()+' set');renderPanel();}});}
 
+/* ---------------- Wave C4: Constraints UI (shared by the bone Pose panel and the generic
+   "any registered object" Target section — mobile-first: tap a type chip, then pick a target
+   from a select (or a future viewport tap — see file header deviation note), tap Add/Cancel. */
+function constraintRow(ownerTargetId,con,be){
+  var card=el('div',{class:'card small',style:'margin-bottom:6px'});
+  var top=el('div',{style:'display:flex;align-items:center;gap:6px;margin-bottom:6px'});
+  top.appendChild(el('span',{style:'font-weight:600',text:CONSTRAINT_LABELS[con.type]||con.type}));
+  top.appendChild(el('span',{class:'muted small',style:'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap',
+    text:con.type==='limitRot'?'(bone limits)':(con.targetId||'no target')}));
+  top.appendChild(el('button',{class:con.enabled?'on':'',style:'padding:6px 9px',text:con.enabled?'On':'Off',
+    onclick:function(){con.enabled=!con.enabled;scheduleAnimAutosave();invalidate();renderPanel();}}));
+  top.appendChild(el('button',{style:'padding:6px 9px',text:'✕',onclick:function(){
+    removeConstraint(ownerTargetId,con.id);renderPanel();invalidate();}}));
+  card.appendChild(top);
+  if(con.type!=='limitRot'){
+    card.appendChild(slider('Influence',0,1,con.influence,.01,function(v){con.influence=v;scheduleAnimAutosave();invalidate();}));
+    card.appendChild(el('button',{style:'width:100%;margin-top:4px',text:'Key Influence',onclick:function(){
+      var cid=constraintTargetId(ownerTargetId,con);
+      if(!Registry[cid])registerTarget(cid,con);
+      Anim.insertKey(cid,'influence',Anim.time);toast('Keyed influence @ t='+Anim.time);}}));
+  }
+  if(con.type==='trackTo'){
+    card.appendChild(el('div',{class:'small muted',style:'margin-top:4px',text:'Aim axis'}));
+    var axRow=el('div',{style:'display:flex;gap:4px'});
+    [['auto','Auto'],['x','X'],['y','Y'],['z','Z']].forEach(function(a){
+      axRow.appendChild(el('button',{class:(con.params.axis||'auto')===a[0]?'on':'',style:'flex:1;padding:5px',text:a[1],
+        onclick:function(){con.params.axis=a[0];scheduleAnimAutosave();invalidate();renderPanel();}}));});
+    card.appendChild(axRow);
+    card.appendChild(el('div',{class:'small muted',style:'margin-top:4px',text:'Up axis'}));
+    var upRow=el('div',{style:'display:flex;gap:4px'});
+    [['x','X'],['y','Y'],['z','Z']].forEach(function(a){
+      upRow.appendChild(el('button',{class:(con.params.up||'y')===a[0]?'on':'',style:'flex:1;padding:5px',text:a[1],
+        onclick:function(){con.params.up=a[0];scheduleAnimAutosave();invalidate();renderPanel();}}));});
+    card.appendChild(upRow);
+  }
+  return card;}
+
+// Constraints section, shared by the bone Pose panel (be present, offers Limit Rotation) and
+// the generic Target section (be null, copyLoc/copyRot/trackTo only — see panelPose).
+function renderConstraintsSection(b,ownerTargetId,be){
+  var list=constraintListFor(ownerTargetId)||[];
+  b.appendChild(el('div',{class:'section-title',text:'Constraints ('+list.length+')'}));
+  list.forEach(function(con){b.appendChild(constraintRow(ownerTargetId,con,be));});
+  if(Arm.addConType){
+    var pick=el('div',{class:'card small',style:'margin-bottom:6px'});
+    pick.appendChild(el('div',{class:'small muted',style:'margin-bottom:6px',text:'Target for '+CONSTRAINT_LABELS[Arm.addConType]+':'}));
+    var opts=Object.keys(Registry).filter(function(id){return id!==ownerTargetId&&id.indexOf('/con:')<0;});
+    if(!opts.length){pick.appendChild(el('p',{class:'small muted',text:'No other targets registered yet.'}));}
+    else{
+      var sel=el('select',{});
+      opts.forEach(function(id){sel.appendChild(el('option',{value:id,text:id}));});
+      pick.appendChild(sel);
+      var row=el('div',{class:'grid2',style:'margin-top:6px'});
+      row.appendChild(el('button',{class:'pri',text:'Add',onclick:function(){
+        var t=Arm.addConType;Arm.addConType=null;
+        var c=addConstraint(ownerTargetId,t,sel.value);
+        if(c)toast('Added '+CONSTRAINT_LABELS[c.type]);
+        renderPanel();invalidate();}}));
+      row.appendChild(el('button',{text:'Cancel',onclick:function(){Arm.addConType=null;renderPanel();}}));
+      pick.appendChild(row);
+    }
+    b.appendChild(pick);
+  }else{
+    b.appendChild(el('div',{class:'small muted',style:'margin:2px 0 6px',text:'+ Add Constraint'}));
+    var chipRow=el('div',{style:'display:flex;flex-wrap:wrap;gap:6px'});
+    var types=[['copyLoc','Copy Loc'],['copyRot','Copy Rot'],['trackTo','Track To']];
+    if(be)types.push(['limitRot','Limit Rot']);
+    types.forEach(function(t){chipRow.appendChild(el('button',{style:'flex:1 1 30%',text:t[1],onclick:function(){
+      if(t[0]==='limitRot'){var c=addConstraint(ownerTargetId,'limitRot',null);if(c)toast('Added Limit Rotation');renderPanel();return;}
+      Arm.addConType=t[0];renderPanel();}}));});
+    b.appendChild(chipRow);
+  }}
+
 function panelArmPose(b,rig){
   b.appendChild(el('div',{class:'section-title',text:'Pose'}));
   var be=Arm.selBoneId?findBone(rig,Arm.selBoneId):null;
@@ -1232,11 +1563,13 @@ function panelArmPose(b,rig){
       'Tap a bone in the viewport to set the chain tip.')}));
   }
 
-  // Rotation limits (also enforced inside IK; C4 Limit Rotation groundwork)
+  // Rotation limits (also enforced inside IK; backing data for the Limit Rotation constraint row below)
   b.appendChild(el('div',{class:'section-title',text:'Rotation Limits (tap to set min,max °)'}));
   var limRow=el('div',{style:'display:flex;gap:6px'});
   ['x','y','z'].forEach(function(ax){var w=el('div',{style:'flex:1'});w.appendChild(limitBtn(be,ax));limRow.appendChild(w);});
-  b.appendChild(limRow);}
+  b.appendChild(limRow);
+
+  renderConstraintsSection(b,boneTargetId(rig.id,be.name),be);}
 
 function panelTimeline(b){
   b.appendChild(el('h2',{text:'Timeline'}));
@@ -1331,7 +1664,7 @@ window.addEventListener('resize',resizeActive);
 /* ---------------- main loop ---------------- */
 function loop(){requestAnimationFrame(loop);stepPlayback(performance.now());updateCam();
   var slot=curSlot();var act=ptrs.size>0;
-  if((renderFrames>0||act)&&slot&&slot.contains(dom))renderer.render(poseScene,vs.cam);
+  if((renderFrames>0||act)&&slot&&slot.contains(dom)){applyAllConstraints();renderer.render(poseScene,vs.cam);} // Wave C4: constraints settle right before render
   if(renderFrames>0&&!act)renderFrames--;
   if(RotBall.el&&RotBall.el.style.display!=='none')RotBall.draw();}
 

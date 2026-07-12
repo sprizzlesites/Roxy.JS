@@ -1,6 +1,7 @@
 // Headless verification of Roxy Animate (animate.html): boot, theme chrome, model bridge,
 // Track/keyframe core (insertKey/sample), playback, scrub bar, anim autosave, mobile chrome,
-// armatures (C1), FK axis constraints + rotation limits + CCD IK + pole targets (C3).
+// armatures (C1), FK axis constraints + rotation limits + CCD IK + pole targets (C3),
+// Copy Location/Rotation + Track-To + Limit Rotation constraints on bones and objects (C4).
 // Modeled on tests/verify.js's harness pattern — separate suite, does not touch index.html.
 const { chromium } = require('playwright-core');
 const http = require('http');
@@ -26,7 +27,11 @@ window.__A={Anim:Anim,Registry:Registry,resolvePath:resolvePath,setView:setView,
   setIkPoleOn:setIkPoleOn,setIkChainLen:setIkChainLen,runIkSolve:runIkSolve,clampBoneRotation:clampBoneRotation,
   setBoneLimit:setBoneLimit,applyAxisRotationStep:applyAxisRotationStep,setBoneEulerAxisDeg:setBoneEulerAxisDeg,
   boneEulerDeg:boneEulerDeg,renderPanel:renderPanel,
-  ikHandles:function(){return {target:ikTargetMesh,pole:ikPoleMesh};}};
+  ikHandles:function(){return {target:ikTargetMesh,pole:ikPoleMesh};},
+  applyConstraints:applyConstraints,applyAllConstraints:applyAllConstraints,applyObjectConstraints:applyObjectConstraints,
+  addConstraint:addConstraint,removeConstraint:removeConstraint,constraintListFor:constraintListFor,
+  constraintTargetId:constraintTargetId,wouldCreateCycle:wouldCreateCycle,findBoneByTargetId:findBoneByTargetId,
+  CONSTRAINT_LABELS:CONSTRAINT_LABELS};
 `;
 
 const server = http.createServer((req, res) => {
@@ -638,7 +643,7 @@ function syntheticProject() {
     if (Math.abs(angToStart - angTotal / 2) > 0.05) throw new Error('midpoint sample is not the slerp halfway pose (angle to start ' + angToStart + ', total ' + angTotal + ')');
   }, mkChain));
 
-  await step('C3: rotation limits serialize through the anim autosave round-trip (v3, graceful)', async () => {
+  await step('C3: rotation limits serialize through the anim autosave round-trip (current format, graceful)', async () => {
     await page.evaluate((mk) => {
       const A = window.__A, T = window.THREE;
       const { rig, chain } = eval(mk);
@@ -649,7 +654,7 @@ function syntheticProject() {
     }, mkChain);
     const raw = await page.evaluate(() => localStorage.getItem(window.__A.ANIM_AUTOSAVE_KEY));
     const saved = JSON.parse(raw);
-    if (saved.v !== 3) throw new Error('autosave should be format v3, got ' + saved.v);
+    if (saved.v !== 4) throw new Error('autosave should be format v4 (bumped by Wave C4), got ' + saved.v); // was v3 as of Wave C3; C4 bumped it additively
     const savedRig = saved.rigs.find(r => r.name === 'LimitSaveRig');
     const savedBone = savedRig && savedRig.bones.find(b => b.limits);
     if (!savedBone || !savedBone.limits.z) throw new Error('limits did not serialize into the autosave payload');
@@ -673,6 +678,210 @@ function syntheticProject() {
     if (Math.abs(res.clampedZ - 0.3) > 1e-6) throw new Error('restored limit is not enforced by clampBoneRotation, z=' + res.clampedZ);
     await page.evaluate(() => localStorage.removeItem(window.__A.ANIM_AUTOSAVE_KEY));
   });
+
+  // ==== Wave C4: Constraints (Copy Location, Copy Rotation, Track-To, Limit Rotation) ====
+
+  await step('C4 copyLoc: pins a bone world position to a moving target (influence 1)', () => page.evaluate(() => {
+    const A = window.__A, T = window.THREE;
+    const rig = A.newRig('C4CopyLocRig');
+    const tgt = A.addBone(rig, 'C4Target', new T.Vector3(0, 0, 0), new T.Vector3(0, .5, 0), null);
+    const src = A.addBone(rig, 'C4Src', new T.Vector3(2, 0, 0), new T.Vector3(2, .5, 0), null);
+    const tgtTid = A.boneTargetId(rig.id, tgt.name), srcTid = A.boneTargetId(rig.id, src.name);
+    const con = A.addConstraint(srcTid, 'copyLoc', tgtTid);
+    if (!con) throw new Error('addConstraint returned null');
+    // move the target
+    tgt.head.set(1.3, 2.1, -0.4); tgt.tail.set(1.3, 2.6, -0.4); A.applyBoneEdit(tgt);
+    A.applyConstraints(rig);
+    rig.root.updateMatrixWorld(true);
+    const w = new T.Vector3(); src.bone.getWorldPosition(w);
+    if (w.distanceTo(new T.Vector3(1.3, 2.1, -0.4)) > 1e-4) throw new Error('copyLoc did not pin world position, got ' + JSON.stringify(w));
+  }));
+
+  await step('C4 copyRot: influence 0.5 blends halfway between current and target world rotation', () => page.evaluate(() => {
+    const A = window.__A, T = window.THREE;
+    const rig = A.newRig('C4CopyRotRig');
+    const tgt = A.addBone(rig, 'RotTarget', new T.Vector3(0, 0, 0), new T.Vector3(0, .5, 0), null);
+    const src = A.addBone(rig, 'RotSrc', new T.Vector3(1, 0, 0), new T.Vector3(1, .5, 0), null);
+    tgt.bone.quaternion.setFromAxisAngle(new T.Vector3(0, 1, 0), Math.PI / 2);
+    src.bone.quaternion.identity();
+    const tgtTid = A.boneTargetId(rig.id, tgt.name), srcTid = A.boneTargetId(rig.id, src.name);
+    const con = A.addConstraint(srcTid, 'copyRot', tgtTid);
+    con.influence = 0.5;
+    A.applyConstraints(rig);
+    rig.root.updateMatrixWorld(true);
+    const wq = new T.Quaternion(); src.bone.getWorldQuaternion(wq);
+    const startQ = new T.Quaternion(), endQ = new T.Quaternion().setFromAxisAngle(new T.Vector3(0, 1, 0), Math.PI / 2);
+    const angToStart = 2 * Math.acos(Math.min(1, Math.abs(wq.dot(startQ))));
+    const angToEnd = 2 * Math.acos(Math.min(1, Math.abs(wq.dot(endQ))));
+    if (Math.abs(angToStart - Math.PI / 4) > 0.05) throw new Error('halfway copyRot off from start, expected ~45deg, got ' + (angToStart * 180 / Math.PI));
+    if (Math.abs(angToEnd - Math.PI / 4) > 0.05) throw new Error('halfway copyRot off from end, expected ~45deg, got ' + (angToEnd * 180 / Math.PI));
+  }));
+
+  await step('C4 trackTo: aims the bone axis at the target within tolerance', () => page.evaluate(() => {
+    const A = window.__A, T = window.THREE;
+    const rig = A.newRig('C4TrackRig');
+    const src = A.addBone(rig, 'TrackSrc', new T.Vector3(0, 0, 0), new T.Vector3(0, 1, 0), null); // along-bone axis = +Y at rest
+    const tgtObj = new T.Object3D(); tgtObj.position.set(3, 1, 0);
+    A.registerTarget('C4TrackTargetObj', tgtObj); // ad-hoc plain-object target, not rig-owned
+    const srcTid = A.boneTargetId(rig.id, src.name);
+    A.addConstraint(srcTid, 'trackTo', 'C4TrackTargetObj');
+    A.applyConstraints(rig);
+    rig.root.updateMatrixWorld(true);
+    const worldQ = new T.Quaternion(); src.bone.getWorldQuaternion(worldQ);
+    const aimWorld = new T.Vector3(0, 1, 0).applyQuaternion(worldQ).normalize();
+    const srcWorld = new T.Vector3(); src.bone.getWorldPosition(srcWorld);
+    const desired = tgtObj.position.clone().sub(srcWorld).normalize();
+    const ang = Math.acos(Math.min(1, Math.max(-1, aimWorld.dot(desired))));
+    if (ang > 0.02) throw new Error('trackTo aim off by ' + (ang * 180 / Math.PI) + ' degrees');
+  }));
+
+  await step('C4 limitRot: constraint row clamps identically to C3 direct limits, and toggling it off skips the render-pass reclamp', () => page.evaluate(() => {
+    const A = window.__A, T = window.THREE;
+    const rig = A.newRig('C4LimitRig');
+    const be = A.addBone(rig, 'LimitBone', new T.Vector3(0, 0, 0), new T.Vector3(0, 1, 0), null);
+    A.setBoneLimit(be, 'z', -0.2, 0.2);
+    const tid = A.boneTargetId(rig.id, be.name);
+    const con = A.addConstraint(tid, 'limitRot', null);
+    if (!con || con.type !== 'limitRot') throw new Error('limitRot constraint not added');
+    be.bone.quaternion.setFromAxisAngle(new T.Vector3(0, 0, 1), 1.0); // well past the limit
+    A.applyConstraints(rig);
+    const e = new T.Euler().setFromQuaternion(be.bone.quaternion, 'XYZ');
+    if (Math.abs(e.z - 0.2) > 1e-6) throw new Error('limitRot constraint row did not clamp to 0.2, got ' + e.z);
+    con.enabled = false;
+    be.bone.quaternion.setFromAxisAngle(new T.Vector3(0, 0, 1), 1.0);
+    A.applyConstraints(rig);
+    const e2 = new T.Euler().setFromQuaternion(be.bone.quaternion, 'XYZ');
+    if (Math.abs(e2.z - 1.0) > 1e-6) throw new Error('disabling the limitRot row should skip the render-pass reclamp, got z=' + e2.z);
+  }));
+
+  await step('C4: constraint cycle A->B->A is refused with no crash (self-targeting refused too)', () => page.evaluate(() => {
+    const A = window.__A, T = window.THREE;
+    const rig = A.newRig('C4CycleRig');
+    const a = A.addBone(rig, 'CycA', new T.Vector3(0, 0, 0), new T.Vector3(0, 1, 0), null);
+    const b = A.addBone(rig, 'CycB', new T.Vector3(1, 0, 0), new T.Vector3(1, 1, 0), null);
+    const aTid = A.boneTargetId(rig.id, a.name), bTid = A.boneTargetId(rig.id, b.name);
+    const c1 = A.addConstraint(aTid, 'copyLoc', bTid);
+    if (!c1) throw new Error('A->B copyLoc should be allowed');
+    const c2 = A.addConstraint(bTid, 'copyLoc', aTid); // would close the cycle
+    if (c2) throw new Error('B->A should have been refused as a cycle');
+    if (A.constraintListFor(bTid).length !== 0) throw new Error('cycle-refused constraint should not have been added to B');
+    const c3 = A.addConstraint(aTid, 'copyRot', aTid);
+    if (c3) throw new Error('self-targeting should be refused');
+    A.applyConstraints(rig); // must not throw / hang
+  }));
+
+  await step('C4: constraint influence is keyframeable through Anim (Registry con: path)', () => page.evaluate(() => {
+    const A = window.__A, T = window.THREE;
+    A.Anim.tracks.length = 0;
+    const rig = A.newRig('C4InfluenceRig');
+    const tgt = A.addBone(rig, 'InfTarget', new T.Vector3(2, 0, 0), new T.Vector3(2, 1, 0), null);
+    const src = A.addBone(rig, 'InfSrc', new T.Vector3(0, 0, 0), new T.Vector3(0, 1, 0), null);
+    const tgtTid = A.boneTargetId(rig.id, tgt.name), srcTid = A.boneTargetId(rig.id, src.name);
+    const con = A.addConstraint(srcTid, 'copyLoc', tgtTid);
+    const conTid = A.constraintTargetId(srcTid, con);
+    if (!A.Registry[conTid]) throw new Error('constraint influence target not registered');
+    con.influence = 0; A.Anim.insertKey(conTid, 'influence', 0);
+    con.influence = 1; A.Anim.insertKey(conTid, 'influence', 10);
+    A.Anim.sample(5);
+    if (Math.abs(con.influence - 0.5) > 1e-6) throw new Error('sampled influence at midpoint expected 0.5, got ' + con.influence);
+    A.applyConstraints(rig);
+    rig.root.updateMatrixWorld(true);
+    const w = new T.Vector3(); src.bone.getWorldPosition(w);
+    if (Math.abs(w.x - 1.0) > 1e-3) throw new Error('halfway-influence copyLoc did not blend position, got x=' + w.x);
+  }));
+
+  await step('C4: constraints round-trip the anim autosave (v4) and old v3 saves still load fine', async () => {
+    await page.evaluate(() => {
+      const A = window.__A, T = window.THREE;
+      A.Anim.tracks.length = 0;
+      const rig = A.newRig('C4SaveRig');
+      A.Arm.rigId = rig.id;
+      const tgt = A.addBone(rig, 'SaveTarget', new T.Vector3(1, 0, 0), new T.Vector3(1, 1, 0), null);
+      const src = A.addBone(rig, 'SaveSrc', new T.Vector3(0, 0, 0), new T.Vector3(0, 1, 0), null);
+      const tgtTid = A.boneTargetId(rig.id, tgt.name), srcTid = A.boneTargetId(rig.id, src.name);
+      A.addConstraint(srcTid, 'copyRot', tgtTid);
+      A.addConstraint(srcTid, 'limitRot', null);
+      A.doAnimAutosave();
+    });
+    const raw = await page.evaluate(() => localStorage.getItem(window.__A.ANIM_AUTOSAVE_KEY));
+    const saved = JSON.parse(raw);
+    if (saved.v !== 4) throw new Error('autosave should be format v4, got ' + saved.v);
+    const savedRig = saved.rigs.find(r => r.name === 'C4SaveRig');
+    const savedSrc = savedRig && savedRig.bones.find(b => b.name === 'SaveSrc');
+    if (!savedSrc || !savedSrc.constraints || savedSrc.constraints.length !== 2) throw new Error('constraints did not serialize: ' + JSON.stringify(savedSrc));
+    await page.reload({ waitUntil: 'load' });
+    await page.waitForFunction(() => window.__A && document.getElementById('boot').style.display === 'none', null, { timeout: 30000 });
+    const res = await page.evaluate(() => {
+      const A = window.__A;
+      const rig = Object.values(A.Rigs).find(r => r.name === 'C4SaveRig');
+      if (!rig) return { found: false };
+      const src = rig.bones.find(b => b.name === 'SaveSrc');
+      return { found: true, count: (src && src.constraints ? src.constraints.length : -1),
+        types: src && src.constraints ? src.constraints.map(c => c.type).sort() : [] };
+    });
+    if (!res.found) throw new Error('C4SaveRig did not survive reload');
+    if (res.count !== 2) throw new Error('expected 2 restored constraints, got ' + res.count);
+    if (res.types.join(',') !== 'copyRot,limitRot') throw new Error('restored constraint types wrong: ' + res.types.join(','));
+    await page.evaluate(() => localStorage.removeItem(window.__A.ANIM_AUTOSAVE_KEY));
+
+    // v3 (pre-C4) save still loads fine (no `constraints` field on bones at all)
+    await page.evaluate(() => {
+      const v3 = { v: 3, fps: 24, start: 0, end: 96, tracks: [], rigs: [
+        { id: 'rigv3', name: 'V3Rig', bones: [
+          { id: 'bv3', name: 'V3Bone', parentId: null, head: [0, 0, 0], tail: [0, 1, 0], quat: [0, 0, 0, 1] }
+        ] }
+      ] };
+      localStorage.setItem(window.__A.ANIM_AUTOSAVE_KEY, JSON.stringify(v3));
+    });
+    await page.reload({ waitUntil: 'load' });
+    await page.waitForFunction(() => window.__A && document.getElementById('boot').style.display === 'none', null, { timeout: 30000 });
+    const res2 = await page.evaluate(() => {
+      const A = window.__A;
+      const rig = Object.values(A.Rigs).find(r => r.name === 'V3Rig');
+      if (!rig) return { found: false };
+      const be = rig.bones.find(b => b.name === 'V3Bone');
+      return { found: true, constraints: be ? be.constraints : null };
+    });
+    if (!res2.found) throw new Error('v3 (no-constraints) save failed to load under C4 code');
+    if (!Array.isArray(res2.constraints) || res2.constraints.length !== 0) throw new Error('v3-loaded bone should have an empty constraints array, got ' + JSON.stringify(res2.constraints));
+    await page.evaluate(() => localStorage.removeItem(window.__A.ANIM_AUTOSAVE_KEY));
+  });
+
+  await step('C4 UI: Constraints section renders with type chips, Add flow creates a constraint end-to-end', () => page.evaluate(() => {
+    const A = window.__A, T = window.THREE;
+    const rig = A.newRig('C4UIRig');
+    const other = A.addBone(rig, 'UIOther', new T.Vector3(1, 0, 0), new T.Vector3(1, 1, 0), null);
+    const be = A.addBone(rig, 'UIBone', new T.Vector3(0, 0, 0), new T.Vector3(0, 1, 0), null);
+    A.Arm.rigId = rig.id;
+    A.setView('pose'); A.setArmMode('pose'); A.selectBone(rig, be.id); A.renderPanel();
+    let texts = Array.from(document.querySelectorAll('#panelBody button')).map(b => b.textContent.trim());
+    ['Copy Loc', 'Copy Rot', 'Track To', 'Limit Rot'].forEach(t => { if (!texts.includes(t)) throw new Error('constraint type chip "' + t + '" not rendered'); });
+    const chip = Array.from(document.querySelectorAll('#panelBody button')).find(b => b.textContent.trim() === 'Copy Loc');
+    chip.click();
+    const sel = document.querySelector('#panelBody select');
+    if (!sel) throw new Error('target select did not appear after tapping a constraint type chip');
+    sel.value = A.boneTargetId(rig.id, other.name);
+    const addBtn = Array.from(document.querySelectorAll('#panelBody button')).find(b => b.textContent.trim() === 'Add');
+    if (!addBtn) throw new Error('Add button not rendered in the target picker');
+    addBtn.click();
+    const list = A.constraintListFor(A.boneTargetId(rig.id, be.name));
+    if (list.length !== 1 || list[0].type !== 'copyLoc') throw new Error('Add flow did not create the constraint, got ' + JSON.stringify(list));
+    A.setArmMode('edit');
+  }));
+
+  await step('C4: object-level constraints on Registry (non-bone) targets evaluate via applyAllConstraints', () => page.evaluate(() => {
+    const A = window.__A, T = window.THREE;
+    A.buildDemoFigure();
+    const head = A.Registry['demo.head'], torso = A.Registry['demo.torso'];
+    head.position.set(0, 1.75, 0); torso.position.set(0.4, 1.2, 0.1);
+    const con = A.addConstraint('demo.head', 'copyLoc', 'demo.torso');
+    if (!con) throw new Error('object-level addConstraint failed');
+    A.applyAllConstraints();
+    const w = new T.Vector3(); head.getWorldPosition(w);
+    const tw = new T.Vector3(); torso.getWorldPosition(tw);
+    if (w.distanceTo(tw) > 1e-4) throw new Error('object-level copyLoc did not pin head to torso, dist=' + w.distanceTo(tw));
+    A.removeConstraint('demo.head', con.id); // clean up so later assumptions about the shared demo figure aren't affected
+  }));
 
   await browser.close();
   server.close();
