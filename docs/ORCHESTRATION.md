@@ -98,7 +98,7 @@ Wave definitions live in `docs/GAP_ANALYSIS.md` §4 — this table only tracks s
 | B2 | Serialization v2 (weights/keys/skeleton through save + localStorage bridge) | TODO | | |
 | B3 | Shape keys / morph targets | TODO | | |
 | B4 | Vertex colors | TODO | | |
-| C1 | animate.html: armatures/bones/parenting | TODO | | creates animate.html |
+| C1 | animate.html: armatures/bones/parenting/pose mode | DONE | a561a08 | animate suite now 28; slerp in Anim.sample; bone Registry ids `rig/bone:Name`; anim autosave format v2 |
 | C2 | Skinning bind + auto weights | TODO | | |
 | C3 | FK posing + CCD IK | TODO | | |
 | C4 | Constraints | TODO | | |
