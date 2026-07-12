@@ -237,6 +237,7 @@ function addGround(scene){var g=new THREE.Mesh(new THREE.PlaneGeometry(60,60),ne
 
 var poseScene=new THREE.Scene();studioLights(poseScene);applyNightEnv(poseScene);addGround(poseScene);
 poseScene.userData.modelHolder=new THREE.Group();poseScene.add(poseScene.userData.modelHolder);
+poseScene.userData.armatureHolder=new THREE.Group();poseScene.add(poseScene.userData.armatureHolder);
 
 /* ---------------- camera + orbit (single shared view — Pose and Timeline show the same scene) ---------------- */
 function mkCam(){return new THREE.PerspectiveCamera(40,1,.05,500);}
@@ -251,9 +252,23 @@ function frameObject(obj,v){var box=new THREE.Box3().setFromObject(obj);if(box.i
 /* ---------------- pointer handling: drag orbit, pinch-zoom, two-finger pan, tap-select, double-tap-frame ---------------- */
 var ptrs=new Map(),lastDist=0,lastMid=null,clickStart=null,lastTap=null;
 dom.addEventListener('pointerdown',function(e){
+  // Armature Edit/Pose modes hijack the pointer BEFORE the general orbit/tap machinery below —
+  // same precedence pattern as index.html's Gizmo-hit-test-first. See the Armature section
+  // (Arm/hitJoint/hitBoneMesh/jointDrag/poseDrag) for the full picture.
+  if(active.view==='pose'&&Arm.mode==='edit'&&!Arm.chainActive&&!Arm.parentPickActive){
+    var hj=hitJoint(e);
+    if(hj){dom.setPointerCapture(e.pointerId);jointDrag={be:hj.be,which:hj.which,ptId:e.pointerId,px:e.clientX,py:e.clientY};invalidate();return;}
+  }
+  if(active.view==='pose'&&Arm.mode==='pose'){
+    var hb=hitBoneMesh(e);
+    if(hb){dom.setPointerCapture(e.pointerId);selectBone(hb.rig,hb.id);
+      poseDrag={be:hb.be,px:e.clientX,py:e.clientY,ptId:e.pointerId};renderPanel();invalidate();return;}
+  }
   dom.setPointerCapture(e.pointerId);ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY});
   clickStart={x:e.clientX,y:e.clientY,t:Date.now(),id:e.pointerId};invalidate();});
 dom.addEventListener('pointermove',function(e){
+  if(jointDrag&&jointDrag.ptId===e.pointerId){dragJointMove(e);return;}
+  if(poseDrag&&poseDrag.ptId===e.pointerId){dragPoseMove(e);return;}
   var p=ptrs.get(e.pointerId);if(!p)return;
   var dx=e.clientX-p.x,dy=e.clientY-p.y;p.x=e.clientX;p.y=e.clientY;
   if(ptrs.size===1){
@@ -267,6 +282,8 @@ dom.addEventListener('pointermove',function(e){
     lastMid=mid;clickStart=null;}
   invalidate();});
 function endPtr(e){
+  if(jointDrag&&jointDrag.ptId===e.pointerId){jointDrag=null;invalidate();return;}
+  if(poseDrag&&poseDrag.ptId===e.pointerId){poseDrag=null;invalidate();return;}
   ptrs.delete(e.pointerId);lastDist=0;lastMid=null;
   if(clickStart&&clickStart.id===e.pointerId&&Date.now()-clickStart.t<350&&Math.hypot(e.clientX-clickStart.x,e.clientY-clickStart.y)<6){
     var now=Date.now();
@@ -275,7 +292,16 @@ function endPtr(e){
   clickStart=null;}
 dom.addEventListener('pointerup',endPtr);dom.addEventListener('pointercancel',endPtr);
 dom.addEventListener('wheel',function(e){e.preventDefault();vs.rad=clamp(vs.rad*(1+e.deltaY*.0012),.6,60);syncZoomKnob();invalidate();},{passive:false});
-function onViewportTap(e){if(active.view!=='pose'&&active.view!=='timeline')return;var r=dom.getBoundingClientRect();
+function onViewportTap(e){if(active.view!=='pose'&&active.view!=='timeline')return;
+  if(active.view==='pose'&&Arm.mode==='edit'){
+    if(Arm.chainActive){chainExtendTap(e);return;}
+    if(Arm.parentPickActive){parentPickTap(e);return;}
+  }
+  if(active.view==='pose'){
+    var hb=hitBoneMesh(e);
+    if(hb){selectBone(hb.rig,hb.id);renderPanel();toast('Selected bone '+hb.name);return;}
+  }
+  var r=dom.getBoundingClientRect();
   var mx=((e.clientX-r.left)/r.width)*2-1,my=-((e.clientY-r.top)/r.height)*2+1;
   var ray=new THREE.Raycaster();ray.setFromCamera({x:mx,y:my},vs.cam);
   var hit=ray.intersectObjects(poseScene.userData.modelHolder.children,true)[0];
@@ -331,7 +357,9 @@ function resolveTarget(id){return Registry[id];}
 
 function clearModels(){var h=poseScene.userData.modelHolder;while(h.children.length)h.remove(h.children[0]);
   state.models.length=0;state.activeId=null;state.selTarget=null;
-  for(var k in Registry)delete Registry[k];} // clear in place (not a reassign) so outstanding refs stay live
+  // clear in place (not a reassign) so outstanding refs stay live — but never touch entries the
+  // Armature/Rig system owns (RigTargetIds), so rigs survive a model bridge/reload/demo-rebuild.
+  for(var k in Registry)if(!RigTargetIds[k])delete Registry[k];}
 
 function partsToModel(md){
   var grp=new THREE.Group();grp.name=md.name||'Model';
@@ -396,6 +424,293 @@ function buildDemoFigure(){
   return root;}
 
 /* ═══════════════════════════════════════════════════════
+   ARMATURE / RIG SYSTEM (Wave C1) — bones live as a
+   THREE.Bone hierarchy + THREE.Skeleton per armature, with
+   octahedral visual meshes (Blender-style) parented to each
+   Bone so posing (bone.quaternion) automatically carries the
+   visuals and any child bones along.
+
+   Rig  = { id, name, bones:[Bone], root:THREE.Group, skeleton:THREE.Skeleton }
+   Bone = { id, name, head:Vector3, tail:Vector3, parentId, bone:THREE.Bone,
+            mesh, wire, headJoint, tailJoint, rig }
+     - head/tail are stored in ARMATURE-LOCAL space (rig.root has no transform,
+       so this is effectively world space) and are the REST/BIND shape —
+       authoritative source of truth for the edit-mode skeleton.
+     - Every bone's REST local quaternion is identity (bones are NOT rolled to
+       align their local +Y with head->tail, unlike Blender's convention) —
+       a deliberate simplification: bone.position is simply derived as
+       (head - parentHead), so Edit-mode reshaping is decoupled per-joint
+       (dragging a parent's tail does not drag a child's head — "disconnected"
+       bones in Blender terms) while Pose-mode rotation (bone.quaternion) still
+       produces correct hierarchical FK, since children are positioned in the
+       bone's local frame regardless of what that frame's rest orientation is.
+     - Registry targetId for a bone: `<rigId>/bone:<boneName>` (e.g. 'rig1/bone:Spine').
+       Renaming a bone re-keys the Registry entry AND rewrites any existing
+       Anim track targetIds so keyed animation survives a rename.
+   ═══════════════════════════════════════════════════════ */
+var Rigs={}; // rigId -> Rig
+var rigIdc=1;function mkRigId(){return 'rig'+(rigIdc++);}
+var boneIdc=1;function mkBoneId(){return 'bone'+(boneIdc++);}
+var RigTargetIds={}; // targetId -> true, for Registry entries owned by the rig system
+                      // (clearModels() must not wipe these out on a model bridge/reload)
+function registerRigTarget(id,obj){registerTarget(id,obj);RigTargetIds[id]=true;}
+function boneTargetId(rigId,boneName){return rigId+'/bone:'+boneName;}
+
+function pad3(n){n=''+n;while(n.length<3)n='0'+n;return n;}
+function uniqueBoneName(rig,base,excludeId){
+  var n=base,i=1;
+  while(rig.bones.some(function(b){return b.name===n&&b.id!==excludeId;}))n=base+'.'+pad3(i++);
+  return n;}
+function mirrorName(name){
+  if(/\.L$/.test(name))return name.slice(0,-2)+'.R';
+  if(/\.R$/.test(name))return name.slice(0,-2)+'.L';
+  return name+'.R';}
+
+function findBone(rig,boneId){for(var i=0;i<rig.bones.length;i++)if(rig.bones[i].id===boneId)return rig.bones[i];return null;}
+function collectSubtree(rig,rootId){ // root + all descendants, parent-before-child order
+  var root=findBone(rig,rootId);if(!root)return [];
+  var result=[root],queue=[root];
+  while(queue.length){var cur=queue.shift();
+    rig.bones.forEach(function(b){if(b.parentId===cur.id){result.push(b);queue.push(b);}});}
+  return result;}
+function syncSkeleton(rig){rig.skeleton=new THREE.Skeleton(rig.bones.map(function(b){return b.bone;}));}
+
+/* ---------------- bone visual (Blender-style octahedral bone + joint spheres) ----------------
+   Rendered depthTest:false + high renderOrder (same tradeoff as index.html's Gizmo) so bones
+   stay legible even when they sit inside the mesh being rigged, at the cost of never being
+   properly occluded by geometry in front of them — the right call for a posing tool where
+   seeing every bone matters more than depth realism. */
+var BONE_GEO=null,JOINT_GEO=null;
+function boneGeo(){if(BONE_GEO)return BONE_GEO;
+  var w=.09,wy=.13; // waist ring radius / height-fraction, tuned to look like Blender's octahedral bone widget
+  var verts=[0,0,0, w,wy,0, 0,wy,w, -w,wy,0, 0,wy,-w, 0,1,0];
+  var idx=[0,1,2, 0,2,3, 0,3,4, 0,4,1, 5,2,1, 5,3,2, 5,4,3, 5,1,4];
+  var g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(verts,3));
+  g.setIndex(idx);g.computeVertexNormals();BONE_GEO=g;return g;}
+function jointGeo(){if(JOINT_GEO)return JOINT_GEO;JOINT_GEO=new THREE.SphereGeometry(1,10,8);return JOINT_GEO;}
+function boneMaterial(){return new THREE.MeshBasicMaterial({color:0x8fd6ff,transparent:true,opacity:.55,depthTest:false});}
+function buildBoneVisual(be){
+  var mesh=new THREE.Mesh(boneGeo(),boneMaterial());mesh.renderOrder=999;
+  var wire=new THREE.LineSegments(new THREE.EdgesGeometry(boneGeo()),
+    new THREE.LineBasicMaterial({color:0x0b2030,transparent:true,opacity:.6,depthTest:false}));wire.renderOrder=1000;
+  mesh.add(wire);
+  var headJ=new THREE.Mesh(jointGeo(),new THREE.MeshBasicMaterial({color:0x7bd8ff,depthTest:false}));
+  headJ.scale.setScalar(.035);headJ.renderOrder=1001;
+  var tailJ=new THREE.Mesh(jointGeo(),new THREE.MeshBasicMaterial({color:0xff9ac2,depthTest:false}));
+  tailJ.scale.setScalar(.03);tailJ.renderOrder=1001;
+  be.bone.add(mesh);be.bone.add(headJ);be.bone.add(tailJ);
+  be.mesh=mesh;be.wire=wire;be.headJoint=headJ;be.tailJoint=tailJ;
+  mesh.userData.boneRef=be;headJ.userData.boneRef=be;headJ.userData.jointKind='head';
+  tailJ.userData.boneRef=be;tailJ.userData.jointKind='tail';
+  updateBoneVisualShape(be);}
+function updateBoneVisualShape(be){
+  var dir=be.tail.clone().sub(be.head),len=Math.max(dir.length(),1e-4);
+  be.mesh.scale.set(1,len,1);
+  be.mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),dir.clone().normalize());
+  be.tailJoint.position.copy(dir);be.headJoint.position.set(0,0,0);}
+function setBoneSelVisual(be,sel){be.mesh.material.color.setHex(sel?0xffd27a:0x8fd6ff);be.mesh.material.opacity=sel?.95:.55;}
+
+/* ---------------- rig / bone construction ---------------- */
+function newRigWithId(id,name){
+  var numId=+(''+id).replace(/\D/g,'');if(!isNaN(numId)&&numId>=rigIdc)rigIdc=numId+1;
+  var root=new THREE.Group();root.name=name||'Armature';
+  poseScene.userData.armatureHolder.add(root);
+  var rig={id:id,name:name||'Armature',bones:[],root:root,skeleton:null};
+  Rigs[id]=rig;registerRigTarget(id,root);syncSkeleton(rig);return rig;}
+function newRig(name){return newRigWithId(mkRigId(),name);}
+
+function addBoneWithId(rig,id,name,head,tail,parentId){
+  var numId=+(''+id).replace(/\D/g,'');if(!isNaN(numId)&&numId>=boneIdc)boneIdc=numId+1;
+  name=uniqueBoneName(rig,name||'Bone',null);
+  var bone=new THREE.Bone();bone.name=name;
+  var be={id:id,name:name,head:head.clone(),tail:tail.clone(),parentId:parentId||null,bone:bone,rig:rig};
+  rig.bones.push(be);
+  var parentObj=rig.root,parentHead=new THREE.Vector3(0,0,0);
+  if(parentId){var pe=findBone(rig,parentId);if(pe){parentObj=pe.bone;parentHead=pe.head;}}
+  parentObj.add(bone);
+  bone.position.copy(head.clone().sub(parentHead));
+  buildBoneVisual(be);
+  registerRigTarget(boneTargetId(rig.id,name),bone);
+  syncSkeleton(rig);scheduleAnimAutosave();
+  return be;}
+function addBone(rig,name,head,tail,parentId){return addBoneWithId(rig,mkBoneId(),name,head,tail,parentId);}
+
+function ensureRig(){
+  if(Arm.rigId&&Rigs[Arm.rigId])return Rigs[Arm.rigId];
+  var rig=newRig('Armature');Arm.rigId=rig.id;scheduleAnimAutosave();return rig;}
+
+// Reposition `be` (and its direct children) after its head/tail were mutated in place —
+// the single entry point every edit-mode joint drag / rebuild goes through.
+function applyBoneEdit(be){
+  var rig=be.rig,parentHead=be.parentId?findBone(rig,be.parentId).head:new THREE.Vector3(0,0,0);
+  be.bone.position.copy(be.head.clone().sub(be.parentId?parentHead:new THREE.Vector3(0,0,0)));
+  updateBoneVisualShape(be);
+  rig.bones.forEach(function(c){if(c.parentId===be.id)c.bone.position.copy(c.head.clone().sub(be.head));});
+  scheduleAnimAutosave();}
+
+// Re-parent `childId` under `parentId` (or un-parent if null), keeping world position —
+// safe because rest quaternions are identity, so recomputing position=head-parentHead
+// exactly reproduces the child's unchanged world-space head. Refuses cycles.
+function setBoneParent(rig,childId,parentId){
+  var child=findBone(rig,childId);if(!child||parentId===childId)return false;
+  if(parentId){var walk=findBone(rig,parentId);while(walk){if(walk.id===childId)return false;walk=walk.parentId?findBone(rig,walk.parentId):null;}}
+  if(child.bone.parent)child.bone.parent.remove(child.bone);
+  var parentObj=rig.root,parentHead=new THREE.Vector3(0,0,0);
+  if(parentId){var pe=findBone(rig,parentId);if(pe){parentObj=pe.bone;parentHead=pe.head;}}
+  parentObj.add(child.bone);
+  child.parentId=parentId||null;
+  child.bone.position.copy(child.head.clone().sub(parentHead));
+  scheduleAnimAutosave();return true;}
+
+function deleteBoneAndDescendants(rig,boneId){
+  var doomed=collectSubtree(rig,boneId),ids={};doomed.forEach(function(b){ids[b.id]=true;});
+  doomed.forEach(function(b){
+    var tid=boneTargetId(rig.id,b.name);delete Registry[tid];delete RigTargetIds[tid];
+    if(b.bone.parent)b.bone.parent.remove(b.bone);
+    Anim.tracks=Anim.tracks.filter(function(tr){return tr.targetId!==tid;});});
+  rig.bones=rig.bones.filter(function(b){return !ids[b.id];});
+  if(Arm.selBoneId&&ids[Arm.selBoneId])Arm.selBoneId=null;
+  syncSkeleton(rig);scheduleAnimAutosave();}
+
+function renameBone(rig,boneId,newName){
+  var be=findBone(rig,boneId);if(!be)return;
+  newName=uniqueBoneName(rig,newName,be.id);
+  var oldTid=boneTargetId(rig.id,be.name),newTid=boneTargetId(rig.id,newName);
+  if(oldTid===newTid)return;
+  delete Registry[oldTid];delete RigTargetIds[oldTid];
+  be.name=newName;be.bone.name=newName;
+  registerRigTarget(newTid,be.bone);
+  Anim.tracks.forEach(function(tr){if(tr.targetId===oldTid)tr.targetId=newTid;});
+  if(state.selTarget===oldTid)state.selTarget=newTid;
+  scheduleAnimAutosave();}
+
+// Duplicate the selected bone + all its descendants mirrored across armature-local X,
+// swapping .L/.R name suffixes (appending .R when the original has neither). The mirrored
+// root keeps the SAME parent as the original (so e.g. Arm.R hangs off the same Shoulder
+// Arm.L does) — standard rigging convention.
+function mirrorChainX(rig,rootBoneId){
+  var root=findBone(rig,rootBoneId);if(!root)return null;
+  var subtree=collectSubtree(rig,rootBoneId),idMap={};
+  subtree.forEach(function(orig){
+    var nh=orig.head.clone();nh.x=-nh.x;var nt=orig.tail.clone();nt.x=-nt.x;
+    var newParentId=(orig.id===root.id)?root.parentId:idMap[orig.parentId];
+    var nb=addBone(rig,mirrorName(orig.name),nh,nt,newParentId);
+    idMap[orig.id]=nb.id;});
+  scheduleAnimAutosave();return idMap[root.id];}
+
+function resetBonePose(be){be.bone.quaternion.identity();scheduleAnimAutosave();}
+function resetAllPose(rig){rig.bones.forEach(function(b){b.bone.quaternion.identity();});scheduleAnimAutosave();}
+
+function selectBone(rig,boneId){
+  if(Arm.selBoneId){var prev=findBone(rig,Arm.selBoneId);if(prev)setBoneSelVisual(prev,false);}
+  Arm.rigId=rig.id;Arm.selBoneId=boneId;
+  var be=findBone(rig,boneId);
+  if(be){setBoneSelVisual(be,true);state.selTarget=boneTargetId(rig.id,be.name);}
+  invalidate();}
+
+/* ---------------- edit-mode tool state + chain-extend / parent-pick flows ----------------
+   "Add Bone"/"Add Child" mirror EM.extrude's click-to-extend mobile UX (GAP_ANALYSIS §3):
+   arm the tool, then each viewport TAP extends the chain by one more bone. */
+var Arm={mode:'edit',rigId:null,selBoneId:null,chainActive:false,chainRigId:null,chainAnchor:null,chainLastBoneId:null,parentPickActive:false};
+function setArmMode(mode){
+  var rig=Rigs[Arm.rigId];
+  if(mode==='edit'){Arm.chainActive=false;Arm.parentPickActive=false;
+    if(rig)rig.bones.forEach(function(b){b.bone.quaternion.identity();});} // Edit mode always shows/edits the bind pose (see file header note)
+  Arm.mode=mode;renderPanel();invalidate();}
+
+function startAddBoneChain(){var rig=ensureRig();
+  Arm.chainActive=true;Arm.chainRigId=rig.id;Arm.chainLastBoneId=null;Arm.chainAnchor=null;
+  toast('Tap the viewport to place the first joint, then keep tapping to extend the chain');renderPanel();}
+function startAddChildChain(){var rig=Rigs[Arm.rigId];if(!rig||!Arm.selBoneId){toast('Select a bone first');return;}
+  var be=findBone(rig,Arm.selBoneId);if(!be)return;
+  Arm.chainActive=true;Arm.chainRigId=rig.id;Arm.chainLastBoneId=be.id;Arm.chainAnchor=be.tail.clone();
+  toast('Tap the viewport to extend from '+be.name);renderPanel();}
+function finishChain(){Arm.chainActive=false;Arm.chainAnchor=null;Arm.chainLastBoneId=null;renderPanel();toast('Chain finished');}
+function chainExtendTo(pt){ // pure: given a target world point, add the next chain bone
+  var rig=Rigs[Arm.chainRigId];if(!rig)return null;
+  if(pt.distanceTo(Arm.chainAnchor)<.02){toast('Tap further away to add a bone segment');return null;}
+  var be=addBone(rig,'Bone',Arm.chainAnchor.clone(),pt.clone(),Arm.chainLastBoneId);
+  Arm.chainLastBoneId=be.id;Arm.chainAnchor=pt.clone();Arm.selBoneId=be.id;
+  toast('Added '+be.name+' — tap to extend, or Finish Chain');renderPanel();invalidate();return be;}
+function chainExtendTap(e){
+  var rig=Rigs[Arm.chainRigId];if(!rig){Arm.chainActive=false;return;}
+  if(Arm.chainAnchor==null){Arm.chainAnchor=groundPlaneRaycast(e.clientX,e.clientY);
+    toast('Anchor placed — tap again to extend the first bone');renderPanel();return;}
+  var pt=workPlaneRaycast(e.clientX,e.clientY,Arm.chainAnchor);
+  if(!pt){toast('Could not project tap onto the work plane');return;}
+  chainExtendTo(pt);}
+
+function startParentPick(){if(!Arm.selBoneId){toast('Select a bone first');return;}
+  Arm.parentPickActive=true;renderPanel();toast('Tap another bone to become its parent');}
+function cancelParentPick(){Arm.parentPickActive=false;renderPanel();toast('Cancelled');}
+function parentPickTap(e){var rig=Rigs[Arm.rigId];var hb=hitBoneMesh(e);Arm.parentPickActive=false;
+  if(!hb||hb.id===Arm.selBoneId){toast('Cancelled');renderPanel();return;}
+  setBoneParent(rig,Arm.selBoneId,hb.id);toast('Parented to '+hb.name);renderPanel();invalidate();}
+
+/* ---------------- raycasting helpers ---------------- */
+function screenDeltaToWorld(dx,dy){ // same math as index.html's screenDeltaToWorld, scoped to this file's `vs`
+  var right=new THREE.Vector3().setFromMatrixColumn(vs.cam.matrix,0),up=new THREE.Vector3().setFromMatrixColumn(vs.cam.matrix,1);
+  var k=vs.rad*.0016;return new THREE.Vector3().addScaledVector(right,dx*k).addScaledVector(up,-dy*k);}
+function ndcFromEvent(e){var r=dom.getBoundingClientRect();return {x:((e.clientX-r.left)/r.width)*2-1,y:-((e.clientY-r.top)/r.height)*2+1};}
+function groundPlaneRaycast(cx,cy){
+  var ray=new THREE.Raycaster();ray.setFromCamera(ndcFromEvent({clientX:cx,clientY:cy}),vs.cam);
+  var hit=new THREE.Vector3();return ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0,1,0),-1),hit)?hit:new THREE.Vector3(0,1,0);}
+function workPlaneRaycast(cx,cy,planePoint){
+  var ray=new THREE.Raycaster();ray.setFromCamera(ndcFromEvent({clientX:cx,clientY:cy}),vs.cam);
+  var camDir=new THREE.Vector3();vs.cam.getWorldDirection(camDir);
+  var plane=new THREE.Plane().setFromNormalAndCoplanarPoint(camDir,planePoint);
+  var hit=new THREE.Vector3();return ray.ray.intersectPlane(plane,hit)?hit:null;}
+function hitBoneMesh(e){var rig=Rigs[Arm.rigId];if(!rig||!rig.bones.length)return null;
+  var ray=new THREE.Raycaster();ray.setFromCamera(ndcFromEvent(e),vs.cam);
+  var h=ray.intersectObjects(rig.bones.map(function(b){return b.mesh;}),false)[0];if(!h)return null;
+  var be=h.object.userData.boneRef;return {rig:rig,id:be.id,name:be.name,be:be};}
+function hitJoint(e){var rig=Rigs[Arm.rigId];if(!rig||!rig.bones.length)return null;
+  var joints=[];rig.bones.forEach(function(b){joints.push(b.headJoint,b.tailJoint);});
+  var ray=new THREE.Raycaster();ray.setFromCamera(ndcFromEvent(e),vs.cam);
+  var h=ray.intersectObjects(joints,false)[0];if(!h)return null;
+  return {be:h.object.userData.boneRef,which:h.object.userData.jointKind};}
+
+/* ---------------- edit-mode joint drag / pose-mode trackball drag ---------------- */
+var jointDrag=null,poseDrag=null;
+function dragJointMove(e){
+  var dx=e.clientX-jointDrag.px,dy=e.clientY-jointDrag.py;jointDrag.px=e.clientX;jointDrag.py=e.clientY;
+  var delta=screenDeltaToWorld(dx,dy),be=jointDrag.be;
+  if(jointDrag.which==='head')be.head.add(delta);else be.tail.add(delta);
+  applyBoneEdit(be);invalidate();}
+
+// Trackball-style free rotation (chosen over an axis-chip scheme, see GAP_ANALYSIS §3 —
+// simpler to make touch-reliable than picking an axis first): drag right/left spins the
+// bone about the camera's current up vector, drag up/down about its current right vector,
+// both re-expressed in the bone's PARENT-local frame so the result composes correctly
+// through the FK chain regardless of how the parent itself is currently posed.
+function dragPoseMove(e){
+  var dx=e.clientX-poseDrag.px,dy=e.clientY-poseDrag.py;poseDrag.px=e.clientX;poseDrag.py=e.clientY;
+  if(!dx&&!dy)return;
+  var be=poseDrag.be,k=.01,parent=be.bone.parent;
+  parent.updateWorldMatrix(true,false);
+  var pq=new THREE.Quaternion();parent.getWorldQuaternion(pq);var pqInv=pq.clone().invert();
+  var camRight=new THREE.Vector3().setFromMatrixColumn(vs.cam.matrix,0).applyQuaternion(pqInv);
+  var camUp=new THREE.Vector3().setFromMatrixColumn(vs.cam.matrix,1).applyQuaternion(pqInv);
+  var qYaw=new THREE.Quaternion().setFromAxisAngle(camUp,-dx*k),qPitch=new THREE.Quaternion().setFromAxisAngle(camRight,-dy*k);
+  var delta=qYaw.multiply(qPitch);
+  be.bone.quaternion.copy(delta.multiply(be.bone.quaternion)).normalize();
+  scheduleAnimAutosave();invalidate();}
+
+/* ---------------- serialize / restore (rides in the anim autosave — see doAnimAutosave) ---------------- */
+function serializeRigs(){return Object.keys(Rigs).map(function(rid){var rig=Rigs[rid];
+  return {id:rig.id,name:rig.name,bones:rig.bones.map(function(b){
+    return {id:b.id,name:b.name,parentId:b.parentId,head:[b.head.x,b.head.y,b.head.z],tail:[b.tail.x,b.tail.y,b.tail.z],
+      quat:[b.bone.quaternion.x,b.bone.quaternion.y,b.bone.quaternion.z,b.bone.quaternion.w]};})};});}
+function rebuildRigFromSerialized(rd){
+  var rig=newRigWithId(rd.id,rd.name),list=rd.bones||[];
+  list.forEach(function(bd){ // pass 1: create every bone as a temporary root (guarantees all ids exist for pass 2's parent lookups)
+    addBoneWithId(rig,bd.id,bd.name,new THREE.Vector3().fromArray(bd.head),new THREE.Vector3().fromArray(bd.tail),null);});
+  list.forEach(function(bd){ // pass 2: real parenting (keep-offset) + restore pose quaternion
+    if(bd.parentId)setBoneParent(rig,bd.id,bd.parentId);
+    var be=findBone(rig,bd.id);if(be&&bd.quat)be.bone.quaternion.set(bd.quat[0],bd.quat[1],bd.quat[2],bd.quat[3]);});
+  syncSkeleton(rig);return rig;}
+
+/* ═══════════════════════════════════════════════════════
    ANIMATION CORE (Wave D1 seed) — the load-bearing data model
    every later wave (dope sheet, graph editor, camera/path anim,
    action clips, onion skin, video/code export) builds on.
@@ -421,30 +736,43 @@ function resolvePath(target,path){
 Anim.getValue=function(targetId,path){var t=resolveTarget(targetId);if(!t)return null;
   var r=resolvePath(t,path);return r?r.obj[r.key]:null;};
 Anim.setValue=function(targetId,path,v){var t=resolveTarget(targetId);if(!t)return;
-  var r=resolvePath(t,path);if(r)r.obj[r.key]=v;};
+  var r=resolvePath(t,path);if(!r)return;
+  if(Array.isArray(v)&&r.obj[r.key]&&r.obj[r.key].isQuaternion)r.obj[r.key].set(v[0],v[1],v[2],v[3]);
+  else r.obj[r.key]=v;};
 Anim.findTrack=function(targetId,path){for(var i=0;i<this.tracks.length;i++){
   var tr=this.tracks[i];if(tr.targetId===targetId&&tr.path===path)return tr;}return null;};
 
 // Insert (or overwrite, if one already sits at t) a key at time t, reading the CURRENT
 // live value off the resolved object — this is what every "Key ___" UI action calls.
+// Scalar tracks store a plain number; quaternion tracks (e.g. a bone's 'quaternion' path,
+// see the Armature system above) store a plain [x,y,z,w] array so the whole track stays
+// JSON-safe for the autosave round-trip — Anim.sample slerps these instead of lerping.
 Anim.insertKey=function(targetId,path,t){
   var v=this.getValue(targetId,path);
-  if(v==null||typeof v!=='number')return null; // scalar tracks only in this seed
+  var isQuat=!!(v&&v.isQuaternion);
+  if(v==null||(!isQuat&&typeof v!=='number'))return null; // scalar or quaternion tracks only
   var tr=this.findTrack(targetId,path);
-  if(!tr){tr={id:'trk'+(trackIdc++),targetId:targetId,path:path,keys:[]};this.tracks.push(tr);}
+  if(!tr){tr={id:'trk'+(trackIdc++),targetId:targetId,path:path,keys:[],valueType:isQuat?'quat':'scalar'};this.tracks.push(tr);}
   var eps=1e-6,existIdx=-1;
   for(var i=0;i<tr.keys.length;i++){if(Math.abs(tr.keys[i].t-t)<eps){existIdx=i;break;}}
-  var key={t:t,v:v,interp:'linear'};
+  var key={t:t,v:isQuat?[v.x,v.y,v.z,v.w]:v,interp:'linear'};
   if(existIdx>=0)tr.keys[existIdx]=key;else{tr.keys.push(key);tr.keys.sort(function(a,b){return a.t-b.t;});}
   scheduleAnimAutosave();
   return tr;};
 
+var _slerpA=new THREE.Quaternion(),_slerpB=new THREE.Quaternion();
+function slerpQuatArr(a,b,f){_slerpA.set(a[0],a[1],a[2],a[3]);_slerpB.set(b[0],b[1],b[2],b[3]);
+  _slerpA.slerp(_slerpB,f);return [_slerpA.x,_slerpA.y,_slerpA.z,_slerpA.w];}
+
 // Evaluate every track at `time` and write the interpolated value through the path
-// resolver. Binary-searches the surrounding key pair per track, then lerps (scalar).
+// resolver. Binary-searches the surrounding key pair per track, then lerps (scalar tracks)
+// or slerps (quaternion tracks, via THREE.Quaternion.slerp — proper spherical interpolation,
+// not a componentwise lerp+normalize approximation).
 Anim.sample=function(time){
   var self=this;
   this.tracks.forEach(function(tr){
     var keys=tr.keys;if(!keys.length)return;
+    var isQuat=tr.valueType==='quat';
     if(keys.length===1){self.setValue(tr.targetId,tr.path,keys[0].v);return;}
     if(time<=keys[0].t){self.setValue(tr.targetId,tr.path,keys[0].v);return;}
     if(time>=keys[keys.length-1].t){self.setValue(tr.targetId,tr.path,keys[keys.length-1].v);return;}
@@ -452,7 +780,8 @@ Anim.sample=function(time){
     while(hi-lo>1){var mid=(lo+hi)>>1;if(keys[mid].t<=time)lo=mid;else hi=mid;}
     var a=keys[lo],b=keys[hi],span=b.t-a.t,f=span>1e-9?(time-a.t)/span:0,val;
     if(a.interp==='constant')val=a.v;
-    else val=a.v+(b.v-a.v)*f; // linear lerp — TODO(D-later): quaternion tracks should slerp here instead
+    else if(isQuat)val=slerpQuatArr(a.v,b.v,f);
+    else val=a.v+(b.v-a.v)*f;
     self.setValue(tr.targetId,tr.path,val);});
   this.time=time;};
 
@@ -463,8 +792,11 @@ function insertPositionKey(targetId,t){
 /* ---------------- animation autosave (own key, separate from the modeler's) ---------------- */
 var ANIM_AUTOSAVE_KEY='roxyAnimAutosave',animAutosaveTimer=null;
 function scheduleAnimAutosave(){clearTimeout(animAutosaveTimer);animAutosaveTimer=setTimeout(doAnimAutosave,600);}
+// v2 (Wave C1): adds `rigs` (serialized armatures — see serializeRigs/rebuildRigFromSerialized
+// above). v1 saves (no `rigs` key, no `v` tag at all) still load fine: tryRestoreAnimAutosave
+// only rebuilds rigs when the field is present.
 function doAnimAutosave(){try{localStorage.setItem(ANIM_AUTOSAVE_KEY,JSON.stringify(
-  {fps:Anim.fps,start:Anim.start,end:Anim.end,tracks:Anim.tracks}));}catch(e){}}
+  {v:2,fps:Anim.fps,start:Anim.start,end:Anim.end,tracks:Anim.tracks,rigs:serializeRigs()}));}catch(e){}}
 function tryRestoreAnimAutosave(){
   var raw;try{raw=localStorage.getItem(ANIM_AUTOSAVE_KEY);}catch(e){return false;}
   if(!raw)return false;
@@ -472,6 +804,8 @@ function tryRestoreAnimAutosave(){
   if(!data)return false;
   Anim.fps=data.fps||24;Anim.start=data.start||0;Anim.end=data.end!=null?data.end:96;Anim.tracks=data.tracks||[];
   var maxId=0;Anim.tracks.forEach(function(tr){var n=+(''+tr.id).replace(/\D/g,'');if(n>maxId)maxId=n;});trackIdc=maxId+1;
+  if(data.rigs&&data.rigs.length){data.rigs.forEach(rebuildRigFromSerialized);
+    var rigIds=Object.keys(Rigs);if(rigIds.length&&!Arm.rigId)Arm.rigId=rigIds[0];} // v1 saves simply have no rigs to restore
   return true;}
 
 /* ---------------- playback clock: fixed-timestep accumulation over requestAnimationFrame ---------------- */
@@ -526,14 +860,36 @@ function targetSelect(onchange){
 
 function panelPose(b){
   b.appendChild(el('h2',{text:'Pose'}));
-  b.appendChild(el('p',{class:'sub',text:'Armatures (C1), skin binding (C2), FK/IK (C3) and constraints (C4) land in the next waves. For now, pick a target and nudge it — Timeline can keyframe whatever you set here.'}));
+  b.appendChild(el('p',{class:'sub',text:'Build an armature in Edit Bones, then switch to Pose to rotate bones by dragging them in the viewport. Skin binding (C2), IK (C3) and constraints (C4) land in later waves.'}));
   if(state.usingDemo)b.appendChild(el('div',{class:'card small',style:'margin-bottom:10px'},
     ['No modeling-suite autosave was found, so a demo figure is loaded. Build/save a project in the Modeler, or Import a project.json above, then reload this page.']));
-  b.appendChild(el('div',{class:'section-title',text:'Target'}));
+
+  b.appendChild(el('div',{class:'section-title',text:'Armature'}));
+  var rig=Arm.rigId?Rigs[Arm.rigId]:null;
+  if(!rig){
+    b.appendChild(el('button',{class:'pri',style:'width:100%',text:'New Armature',onclick:function(){ensureRig();renderPanel();invalidate();}}));
+  }else{
+    var modeRow=el('div',{class:'grid2'});
+    modeRow.appendChild(el('button',{class:Arm.mode==='edit'?'on':'',text:'Edit Bones',onclick:function(){setArmMode('edit');}}));
+    modeRow.appendChild(el('button',{class:Arm.mode==='pose'?'on':'',text:'Pose',onclick:function(){setArmMode('pose');}}));
+    b.appendChild(modeRow);
+
+    if(Arm.mode==='edit')panelArmEdit(b,rig);else panelArmPose(b,rig);
+
+    b.appendChild(el('div',{class:'section-title',text:'Bones ('+rig.bones.length+')'}));
+    if(!rig.bones.length)b.appendChild(el('p',{class:'small muted',text:'No bones yet — tap Add Bone, then tap the viewport.'}));
+    else rig.bones.forEach(function(be){
+      var pName=be.parentId&&findBone(rig,be.parentId)?findBone(rig,be.parentId).name:null;
+      b.appendChild(el('button',{style:'width:100%;text-align:left;margin-bottom:4px',class:Arm.selBoneId===be.id?'on':'',
+        text:be.name+(pName?'  ·  child of '+pName:''),
+        onclick:function(){selectBone(rig,be.id);renderPanel();}}));});
+  }
+
+  b.appendChild(el('div',{class:'section-title',text:'Target (any registered object)'}));
   b.appendChild(targetSelect(function(){renderPanel();}));
   var obj=resolveTarget(state.selTarget);
   if(obj){
-    b.appendChild(el('div',{class:'section-title',text:'Transform (placeholder — real bone posing arrives in C1/C3)'}));
+    b.appendChild(el('div',{class:'section-title',text:'Transform'}));
     b.appendChild(slider('Pos X',-4,4,obj.position.x,.01,function(v){obj.position.x=v;}));
     b.appendChild(slider('Pos Y',-4,4,obj.position.y,.01,function(v){obj.position.y=v;}));
     b.appendChild(slider('Pos Z',-4,4,obj.position.z,.01,function(v){obj.position.z=v;}));
@@ -541,6 +897,49 @@ function panelPose(b){
   }else{
     b.appendChild(el('p',{class:'small muted',text:'No targets registered yet.'}));
   }}
+
+function panelArmEdit(b,rig){
+  b.appendChild(el('div',{class:'section-title',text:'Edit Bones'}));
+  if(Arm.chainActive){
+    b.appendChild(el('div',{class:'card small',style:'margin-bottom:8px'},
+      [Arm.chainAnchor?'Tap the viewport to extend the chain.':'Tap the viewport to place the first joint.']));
+    b.appendChild(el('button',{style:'width:100%',text:'Finish Chain',onclick:finishChain}));
+  }else{
+    var row=el('div',{class:'grid2'});
+    row.appendChild(el('button',{text:'Add Bone',onclick:startAddBoneChain}));
+    var addChild=el('button',{text:'Add Child',onclick:startAddChildChain});
+    if(!Arm.selBoneId)addChild.disabled=true;
+    row.appendChild(addChild);
+    b.appendChild(row);
+  }
+  var be=Arm.selBoneId?findBone(rig,Arm.selBoneId):null;
+  if(be){
+    b.appendChild(el('div',{class:'card small',style:'margin:8px 0'},['Selected: '+be.name]));
+    var r1=el('div',{class:'grid2'});
+    r1.appendChild(el('button',{text:'Rename',onclick:function(){var n=prompt('Bone name:',be.name);if(n)renameBone(rig,be.id,n);renderPanel();}}));
+    r1.appendChild(el('button',{text:'Delete',onclick:function(){deleteBoneAndDescendants(rig,be.id);renderPanel();invalidate();}}));
+    b.appendChild(r1);
+    var r2=el('div',{class:'grid2',style:'margin-top:6px'});
+    r2.appendChild(el('button',{class:Arm.parentPickActive?'on':'',text:Arm.parentPickActive?'Tap a bone…':'Set Parent',
+      onclick:function(){Arm.parentPickActive?cancelParentPick():startParentPick();}}));
+    r2.appendChild(el('button',{text:'Mirror X',onclick:function(){var nid=mirrorChainX(rig,be.id);
+      if(nid){selectBone(rig,nid);toast('Mirrored');renderPanel();invalidate();}}}));
+    b.appendChild(r2);
+    if(be.parentId)b.appendChild(el('button',{style:'width:100%;margin-top:6px',text:'Clear Parent',
+      onclick:function(){setBoneParent(rig,be.id,null);renderPanel();invalidate();}}));
+  }}
+
+function panelArmPose(b,rig){
+  b.appendChild(el('div',{class:'section-title',text:'Pose'}));
+  var be=Arm.selBoneId?findBone(rig,Arm.selBoneId):null;
+  if(!be){b.appendChild(el('p',{class:'small muted',text:'Tap a bone in the viewport, then drag it to rotate (trackball-style).'}));return;}
+  b.appendChild(el('div',{class:'card small',style:'margin-bottom:8px'},['Selected: '+be.name+' — drag the bone in the viewport to rotate it.']));
+  var row=el('div',{class:'grid2'});
+  row.appendChild(el('button',{class:'pri',text:'Key Rotation',onclick:function(){
+    Anim.insertKey(boneTargetId(rig.id,be.name),'quaternion',Anim.time);toast('Keyed rotation @ t='+Anim.time);renderPanel();}}));
+  row.appendChild(el('button',{text:'Reset Bone',onclick:function(){resetBonePose(be);renderPanel();invalidate();}}));
+  b.appendChild(row);
+  b.appendChild(el('button',{style:'width:100%;margin-top:6px',text:'Reset Pose (all bones)',onclick:function(){resetAllPose(rig);renderPanel();invalidate();}}));}
 
 function panelTimeline(b){
   b.appendChild(el('h2',{text:'Timeline'}));

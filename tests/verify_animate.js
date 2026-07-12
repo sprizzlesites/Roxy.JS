@@ -15,7 +15,12 @@ window.__A={Anim:Anim,Registry:Registry,resolvePath:resolvePath,setView:setView,
   loadProjectData:loadProjectData,bridgeLoadModelProject:bridgeLoadModelProject,buildDemoFigure:buildDemoFigure,
   clearModels:clearModels,registerTarget:registerTarget,resolveTarget:resolveTarget,insertPositionKey:insertPositionKey,
   AUTOSAVE_KEY:AUTOSAVE_KEY,ANIM_AUTOSAVE_KEY:ANIM_AUTOSAVE_KEY,doAnimAutosave:doAnimAutosave,tryRestoreAnimAutosave:tryRestoreAnimAutosave,
-  poseScene:poseScene,renderer:renderer,invalidate:invalidate,resizeActive:resizeActive,frameObject:frameObject,syncScrubUI:syncScrubUI};
+  poseScene:poseScene,renderer:renderer,invalidate:invalidate,resizeActive:resizeActive,frameObject:frameObject,syncScrubUI:syncScrubUI,
+  Rigs:Rigs,Arm:Arm,newRig:newRig,addBone:addBone,findBone:findBone,collectSubtree:collectSubtree,mirrorChainX:mirrorChainX,
+  setBoneParent:setBoneParent,deleteBoneAndDescendants:deleteBoneAndDescendants,renameBone:renameBone,selectBone:selectBone,
+  boneTargetId:boneTargetId,applyBoneEdit:applyBoneEdit,chainExtendTo:chainExtendTo,startAddBoneChain:startAddBoneChain,
+  startAddChildChain:startAddChildChain,finishChain:finishChain,resetBonePose:resetBonePose,resetAllPose:resetAllPose,
+  ensureRig:ensureRig,uniqueBoneName:uniqueBoneName,serializeRigs:serializeRigs,setArmMode:setArmMode};
 `;
 
 const server = http.createServer((req, res) => {
@@ -278,6 +283,190 @@ function syntheticProject() {
     if (res.tabbar !== 'none') throw new Error('tabbar shown on desktop viewport');
     await page.setViewportSize({ width: 390, height: 844 });
     await page.waitForTimeout(150);
+  });
+
+  // ==== Wave C1: Armature / Rig system ====
+
+  await step('armature: 3-bone chain creation matches THREE.Bone hierarchy to head/tail data', () => page.evaluate(() => {
+    const A = window.__A, T = window.THREE;
+    const rig = A.newRig('TestRig1');
+    const b1 = A.addBone(rig, 'Root', new T.Vector3(0, 1, 0), new T.Vector3(0, 1.5, 0), null);
+    const b2 = A.addBone(rig, 'Mid', new T.Vector3(0, 1.5, 0), new T.Vector3(0, 2, 0), b1.id);
+    const b3 = A.addBone(rig, 'Tip', new T.Vector3(0, 2, 0), new T.Vector3(0, 2.5, 0), b2.id);
+    if (rig.bones.length !== 3) throw new Error('expected 3 bones, got ' + rig.bones.length);
+    if (b2.bone.parent !== b1.bone) throw new Error('Mid bone is not a THREE.Bone child of Root');
+    if (b3.bone.parent !== b2.bone) throw new Error('Tip bone is not a THREE.Bone child of Mid');
+    if (b1.bone.parent !== rig.root) throw new Error('Root bone is not attached to rig.root');
+    if (Math.abs(b2.bone.position.y - 0.5) > 1e-6) throw new Error('Mid bone local position wrong: ' + JSON.stringify(b2.bone.position));
+    if (Math.abs(b3.bone.position.y - 0.5) > 1e-6) throw new Error('Tip bone local position wrong: ' + JSON.stringify(b3.bone.position));
+    rig.root.updateMatrixWorld(true);
+    const w3 = new T.Vector3(); b3.bone.getWorldPosition(w3);
+    if (w3.distanceTo(new T.Vector3(0, 2, 0)) > 1e-6) throw new Error('Tip world position does not match its stored head: ' + JSON.stringify(w3));
+  }));
+
+  await step('armature: chain-extend (Add Bone flow) adds a child bone at the tapped point', () => page.evaluate(() => {
+    const A = window.__A, T = window.THREE;
+    A.startAddBoneChain();
+    A.Arm.chainAnchor = new T.Vector3(1, 1, 1);
+    const rig = A.Rigs[A.Arm.rigId];
+    const before = rig.bones.length;
+    const be = A.chainExtendTo(new T.Vector3(1, 2, 1));
+    if (!be) throw new Error('chainExtendTo returned null');
+    if (rig.bones.length !== before + 1) throw new Error('chain-extend did not add a bone');
+    if (be.head.distanceTo(new T.Vector3(1, 1, 1)) > 1e-6) throw new Error('new bone head should be the previous anchor');
+    if (be.tail.distanceTo(new T.Vector3(1, 2, 1)) > 1e-6) throw new Error('new bone tail should be the tapped point');
+    if (A.Arm.chainAnchor.distanceTo(new T.Vector3(1, 2, 1)) > 1e-6) throw new Error('chain anchor did not advance to the new tail');
+    A.finishChain();
+  }));
+
+  await step('armature: dragging a joint (applyBoneEdit) moves head/tail and updates the THREE.Bone', () => page.evaluate(() => {
+    const A = window.__A, T = window.THREE;
+    const rig = A.newRig('DragRig');
+    const root = A.addBone(rig, 'DragRoot', new T.Vector3(0, 0, 0), new T.Vector3(0, 1, 0), null);
+    const child = A.addBone(rig, 'DragChild', new T.Vector3(0, 1, 0), new T.Vector3(0, 2, 0), root.id);
+    // drag the root's TAIL: child head is a decoupled absolute joint, unaffected (see file header note)
+    root.tail.set(0, 1.5, 0);
+    A.applyBoneEdit(root);
+    if (Math.abs(root.mesh.scale.y - 1.5) > 1e-6) throw new Error('bone visual did not restretch after tail move, scale.y=' + root.mesh.scale.y);
+    if (Math.abs(child.bone.position.y - 1) > 1e-6) throw new Error('child position should be unaffected by a tail-only move');
+    // drag the root's HEAD: child must stay anchored at its own absolute head (world pos unchanged)
+    root.head.set(0.5, 0, 0);
+    A.applyBoneEdit(root);
+    if (Math.abs(root.bone.position.x - 0.5) > 1e-6) throw new Error('root bone.position did not follow its moved head');
+    rig.root.updateMatrixWorld(true);
+    const w = new T.Vector3(); child.bone.getWorldPosition(w);
+    if (w.distanceTo(new T.Vector3(0, 1, 0)) > 1e-6) throw new Error('child world head should stay put when only the parent head moves, got ' + JSON.stringify(w));
+  }));
+
+  await step('armature: Mirror X duplicates a chain with mirrored X + .L/.R suffixes', () => page.evaluate(() => {
+    const A = window.__A, T = window.THREE;
+    const rig = A.newRig('MirrorRig');
+    const shoulder = A.addBone(rig, 'Shoulder', new T.Vector3(0, 1.4, 0), new T.Vector3(0.2, 1.4, 0), null);
+    const upperArm = A.addBone(rig, 'UpperArm.L', new T.Vector3(0.2, 1.4, 0), new T.Vector3(0.6, 1.2, 0), shoulder.id);
+    A.addBone(rig, 'LowerArm.L', new T.Vector3(0.6, 1.2, 0), new T.Vector3(1.0, 1.0, 0), upperArm.id);
+    const mirroredRootId = A.mirrorChainX(rig, upperArm.id);
+    const mUpper = A.findBone(rig, mirroredRootId);
+    if (!mUpper || mUpper.name !== 'UpperArm.R') throw new Error('mirrored root should be named UpperArm.R, got ' + (mUpper && mUpper.name));
+    if (mUpper.parentId !== shoulder.id) throw new Error('mirrored root should keep the original external parent (Shoulder)');
+    if (Math.abs(mUpper.head.x + 0.2) > 1e-6 || Math.abs(mUpper.tail.x + 0.6) > 1e-6) throw new Error('mirrored root X not negated: ' + JSON.stringify([mUpper.head, mUpper.tail]));
+    const mLower = rig.bones.find(b => b.name === 'LowerArm.R');
+    if (!mLower) throw new Error('mirrored descendant LowerArm.R not created');
+    if (mLower.parentId !== mUpper.id) throw new Error('mirrored descendant should be parented to the mirrored root, not the original');
+  }));
+
+  await step('armature: Set Parent reattaches a bone keeping its world position (and refuses cycles)', () => page.evaluate(() => {
+    const A = window.__A, T = window.THREE;
+    const rig = A.newRig('ParentRig');
+    const a = A.addBone(rig, 'A', new T.Vector3(0, 0, 0), new T.Vector3(0, 1, 0), null);
+    const b = A.addBone(rig, 'B', new T.Vector3(2, 0, 0), new T.Vector3(2, 1, 0), null); // separate, unparented chain
+    rig.root.updateMatrixWorld(true);
+    const before = new T.Vector3(); b.bone.getWorldPosition(before);
+    if (!A.setBoneParent(rig, b.id, a.id)) throw new Error('setBoneParent returned false');
+    if (b.parentId !== a.id) throw new Error('parentId not updated');
+    if (b.bone.parent !== a.bone) throw new Error('THREE.Bone hierarchy not reattached');
+    rig.root.updateMatrixWorld(true);
+    const after = new T.Vector3(); b.bone.getWorldPosition(after);
+    if (before.distanceTo(after) > 1e-6) throw new Error('world position changed on reparent, expected keep-offset');
+    if (A.setBoneParent(rig, a.id, b.id)) throw new Error('setBoneParent should refuse to create a cycle');
+  }));
+
+  await step("armature: pose-mode quaternion rotation moves a child bone's world position correctly", () => page.evaluate(() => {
+    const A = window.__A, T = window.THREE;
+    const rig = A.newRig('PoseRig');
+    const root = A.addBone(rig, 'PRoot', new T.Vector3(0, 0, 0), new T.Vector3(0, 1, 0), null);
+    const child = A.addBone(rig, 'PChild', new T.Vector3(0, 1, 0), new T.Vector3(0, 2, 0), root.id);
+    root.bone.quaternion.setFromAxisAngle(new T.Vector3(0, 0, 1), Math.PI / 2); // 90° about Z, goes through bone.quaternion
+    rig.root.updateMatrixWorld(true);
+    const w = new T.Vector3(); child.bone.getWorldPosition(w);
+    if (w.distanceTo(new T.Vector3(-1, 0, 0)) > 1e-4) throw new Error('child world position did not follow parent rotation, got ' + JSON.stringify(w));
+    A.resetBonePose(root);
+    rig.root.updateMatrixWorld(true);
+    const w2 = new T.Vector3(); child.bone.getWorldPosition(w2);
+    if (w2.distanceTo(new T.Vector3(0, 1, 0)) > 1e-6) throw new Error('Reset Bone did not restore the bind pose');
+  }));
+
+  await step('armature: quaternion track slerps (not lerps) between two keyed orientations', () => page.evaluate(() => {
+    const A = window.__A, T = window.THREE;
+    A.Anim.tracks.length = 0;
+    const rig = A.newRig('SlerpRig');
+    const be = A.addBone(rig, 'SlerpBone', new T.Vector3(0, 0, 0), new T.Vector3(0, 1, 0), null);
+    const tid = A.boneTargetId(rig.id, be.name);
+    be.bone.quaternion.identity();
+    A.Anim.insertKey(tid, 'quaternion', 0);
+    be.bone.quaternion.setFromAxisAngle(new T.Vector3(0, 1, 0), Math.PI); // 180°
+    A.Anim.insertKey(tid, 'quaternion', 10);
+    A.Anim.sample(5);
+    const mid = be.bone.quaternion.clone();
+    const startQ = new T.Quaternion(), endQ = new T.Quaternion().setFromAxisAngle(new T.Vector3(0, 1, 0), Math.PI);
+    const angToStart = 2 * Math.acos(Math.min(1, Math.abs(mid.dot(startQ))));
+    const angToEnd = 2 * Math.acos(Math.min(1, Math.abs(mid.dot(endQ))));
+    if (Math.abs(angToStart - Math.PI / 2) > 0.05) throw new Error('midpoint slerp angle-to-start off, expected ~90°, got ' + (angToStart * 180 / Math.PI));
+    if (Math.abs(angToEnd - Math.PI / 2) > 0.05) throw new Error('midpoint slerp angle-to-end off, expected ~90°, got ' + (angToEnd * 180 / Math.PI));
+  }));
+
+  await step('armature: Delete removes a bone and its descendants from rig + Registry + tracks', () => page.evaluate(() => {
+    const A = window.__A, T = window.THREE;
+    A.Anim.tracks.length = 0;
+    const rig = A.newRig('DeleteRig');
+    const root = A.addBone(rig, 'DelRoot', new T.Vector3(0, 0, 0), new T.Vector3(0, 1, 0), null);
+    const child = A.addBone(rig, 'DelChild', new T.Vector3(0, 1, 0), new T.Vector3(0, 2, 0), root.id);
+    const tid = A.boneTargetId(rig.id, child.name);
+    A.Anim.insertKey(tid, 'quaternion', 0);
+    A.deleteBoneAndDescendants(rig, root.id);
+    if (rig.bones.length !== 0) throw new Error('expected all bones removed, got ' + rig.bones.length);
+    if (A.Registry[tid]) throw new Error('deleted bone target is still registered');
+    if (A.Anim.tracks.some(t => t.targetId === tid)) throw new Error('deleted bone track was not cleaned up');
+  }));
+
+  await step('armature: Rename re-keys the Registry entry and any existing Anim track targetId', () => page.evaluate(() => {
+    const A = window.__A, T = window.THREE;
+    A.Anim.tracks.length = 0;
+    const rig = A.newRig('RenameRig');
+    const be = A.addBone(rig, 'OldName', new T.Vector3(0, 0, 0), new T.Vector3(0, 1, 0), null);
+    const oldTid = A.boneTargetId(rig.id, be.name);
+    A.Anim.insertKey(oldTid, 'quaternion', 0);
+    A.renameBone(rig, be.id, 'NewName');
+    const newTid = A.boneTargetId(rig.id, 'NewName');
+    if (A.Registry[oldTid]) throw new Error('old Registry key still present after rename');
+    if (!A.Registry[newTid]) throw new Error('new Registry key missing after rename');
+    if (!A.Anim.tracks.some(t => t.targetId === newTid)) throw new Error('Anim track targetId was not rewritten on rename');
+  }));
+
+  await step('armature: rig autosave round-trips bone count/names/hierarchy/pose across reload', async () => {
+    await page.evaluate(() => {
+      const A = window.__A, T = window.THREE;
+      A.Anim.tracks.length = 0;
+      const rig = A.newRig('SaveRig');
+      A.Arm.rigId = rig.id;
+      const root = A.addBone(rig, 'SaveRoot', new T.Vector3(0, 1, 0), new T.Vector3(0, 1.6, 0), null);
+      const child = A.addBone(rig, 'SaveChild', new T.Vector3(0, 1.6, 0), new T.Vector3(0, 2.2, 0), root.id);
+      child.bone.quaternion.setFromAxisAngle(new T.Vector3(1, 0, 0), 0.4);
+      A.doAnimAutosave();
+    });
+    const raw = await page.evaluate(() => localStorage.getItem(window.__A.ANIM_AUTOSAVE_KEY));
+    const saved = JSON.parse(raw);
+    if (!saved.rigs || !saved.rigs.length) throw new Error('autosave payload has no rigs');
+    await page.reload({ waitUntil: 'load' });
+    await page.waitForFunction(() => window.__A && document.getElementById('boot').style.display === 'none', null, { timeout: 30000 });
+    const res = await page.evaluate(() => {
+      const A = window.__A;
+      const rig = Object.values(A.Rigs).find(r => r.name === 'SaveRig');
+      if (!rig) return { found: false };
+      const root = rig.bones.find(b => b.name === 'SaveRoot');
+      const child = rig.bones.find(b => b.name === 'SaveChild');
+      return {
+        found: true, count: rig.bones.length,
+        childParentIsRoot: !!(child && root && child.parentId === root.id),
+        childBoneParentMatches: !!(child && root && child.bone.parent === root.bone),
+        childQuatW: child ? child.bone.quaternion.w : null
+      };
+    });
+    if (!res.found) throw new Error('rig did not survive reload');
+    if (res.count !== 2) throw new Error('expected 2 restored bones, got ' + res.count);
+    if (!res.childParentIsRoot) throw new Error('restored parentId hierarchy wrong');
+    if (!res.childBoneParentMatches) throw new Error('restored THREE.Bone hierarchy wrong');
+    if (Math.abs(res.childQuatW - Math.cos(0.2)) > 1e-4) throw new Error('restored pose quaternion wrong, got w=' + res.childQuatW);
+    await page.evaluate(() => localStorage.removeItem(window.__A.ANIM_AUTOSAVE_KEY));
   });
 
   await browser.close();
