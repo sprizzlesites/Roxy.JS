@@ -101,7 +101,7 @@ Wave definitions live in `docs/GAP_ANALYSIS.md` §4 — this table only tracks s
 | C1 | animate.html: armatures/bones/parenting/pose mode | DONE | a561a08 | animate suite now 28; slerp in Anim.sample; bone Registry ids `rig/bone:Name`; anim autosave format v2 |
 | C2 | Skinning bind + auto weights | TODO | | |
 | C3 | Per-axis FK, CCD IK + pole targets, per-bone rotation limits | DONE | 58dc09c | animate suite now 36; `solveIK(chainBEs,target,iters,{maxStep,tolerance,pole})`; `clampBoneRotation` is the C4 Limit-constraint entry point; autosave v3 (additive) |
-| C4 | Constraints | TODO | | |
+| C4 | Constraints (copyLoc/copyRot/trackTo/limitRot, influence keyable) | DONE | 52007de | animate suite now 45; influence track ids use stable `con:<id>` not index; object-level constraints runtime-only (not serialized) |
 | D1 | Keyframe core (Track model + sampler) | TODO | | load-bearing for D/E |
 | D2 | Timeline + playback transport | TODO | | |
 | D3 | Dope sheet | TODO | | |
