@@ -1385,7 +1385,8 @@ function onViewportTap(e){var slot=curSlot();if(!slot)return;var r=dom.getBoundi
 
 var editState={mode:'face',tool:'select',grabActive:false,grabPtId:null,grabPrevX:0,grabPrevY:0,grabSnap:null,multiSel:false,hudExpanded:false,prop:false,propR:.8,mirror:false,mirrorAxis:0,boxSel:0,extrudeAmt:.3,insetAmt:.22,
   slide:false,shrinkAmt:.15,randAmt:.1,randSeed:0,shearAmt:.3,shearPair:0,
-  spinAxis:1,spinOriginWorld:false,spinAngle:360,spinSteps:16,screwOffset:1,screwRevs:1};
+  spinAxis:1,spinOriginWorld:false,spinAngle:360,spinSteps:16,screwOffset:1,screwRevs:1,
+  bevelWidth:.25,bevelSegs:1,loopSlideT:0,symmAxis:0};
 
 function screenDeltaToWorld(dx,dy){
   var cam=active.vs.cam,rad=active.vs.rad;
@@ -1968,16 +1969,35 @@ var EM={
     this.F=newF;this._buildEdges();this._refresh();this._pushTopo(_b);},
 
   loopCut:function(){
-    var self=this,newF=[],hasSel=this.F.some(function(f){return f.sel;}),_b=this._topoSnapshot();
+    var self=this,newF=[],hasSel=this.F.some(function(f){return f.sel;}),_b=this._topoSnapshot(),cuts=[];
     this.F.forEach(function(f){
       if(hasSel&&!f.sel){newF.push(f);return;}
       if(f.vi.length===4){
         var vi=f.vi,m01=self.V[vi[0]].clone().add(self.V[vi[1]]).multiplyScalar(.5);m01.sel=true;self._uvMix(m01,vi[0],vi[1],.5);
         var m23=self.V[vi[2]].clone().add(self.V[vi[3]]).multiplyScalar(.5);m23.sel=true;self._uvMix(m23,vi[2],vi[3],.5);
         self.V.push(m01,m23);var mi=self.V.length-2,mj=self.V.length-1;
+        // record each new vert's neighbor-ring endpoints (same v0→v1 / v3→v2 direction on both
+        // rails of a quad) so "Slide last cut" can re-lerp the whole loop losslessly afterwards
+        cuts.push({i:mi,a:self.V[vi[0]].clone(),b:self.V[vi[1]].clone()},
+                  {i:mj,a:self.V[vi[3]].clone(),b:self.V[vi[2]].clone()});
         newF.push({vi:[vi[0],mi,mj,vi[3]],sel:false},{vi:[mi,vi[1],vi[2],mj],sel:false});
       } else newF.push(f);});
-    this.F=newF;this._buildEdges();this._refresh();this._pushTopo(_b);},
+    this.F=newF;
+    this._lastLoopCut=cuts.length?{n:this.V.length,items:cuts}:null;editState.loopSlideT=0;
+    this._buildEdges();this._refresh();this._pushTopo(_b);},
+
+  // Wave A3: Slide the last Loop Cut — re-lerps every vert of that cut between the two
+  // neighbor-ring positions captured AT CUT TIME (never cumulative nudges), so a live slider
+  // can scrub back and forth losslessly. f∈[-1,1]: -1 = first ring, 0 = centered, +1 = second
+  // ring. Invalidated (silently — the UI hides the control) once the vert count changes,
+  // because stored indices would no longer be trustworthy.
+  _lastLoopCut:null,
+  loopCutSlide:function(f){
+    var lc=this._lastLoopCut;
+    if(!lc||lc.n!==this.V.length)return;
+    var t=(Math.max(-1,Math.min(1,f))+1)/2,self=this;
+    lc.items.forEach(function(it){self.V[it.i].copy(it.a).lerp(it.b,t);});
+    this._syncPositions();},
 
   // Bake the mirror preview into real geometry: duplicate every face reflected across
   // the chosen axis plane (winding reversed — any single-axis reflection flips
@@ -2052,15 +2072,65 @@ var EM={
     this._refresh();renderPanel();
     toast(added?'Selected linked (+'+added+')':'Island already fully selected');},
 
+  // Bridge: exactly 2 selected edges → one quad (the original behavior). Bigger selections
+  // (Wave A3) must form TWO connected chains of open boundary edges (1 face each) of EQUAL
+  // length; the chains get a quad band. Orientation is taken from the adjacent faces' winding
+  // (chain A walks against it, chain B along it) so every band quad traverses each shared
+  // boundary edge opposite to the face that already owns it — consistent normals, no twist.
+  // Closed loops are additionally rotated so pairing starts at the closest vertex pair.
   bridgeEdges:function(){
-    var sel=this.E.filter(function(e){return e.sel;});
-    if(sel.length!==2){toast('Select exactly 2 edges (Edge mode)');return;}
-    var _b=this._topoSnapshot();
-    var e1=sel[0],e2=sel[1],a1=e1.a,b1=e1.b,a2=e2.a,b2=e2.b;
-    var d1=this.V[a1].distanceTo(this.V[a2])+this.V[b1].distanceTo(this.V[b2]);
-    var d2=this.V[a1].distanceTo(this.V[b2])+this.V[b1].distanceTo(this.V[a2]);
-    this.F.push({vi:(d1<=d2?[a1,b1,b2,a2]:[a1,b1,a2,b2]),sel:false});
-    this.clearSel();this._buildEdges();this._refresh();this._pushTopo(_b);toast('Bridged');},
+    var self=this,sel=this.E.filter(function(e){return e.sel;});
+    if(sel.length===2){
+      var _b=this._topoSnapshot();
+      var e1=sel[0],e2=sel[1],a1=e1.a,b1=e1.b,a2=e2.a,b2=e2.b;
+      var d1=this.V[a1].distanceTo(this.V[a2])+this.V[b1].distanceTo(this.V[b2]);
+      var d2=this.V[a1].distanceTo(this.V[b2])+this.V[b1].distanceTo(this.V[a2]);
+      this.F.push({vi:(d1<=d2?[a1,b1,b2,a2]:[a1,b1,a2,b2]),sel:false});
+      this.clearSel();this._buildEdges();this._refresh();this._pushTopo(_b);toast('Bridged');return;}
+    if(sel.length<2){toast('Select 2 edges, or two equal-length boundary loops (Edge mode)');return;}
+    if(sel.some(function(e){return e.fi.length!==1;})){toast('Loop bridge needs open boundary edges (1 face each)');return;}
+    // split the selection into connected chains (edges sharing a vertex)
+    var comps=[],seen={};function ek(e){return e.a+'_'+e.b;}
+    sel.forEach(function(e0){
+      if(seen[ek(e0)])return;
+      var comp=[],stack=[e0];seen[ek(e0)]=1;
+      while(stack.length){var e=stack.pop();comp.push(e);
+        sel.forEach(function(o){if(seen[ek(o)])return;
+          if(o.a===e.a||o.a===e.b||o.b===e.a||o.b===e.b){seen[ek(o)]=1;stack.push(o);}});}
+      comps.push(comp);});
+    if(comps.length!==2||comps[0].length!==comps[1].length){
+      toast('Select two connected boundary loops of EQUAL length ('+comps.length+' chain'+(comps.length>1?'s':'')+' found'+(comps.length===2?', '+comps[0].length+' vs '+comps[1].length+' edges':'')+')');return;}
+    // order a chain into a vertex sequence; dir=+1 walks along the lone adjacent face's
+    // winding, dir=-1 against it (fillHole's boundary-direction trick)
+    function orient(chain,dir){
+      var next={};
+      for(var i=0;i<chain.length;i++){
+        var e=chain[i],f=self.F[e.fi[0]],vi=f.vi,ia=vi.indexOf(e.a);
+        if(ia<0)return null;
+        var aToB=vi[(ia+1)%vi.length]===e.b;
+        var u=aToB?e.a:e.b,w=aToB?e.b:e.a;   // the face traverses u→w
+        if(dir>0){if(next[u]!==undefined)return null;next[u]=w;}
+        else{if(next[w]!==undefined)return null;next[w]=u;}}
+      var keys=Object.keys(next).map(Number),isTarget={};
+      keys.forEach(function(k){isTarget[next[k]]=1;});
+      var start=-1;for(var k=0;k<keys.length;k++)if(!isTarget[keys[k]]){start=keys[k];break;}
+      var closed=start<0;if(closed)start=keys[0];
+      var seq=[start],cur=next[start],guard=0;
+      while(cur!==undefined&&cur!==start&&guard++<chain.length+1){seq.push(cur);cur=next[cur];}
+      if(seq.length!==(closed?chain.length:chain.length+1)||(closed&&cur!==start))return null;
+      return {seq:seq,closed:closed};}
+    var A=orient(comps[0],-1),B=orient(comps[1],1);
+    if(!A||!B||A.closed!==B.closed){toast('Each side must be one simple open chain or closed loop');return;}
+    var _b2=this._topoSnapshot(),n=A.seq.length,off=0,added=0;
+    if(A.closed){ // rotate B so pairing starts at the closest vertex pair (avoids a spiral)
+      var bd=Infinity;
+      for(var j=0;j<n;j++){var d=this.V[A.seq[0]].distanceTo(this.V[B.seq[j]]);if(d<bd){bd=d;off=j;}}}
+    var quads=A.closed?n:n-1;
+    for(var k=0;k<quads;k++){
+      var qa0=A.seq[k],qa1=A.seq[(k+1)%n],qb0=B.seq[(k+off)%n],qb1=B.seq[(k+1+off)%n];
+      this.F.push({vi:[qa0,qa1,qb1,qb0],sel:false});added++;}
+    this.clearSel();this._buildEdges();this._refresh();this._pushTopo(_b2);
+    renderPanel();toast('Bridged '+added+' quad'+(added>1?'s':'')+' between the loops');},
 
   // Cap a whole boundary loop (a hole left by Delete, or an open primitive edge)
   // with one new n-gon face, instead of bridging pairs of edges by hand.
@@ -2086,12 +2156,21 @@ var EM={
     this._buildEdges();this._refresh();this._pushTopo(_b);
     renderPanel();toast('Filled hole with a '+loop.length+'-sided face');},
 
-  // Chamfer-bevel selected interior edges: each edge splits into a flat strip.
-  // Edges sharing a vertex with an already-beveled edge are skipped this pass.
-  bevelEdges:function(){
+  // Chamfer-bevel selected interior edges: each edge splits into a strip. Wave A3: `width`
+  // is the fraction (0..0.49) each end is cut back toward its neighbor vert (was a fixed
+  // 0.25), `segs` the strip's segment count — 1 keeps the flat chamfer, 2+ sweeps a circular
+  // arc (centered on the original edge, radius = the cut-back distance) between the two
+  // adjacent face planes for a rounded profile. On a flat (coplanar-faces) edge the arc
+  // degenerates and falls back to straight interpolation. Both default from editState so
+  // the one-tap flow keeps working. Edges sharing a vertex with an already-beveled edge are
+  // skipped this pass.
+  bevelEdges:function(width,segs){
     var sel=this.E.filter(function(e){return e.sel;});
     if(!sel.length){toast('Select edge(s) first (Edge mode)');return;}
-    var self=this,_b=this._topoSnapshot(),t=0.25,done=0,used={};
+    width=(width==null?editState.bevelWidth:width);
+    segs=Math.max(1,Math.round(segs==null?editState.bevelSegs:segs));
+    var t=Math.max(.02,Math.min(.49,width));
+    var self=this,_b=this._topoSnapshot(),done=0,used={};
     sel.forEach(function(e){
       if(e.fi.length!==2||used[e.a]||used[e.b])return;
       var f1=self.F[e.fi[0]],f2=self.F[e.fi[1]];if(!f1||!f2)return;
@@ -2101,24 +2180,39 @@ var EM={
       var na1=nbr(f1,e.a,e.b),nb1=nbr(f1,e.b,e.a),na2=nbr(f2,e.a,e.b),nb2=nbr(f2,e.b,e.a);
       if(na1<0||nb1<0||na2<0||nb2<0)return;
       var nsum=self._faceNormal(e.fi[0]).add(self._faceNormal(e.fi[1]));
-      function mk(v,to){var nv=self.V[v].clone().lerp(self.V[to],t);nv.sel=false;self._uvMix(nv,v,to,t);self.V.push(nv);return self.V.length-1;}
-      var A1=mk(e.a,na1),B1=mk(e.b,nb1),A2=mk(e.a,na2),B2=mk(e.b,nb2);
+      // segs+1 verts arcing around P from the face1-side cut point to the face2-side one
+      function arcRow(v,to1,to2){
+        var P=self.V[v],d1=self.V[to1].clone().sub(P).multiplyScalar(t),d2=self.V[to2].clone().sub(P).multiplyScalar(t);
+        var axis=new THREE.Vector3().crossVectors(d1,d2),ang=d1.angleTo(d2),arc=axis.lengthSq()>1e-12&&ang>1e-6;
+        if(arc)axis.normalize();
+        var row=[];
+        for(var k=0;k<=segs;k++){
+          var s=k/segs,p;
+          if(k===0)p=P.clone().add(d1);
+          else if(k===segs)p=P.clone().add(d2);
+          else if(arc){var dd=d1.clone().applyAxisAngle(axis,ang*s);dd.setLength(d1.length()*(1-s)+d2.length()*s);p=P.clone().add(dd);}
+          else p=P.clone().add(d1.clone().lerp(d2,s));
+          p.sel=false;self._uvMix(p,v,s<.5?to1:to2,t);self.V.push(p);row.push(self.V.length-1);}
+        return row;}
+      var rowA=arcRow(e.a,na1,na2),rowB=arcRow(e.b,nb1,nb2);
       var ia=f1.vi.indexOf(e.a);
       var aThenB=f1.vi[(ia+1)%f1.vi.length]===e.b;
-      f1.vi=f1.vi.map(function(v){return v===e.a?A1:(v===e.b?B1:v);});
-      f2.vi=f2.vi.map(function(v){return v===e.a?A2:(v===e.b?B2:v);});
-      self.F.push({vi:aThenB?[B1,A1,A2,B2]:[A1,B1,B2,A2],sel:false});
+      f1.vi=f1.vi.map(function(v){return v===e.a?rowA[0]:(v===e.b?rowB[0]:v);});
+      f2.vi=f2.vi.map(function(v){return v===e.a?rowA[segs]:(v===e.b?rowB[segs]:v);});
+      for(var k2=0;k2<segs;k2++)
+        self.F.push({vi:aThenB?[rowB[k2],rowA[k2],rowA[k2+1],rowB[k2+1]]:[rowA[k2],rowB[k2],rowB[k2+1],rowA[k2+1]],sel:false});
       function pushTri(p,q,r){
         var n=new THREE.Vector3().crossVectors(
           new THREE.Vector3().subVectors(self.V[q],self.V[p]),
           new THREE.Vector3().subVectors(self.V[r],self.V[p]));
         self.F.push({vi:n.dot(nsum)>=0?[p,q,r]:[p,r,q],sel:false});}
-      if(self.F.some(function(f){return f.vi.indexOf(e.a)>=0;}))pushTri(e.a,A1,A2);
-      if(self.F.some(function(f){return f.vi.indexOf(e.b)>=0;}))pushTri(e.b,B1,B2);
+      // end caps: a fan of tris per arc segment wherever the original end vert survives
+      if(self.F.some(function(f){return f.vi.indexOf(e.a)>=0;}))for(var k3=0;k3<segs;k3++)pushTri(e.a,rowA[k3],rowA[k3+1]);
+      if(self.F.some(function(f){return f.vi.indexOf(e.b)>=0;}))for(var k4=0;k4<segs;k4++)pushTri(e.b,rowB[k4],rowB[k4+1]);
       used[e.a]=used[e.b]=1;done++;});
     if(!done){toast('Bevel needs interior edges (2 faces each)');return;}
     this.clearSel();this._buildEdges();this._refresh();this._pushTopo(_b);
-    renderPanel();toast('Beveled '+done+' edge'+(done>1?'s':''));},
+    renderPanel();toast('Beveled '+done+' edge'+(done>1?'s':'')+(segs>1?' ('+segs+' segments)':''));},
 
   deleteSelected:function(){
     var mode=editState.mode,_b=this._topoSnapshot();
@@ -2450,6 +2544,79 @@ var EM={
     var origin=es.spinOriginWorld?new THREE.Vector3(0,0,0):this._selCentroid(this._selVertSet());
     var totalAngle=360*es.screwRevs,totalSteps=Math.max(1,Math.round(es.spinSteps*es.screwRevs));
     if(this._spinScrew(axisVec,origin,totalAngle,totalSteps,es.screwOffset)){renderPanel();toast('Screwed '+es.screwRevs+' rev × offset '+es.screwOffset.toFixed(2));}},
+
+  // ─── Wave A3: Vertex bevel / Symmetrize ─────────────────────────────────────────────
+
+  // Vertex bevel (corner chamfer): each selected vertex with 3+ outgoing edges is cut back
+  // along EVERY outgoing edge by `width` (same 0..0.49 fraction as the edge bevel), each
+  // touching face gets the two cut verts spliced in where the corner was, and the opened
+  // corner is capped with one n-gon (fan-ordered via fillHole's opposite-winding rule so it
+  // faces outward). Boundary corners whose face-fan doesn't close into a single loop are
+  // chamfered but left uncapped. The original corner verts (now unreferenced) are dropped.
+  bevelVerts:function(width){
+    var selI=[];for(var i=0;i<this.V.length;i++)if(this.V[i].sel)selI.push(i);
+    if(!selI.length){toast('Select vertex(es) first (Vert mode)');return;}
+    width=(width==null?editState.bevelWidth:width);
+    var t=Math.max(.02,Math.min(.49,width)),self=this,_b=this._topoSnapshot(),done=0;
+    selI.forEach(function(v){
+      var faces=[];self.F.forEach(function(f,fi){if(f.vi.indexOf(v)>=0)faces.push(fi);});
+      if(faces.length<2)return;
+      var nbrs={};
+      faces.forEach(function(fi){var L=self.F[fi].vi,i=L.indexOf(v);
+        nbrs[L[(i+L.length-1)%L.length]]=1;nbrs[L[(i+1)%L.length]]=1;});
+      if(Object.keys(nbrs).length<3)return; // needs a real corner (3+ outgoing edges)
+      var nvMap={};
+      function nv(to){if(nvMap[to]===undefined){var p=self.V[v].clone().lerp(self.V[to],t);p.sel=false;self._uvMix(p,v,to,t);self.V.push(p);nvMap[to]=self.V.length-1;}return nvMap[to];}
+      var next={};
+      faces.forEach(function(fi){
+        var f=self.F[fi],i=f.vi.indexOf(v),p=f.vi[(i+f.vi.length-1)%f.vi.length],q=f.vi[(i+1)%f.vi.length];
+        var a=nv(p),b=nv(q);
+        f.vi.splice(i,1,a,b);          // p → v → q  becomes  p → a → b → q
+        next[b]=a;});                  // cap traverses each chord OPPOSITE the face's winding
+      var keys=Object.keys(next).map(Number),start=keys[0],loop=[start],cur=next[start],guard=0;
+      while(cur!==undefined&&cur!==start&&guard++<keys.length+1){loop.push(cur);cur=next[cur];}
+      if(cur===start&&loop.length===keys.length&&loop.length>=3)self.F.push({vi:loop,sel:false});
+      done++;});
+    if(!done){toast('Vertex bevel needs corners with 3+ edges');return;}
+    // drop the now-unreferenced original corner verts
+    var used=new Array(this.V.length).fill(false);
+    this.F.forEach(function(f){f.vi.forEach(function(vi){used[vi]=true;});});
+    var nV=[],remap=new Array(this.V.length);
+    for(var i2=0;i2<this.V.length;i2++)if(used[i2]){remap[i2]=nV.length;nV.push(this.V[i2]);}
+    this.V=nV;this.F.forEach(function(f){f.vi=f.vi.map(function(x){return remap[x];});});
+    this.clearSel();this._buildEdges();this._refresh();this._pushTopo(_b);
+    renderPanel();toast('Beveled '+done+' corner'+(done>1?'s':''));},
+
+  // Symmetrize (one shot): delete everything on the NEGATIVE side of the editState.symmAxis
+  // plane (through the origin), mirror the positive side across, weld the seam — the same
+  // bake+weld construction as applyMirror, minus the preview. Simplification (documented):
+  // verts within `tol` of the plane are snapped exactly onto it first (they become the seam),
+  // which is how faces that merely graze the plane get handled; any face still having a vert
+  // strictly on the negative side after that snap is DROPPED whole (no polygon clipping).
+  symmetrize:function(){
+    if(!this.V.length){toast('No mesh to symmetrize');return;}
+    var ax=editState.symmAxis,tol=1e-3,self=this,_b=this._topoSnapshot();
+    this.V.forEach(function(v){if(Math.abs(v.getComponent(ax))<tol)v.setComponent(ax,0);});
+    var keptF=this.F.filter(function(f){return f.vi.every(function(vi){return self.V[vi].getComponent(ax)>=-1e-9;});});
+    if(!keptF.length){this._topoRestore(_b);toast('Nothing on the +'+'XYZ'[ax]+' side of the plane to keep');return;}
+    var dropped=this.F.length-keptF.length;
+    this.F=keptF;
+    // drop now-unreferenced (negative-side) verts before mirroring
+    var used=new Array(this.V.length).fill(false);
+    this.F.forEach(function(f){f.vi.forEach(function(vi){used[vi]=true;});});
+    var nV=[],remap=new Array(this.V.length);
+    for(var i=0;i<this.V.length;i++)if(used[i]){remap[i]=nV.length;nV.push(this.V[i]);}
+    this.V=nV;this.F.forEach(function(f){f.vi=f.vi.map(function(x){return remap[x];});});
+    // mirror the kept half across the plane (applyMirror's reflect + reverse-winding + weld)
+    var n=this.V.length;
+    var mirroredV=this.V.map(function(v){var mv=v.clone();mv.setComponent(ax,-mv.getComponent(ax));mv.sel=false;
+      if(v.u0!==undefined){mv.u0=v.u0;mv.v0=v.v0;}return mv;});
+    var mirroredF=this.F.map(function(f){return {vi:f.vi.map(function(i){return i+n;}).reverse(),sel:false};});
+    this.V=this.V.concat(mirroredV);this.F=this.F.concat(mirroredF);
+    this._weld(1e-4);
+    this._buildEdges();this._refresh();this._pushTopo(_b);
+    renderPanel();
+    toast('Symmetrized +'+'XYZ'[ax]+' → −'+'XYZ'[ax]+(dropped?' ('+dropped+' negative-side faces replaced)':''));},
 
   exportToModel:function(){
     // With a source texture, export using the carried per-vertex UVs so the original
@@ -2831,6 +2998,9 @@ function cycleSpinAxis(){editState.spinAxis=(editState.spinAxis+1)%3;renderEditH
 function spinAxisLabel(){return 'Axis '+'XYZ'[editState.spinAxis];}
 function toggleSpinOrigin(){editState.spinOriginWorld=!editState.spinOriginWorld;renderEditHud();renderPanel();toast(editState.spinOriginWorld?'Spin origin: world 0,0,0':'Spin origin: selection centroid');}
 function spinOriginLabel(){return editState.spinOriginWorld?'Origin: World':'Origin: Centroid';}
+// Symmetrize axis cycles X→Y→Z, same single-button pattern as cycleSpinAxis/cycleMirror.
+function cycleSymmAxis(){editState.symmAxis=(editState.symmAxis+1)%3;renderEditHud();renderPanel();toast('Symmetrize axis '+'XYZ'[editState.symmAxis]);}
+function symmAxisLabel(){return 'Sym '+'XYZ'[editState.symmAxis];}
 function renderEditHud(){
   var hud=$('#editHud');if(!hud)return;
   hud.innerHTML='';
@@ -2885,7 +3055,7 @@ function renderEditHud(){
         if(selN>0){
           mr2.appendChild(el('button',{class:'hud-btn',title:'Grow to the whole connected island',text:'Linked',onclick:function(){EM.selectLinked();}}));
           if(mode==='face'){mr2.appendChild(el('button',{class:'hud-btn',text:'Extrude',onclick:function(){EM.extrude();}}));mr2.appendChild(el('button',{class:'hud-btn',title:'Extrude inward',text:'Emboss',onclick:function(){EM.extrude(-editState.extrudeAmt);}}));mr2.appendChild(el('button',{class:'hud-btn',title:'Push faces out along normal',text:'Push+',onclick:function(){EM.pushSel(editState.extrudeAmt*.5);}}));mr2.appendChild(el('button',{class:'hud-btn',title:'Push faces in along normal',text:'Push−',onclick:function(){EM.pushSel(-editState.extrudeAmt*.5);}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Inset',onclick:function(){EM.inset();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Dup',onclick:function(){EM.duplicateSelection();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Separate',onclick:function(){EM.separateSelection();}}));}
-          if(mode==='vert'){mr2.appendChild(el('button',{class:'hud-btn',text:'Merge',onclick:function(){EM.mergeSelected();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Smooth',onclick:function(){EM.smoothVerts();renderPanel();}}));}
+          if(mode==='vert'){mr2.appendChild(el('button',{class:'hud-btn',text:'Merge',onclick:function(){EM.mergeSelected();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Smooth',onclick:function(){EM.smoothVerts();renderPanel();}}));mr2.appendChild(el('button',{class:'hud-btn',title:'Chamfer selected corners (3+ edges) into an n-gon cap',text:'BevelV',onclick:function(){EM.bevelVerts();}}));}
           if(mode==='edge'){mr2.appendChild(el('button',{class:'hud-btn',text:'Loop',onclick:function(){EM.selectLoops();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Bevel',onclick:function(){EM.bevelEdges();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Bridge',onclick:function(){EM.bridgeEdges();renderPanel();}}));mr2.appendChild(el('button',{class:'hud-btn',title:'Cap a whole boundary loop with one face',text:'Fill',onclick:function(){EM.fillHole();}}));}
           mr2.appendChild(el('button',{class:'hud-btn',text:'Subdiv',onclick:function(){EM.subdivide();renderPanel();}}));
           mr2.appendChild(el('button',{class:'hud-btn',text:'Delete',onclick:function(){EM.deleteSelected();}}));
@@ -2902,8 +3072,12 @@ function renderEditHud(){
           mr2.appendChild(el('button',{class:'hud-btn',title:'Revolve the selected profile (Vert/Edge) around the axis',text:'Spin',onclick:function(){EM.spin();}}));
           mr2.appendChild(el('button',{class:'hud-btn',title:'Spin + a per-revolution axis offset — helical sweep',text:'Screw',onclick:function(){EM.screw();}}));
         }
+        mr2.appendChild(el('button',{class:'hud-btn',title:'Cycle the Symmetrize axis',text:symmAxisLabel(),onclick:cycleSymmAxis}));
+        mr2.appendChild(el('button',{class:'hud-btn',title:'Delete the − side of the axis plane, mirror the + side across, weld the seam',text:'Symmetrize',onclick:function(){EM.symmetrize();}}));
         mr2.appendChild(el('button',{class:'hud-btn',text:'Save →',onclick:function(){EM.exportToModel();}}));
         hud.appendChild(mr2);
+        if(EM._lastLoopCut&&EM._lastLoopCut.n===EM.V.length)
+          hud.appendChild(hudSlider('Slide cut',-1,1,editState.loopSlideT,.01,function(x){editState.loopSlideT=x;EM.loopCutSlide(x);}));
       }
     }else if(!sculpting&&!knifing&&selN>0){
       /* quick ops row even when collapsed */
@@ -2970,6 +3144,8 @@ function renderEditHud(){
   mr.appendChild(el('button',{class:'hud-btn'+(editState.mirror?' on':''),title:'Cycle mirror axis: Off → X → Y → Z',text:mirrorBtnLabel(),onclick:cycleMirror}));
   if(editState.mirror)mr.appendChild(el('button',{class:'hud-btn',title:'Bake the mirrored half into real geometry',text:'Apply Mirror',onclick:function(){EM.applyMirror();}}));
   if(mode!=='face')mr.appendChild(el('button',{class:'hud-btn'+(editState.slide?' on':''),title:'Drag glides along an adjacent edge instead of moving freely',text:'Slide',onclick:toggleSlide}));
+  mr.appendChild(el('button',{class:'hud-btn',title:'Cycle the Symmetrize axis',text:symmAxisLabel(),onclick:cycleSymmAxis}));
+  mr.appendChild(el('button',{class:'hud-btn',title:'Delete the − side of the axis plane, mirror the + side across, weld the seam',text:'Symmetrize',onclick:function(){EM.symmetrize();}}));
   hud.appendChild(mr);
 
   if(selN>0){
@@ -2987,6 +3163,7 @@ function renderEditHud(){
     if(mode==='vert'){
       or.appendChild(el('button',{class:'hud-btn',text:'Merge',onclick:function(){EM.mergeSelected();}}));
       or.appendChild(el('button',{class:'hud-btn',text:'Smooth',onclick:function(){EM.smoothVerts();renderPanel();}}));
+      or.appendChild(el('button',{class:'hud-btn',title:'Chamfer selected corners (3+ edges) into an n-gon cap',text:'Bevel V',onclick:function(){EM.bevelVerts();}}));
     }
     if(mode==='edge'){
       or.appendChild(el('button',{class:'hud-btn',text:'Loop',onclick:function(){EM.selectLoops();}}));
@@ -3010,6 +3187,8 @@ function renderEditHud(){
     or.appendChild(el('button',{class:'hud-btn',title:'Spin + a per-revolution axis offset — helical sweep',text:'Screw',onclick:function(){EM.screw();}}));
     hud.appendChild(or);
   }
+  if(EM._lastLoopCut&&EM._lastLoopCut.n===EM.V.length)
+    hud.appendChild(hudSlider('Slide cut',-1,1,editState.loopSlideT,.01,function(x){editState.loopSlideT=x;EM.loopCutSlide(x);}));
 
   var er=el('div',{class:'hud-row'});
   er.appendChild(el('button',{class:'hud-btn',text:'Save as model →',onclick:function(){EM.exportToModel();}}));
@@ -3125,6 +3304,8 @@ function panelEdit(b){
     el('button',{text:'Subdivide  [S]',onclick:function(){EM.subdivide();renderPanel();}}),
     el('button',{text:'Loop Cut',onclick:function(){EM.loopCut();renderPanel();}})
   ]));
+  if(EM._lastLoopCut&&EM._lastLoopCut.n===EM.V.length)
+    b.appendChild(slider('Slide last cut (−1..1)',-1,1,editState.loopSlideT,.01,function(x){editState.loopSlideT=x;EM.loopCutSlide(x);}));
   b.appendChild(el('div',{class:'grid2',style:'margin-top:6px'},[
     el('button',{text:'Delete  [X]',onclick:function(){EM.deleteSelected();}}),
     el('button',{text:'Flip Normals',onclick:function(){EM.flipNormals();}})
@@ -3133,7 +3314,7 @@ function panelEdit(b){
     text:'Recalculate Normals (Outside)  [N]',onclick:function(){EM.recalcNormals();}}));
   b.appendChild(el('div',{class:'grid2',style:'margin-top:6px'},[
     el('button',{text:'Separate Faces',onclick:function(){EM.separateSelection();}}),
-    el('button',{text:'Bridge Edges',onclick:function(){EM.bridgeEdges();renderPanel();}})
+    el('button',{text:'Bridge Edges',title:'2 edges → one quad · two equal-length open boundary loops → a full quad band',onclick:function(){EM.bridgeEdges();renderPanel();}})
   ]));
   b.appendChild(el('button',{style:'width:100%;margin-top:6px',title:'Select all the boundary edges around a hole (Edge mode), then cap it with one face',
     text:'Fill Hole',onclick:function(){EM.fillHole();}}));
@@ -3141,16 +3322,22 @@ function panelEdit(b){
     el('button',{text:'Merge Verts',onclick:function(){EM.mergeSelected();}}),
     el('button',{text:'Smooth',onclick:function(){EM.smoothVerts();renderPanel();}})
   ]));
-  b.appendChild(el('div',{class:'grid2',style:'margin-top:6px'},[
-    el('button',{text:'Weld Close',onclick:function(){EM.weldClose();renderPanel();}}),
-    el('button',{text:'Bevel Edges  [B]',onclick:function(){EM.bevelEdges();}})
-  ]));
+  b.appendChild(el('button',{style:'width:100%;margin-top:6px',text:'Weld Close',onclick:function(){EM.weldClose();renderPanel();}}));
   b.appendChild(el('div',{class:'grid2',style:'margin-top:6px'},[
     el('button',{text:'Select Loop  [L]',onclick:function(){EM.selectLoops();}}),
     el('button',{text:'Duplicate  [D]',onclick:function(){EM.duplicateSelection();}})
   ]));
   b.appendChild(el('button',{style:'width:100%;margin-top:6px',title:'Grow the selection to the whole connected mesh island',
     text:'Select Linked',onclick:function(){EM.selectLinked();}}));
+
+  b.appendChild(el('div',{class:'section-title',text:'Bevel'}));
+  b.appendChild(el('p',{class:'small muted',style:'margin-bottom:6px',text:'Edge bevel (Edge mode) cuts each selected interior edge back by the width fraction; 2+ segments round the cut into a circular arc between the two face planes. Vertex bevel (Vert mode) chamfers each selected corner with 3+ edges and caps it with an n-gon.'}));
+  b.appendChild(slider('Bevel width (fraction of edge)',.02,.49,editState.bevelWidth,.01,function(x){editState.bevelWidth=x;}));
+  b.appendChild(slider('Bevel segments',1,8,editState.bevelSegs,1,function(x){editState.bevelSegs=Math.round(x);}));
+  b.appendChild(el('div',{class:'grid2'},[
+    el('button',{text:'Bevel Edges  [B]',onclick:function(){EM.bevelEdges();}}),
+    el('button',{text:'Bevel Verts',title:'Chamfer selected corner vertices (3+ edges) and cap each with an n-gon',onclick:function(){EM.bevelVerts();}})
+  ]));
 
   b.appendChild(el('div',{class:'section-title',text:'Shrink/Fatten (along normals)'}));
   b.appendChild(el('p',{class:'small muted',style:'margin-bottom:6px',text:'Offsets each selected vertex along its OWN normal — unlike Scale, verts on opposite sides of the mesh move apart instead of toward one shared center.'}));
@@ -3188,6 +3375,13 @@ function panelEdit(b){
   b.appendChild(slider('Screw offset per revolution',-4,4,editState.screwOffset,.01,function(x){editState.screwOffset=x;}));
   b.appendChild(slider('Screw revolutions',1,8,editState.screwRevs,1,function(x){editState.screwRevs=Math.round(x);}));
   b.appendChild(el('button',{style:'width:100%',text:'Screw (helical sweep)',onclick:function(){EM.screw();}}));
+
+  b.appendChild(el('div',{class:'section-title',text:'Symmetrize'}));
+  b.appendChild(el('p',{class:'small muted',style:'margin-bottom:6px',text:'One shot: deletes everything on the − side of the axis plane (through the origin), mirrors the + side across, and welds the seam. Verts within a small tolerance of the plane snap onto it and become the seam; faces still crossing the plane after that are dropped with the − side (no polygon clipping).'}));
+  b.appendChild(el('div',{class:'grid2'},[
+    el('button',{text:'Axis: '+'XYZ'[editState.symmAxis],title:'Cycle the symmetry axis X → Y → Z',onclick:cycleSymmAxis}),
+    el('button',{text:'Symmetrize + → −',title:'Keep the positive side, rebuild the negative side as its mirror',onclick:function(){EM.symmetrize();}})
+  ]));
 
   b.appendChild(el('hr',{class:'sep'}));
   b.appendChild(el('div',{class:'section-title',text:'Keyboard shortcuts (desktop)'}));
