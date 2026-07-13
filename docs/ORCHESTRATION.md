@@ -87,7 +87,7 @@ Wave definitions live in `docs/GAP_ANALYSIS.md` §4 — this table only tracks s
 | A2 | Knife / Spin / Screw | DONE | 4c3c0eb | suite now 70; knife core is pointer-free (`EM.knifeCore`), K shortcut; knife points snap to verts/edges (no face-interior points — noted deviation) |
 | A3 | Vertex-bevel, N-loop bridge, loop-cut slide, bevel width/segments, Symmetrize | DONE | f78f077+94a652f | suite now 75; bevel width is a fraction (.02-.49) not world units; symmetrize drops strictly-crossing faces (documented) |
 | A4 | Seams, project-from-view unwrap, pack islands, UV editor mode | TODO | | |
-| A5 | Vertex groups (+ assign UI) — Phase B/C dependency | TODO | | |
+| A5 | Vertex groups (+ assign UI) — Phase B/C dependency | DONE | 134c190 | suite now 80; `EM.groups` sparse maps + shared index-remap helper; `_vgroups` on parts through all round-trips |
 | A6 | Decimate, true Catmull-Clark subsurf, texture displace | TODO | | |
 | A7 | Lattice, Shrinkwrap, Cast variants, Skin modifiers | TODO | | |
 | A8 | Boolean modifier (vendored BSP CSG) | TODO | | |
