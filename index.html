@@ -583,7 +583,7 @@ function applyMatPreset(mat,name){var p=MATPRESETS[name];if(!p)return;
 function makeModel(name,parts){var g=new THREE.Group();g.name=name;var extras=new THREE.Group();extras.name='__extras';
   g.userData={id:uid(),name:name,parts:[],mods:[],extras:extras};
   parts.forEach(function(p){var mesh=new THREE.Mesh(p.geo.clone(),p.mat);mesh.castShadow=true;mesh.receiveShadow=true;mesh.userData.part=true;
-    g.add(mesh);g.userData.parts.push({baseGeo:p.geo.clone(),mesh:mesh,mat:p.mat,_hasProperUVs:!!p._hasProperUVs,_baseIsAtlas:!!p._baseIsAtlas});});
+    g.add(mesh);g.userData.parts.push({baseGeo:p.geo.clone(),mesh:mesh,mat:p.mat,_hasProperUVs:!!p._hasProperUVs,_baseIsAtlas:!!p._baseIsAtlas,_vgroups:p._vgroups||null});});
   g.add(extras);return g;}
 
 function rebuildModel(model){var ud=model.userData;
@@ -624,7 +624,7 @@ function renameModel(m){
   History.push(function(){m.userData.name=old;renderAssets();renderPanel();},
                function(){m.userData.name=nv;renderAssets();renderPanel();});}
 function duplicateModel(m){
-  var parts=m.userData.parts.map(function(p){return {geo:p.mesh.geometry.clone(),mat:p.mat.clone(),_hasProperUVs:p._hasProperUVs,_baseIsAtlas:p._baseIsAtlas};});
+  var parts=m.userData.parts.map(function(p){return {geo:p.mesh.geometry.clone(),mat:p.mat.clone(),_hasProperUVs:p._hasProperUVs,_baseIsAtlas:p._baseIsAtlas,_vgroups:p._vgroups?JSON.parse(JSON.stringify(p._vgroups)):null};});
   var name=m.userData.name+' Copy';
   var nm=makeModel(name,parts);
   addModel(nm);setActiveModel(nm.userData.id);toast('"'+name+'" duplicated');renderAssets();}
@@ -1316,7 +1316,7 @@ function buildProjectData(skipMaps){return {v:2,scene:{env:sceneScene.userData.e
   lights:sceneScene.userData.lights.children.filter(function(c){return c.isLight;}).map(function(L){return {kind:L.userData.kind,pos:L.position.toArray(),color:'#'+L.color.getHexString(),intensity:L.intensity,distance:L.distance,angle:L.angle,penumbra:L.penumbra};})
   },models:state.models.map(function(m){return {id:m.userData.id,name:m.userData.name,
   parts:m.userData.parts.map(function(p){var g=p.baseGeo;return {pos:Array.from(g.attributes.position.array),uv:g.attributes.uv?Array.from(g.attributes.uv.array):null,index:g.index?Array.from(g.index.array):null,
-    properUV:!!p._hasProperUVs,baseAtlas:!!p._baseIsAtlas,
+    properUV:!!p._hasProperUVs,baseAtlas:!!p._baseIsAtlas,vgroups:p._vgroups||null,
     color:'#'+p.mat.color.getHexString(),rough:p.mat.roughness,metal:p.mat.metalness,map:skipMaps?null:texToDataURL(p.mat.map),
     emissive:'#'+p.mat.emissive.getHexString(),emInt:p.mat.emissiveIntensity,opacity:p.mat.opacity,transmission:p.mat.transmission||0,clearcoat:p.mat.clearcoat||0};}),mods:m.userData.mods};})};}
 function saveProject(){var data=buildProjectData(false);
@@ -1353,7 +1353,7 @@ function loadProject(data){state.models.length=0;
   if(pp.opacity!=null){mat.opacity=pp.opacity;}if(pp.transmission&&'transmission' in mat)mat.transmission=pp.transmission;if(pp.clearcoat&&'clearcoat' in mat)mat.clearcoat=pp.clearcoat;
   mat.transparent=(mat.opacity<1)||(mat.transmission>0);
   if(pp.map){var im=new Image();im.onload=function(){var tx=new THREE.Texture(im);tx.encoding=THREE.sRGBEncoding;tx.needsUpdate=true;mat.map=tx;mat.color.setHex(0xffffff);mat.needsUpdate=true;invalidate();};im.src=pp.map;}
-  return {geo:g,mat:mat,_hasProperUVs:!!pp.properUV,_baseIsAtlas:!!pp.baseAtlas};});
+  return {geo:g,mat:mat,_hasProperUVs:!!pp.properUV,_baseIsAtlas:!!pp.baseAtlas,_vgroups:pp.vgroups||null};});
   var m=makeModel(md.name,parts);if(md.id)m.userData.id=md.id;m.userData.mods=md.mods||[];rebuildModel(m);addModel(m);});
   var sc=data.scene||{};
   if(sc.env)applyEnv(sceneScene,sc.env);
@@ -1386,7 +1386,7 @@ function onViewportTap(e){var slot=curSlot();if(!slot)return;var r=dom.getBoundi
 var editState={mode:'face',tool:'select',grabActive:false,grabPtId:null,grabPrevX:0,grabPrevY:0,grabSnap:null,multiSel:false,hudExpanded:false,prop:false,propR:.8,mirror:false,mirrorAxis:0,boxSel:0,extrudeAmt:.3,insetAmt:.22,
   slide:false,shrinkAmt:.15,randAmt:.1,randSeed:0,shearAmt:.3,shearPair:0,
   spinAxis:1,spinOriginWorld:false,spinAngle:360,spinSteps:16,screwOffset:1,screwRevs:1,
-  bevelWidth:.25,bevelSegs:1,loopSlideT:0,symmAxis:0};
+  bevelWidth:.25,bevelSegs:1,loopSlideT:0,symmAxis:0,assignWeight:1};
 
 function screenDeltaToWorld(dx,dy){
   var cam=active.vs.cam,rad=active.vs.rad;
@@ -1560,12 +1560,19 @@ var EM={
   _selMat:new THREE.MeshBasicMaterial({color:0xff8fb1,transparent:true,opacity:.42,side:THREE.DoubleSide,depthTest:false}),
   _mirrorMat:new THREE.MeshStandardMaterial({color:0x9fd4ff,roughness:.55,side:THREE.DoubleSide,transparent:true,opacity:.5,depthWrite:false}),
 
+  // ─── Wave A5: Vertex groups ──────────────────────────────────────────────────────────
+  // groups: [{name, w:{vertIndex:weight(0..1), ...}}] — sparse, per-EM-session. New verts
+  // created by extrude/subdivide/bevel/knife/spin/etc. are simply absent from `w` (weight 0,
+  // Blender-like default) — never interpolated. activeGroup indexes into `groups` (-1 = none).
+  // showWeights toggles a blue→red weight-ramp tint of the edit-view mesh for the active group.
+  groups:[],activeGroup:-1,showWeights:false,
+
   clear:function(){
     var self=this;
     [this._meshObj,this._edgeObj,this._vertObj,this._selObj].forEach(function(o){if(o){editScene.remove(o);if(o.geometry)o.geometry.dispose();}});
     if(this._mirrorObj){editScene.remove(this._mirrorObj);this._mirrorObj=null;}
     this._meshObj=this._edgeObj=this._vertObj=this._selObj=null;
-    this.V=[];this.F=[];this.E=[];this._triMap=[];},
+    this.V=[];this.F=[];this.E=[];this._triMap=[];this.groups=[];this.activeGroup=-1;},
 
   fromPrim:function(type){
     EM._srcTex=null;EM._srcProperUVs=false;
@@ -1669,15 +1676,23 @@ var EM={
     if(EM._srcTex){mt.map=EM._srcTex;mt.color.setHex(0xffffff);}
     else{mt.map=null;mt.color.setHex(0xb8bcc2);}
     mt.transparent=false;mt.opacity=1;mt.needsUpdate=true;
-    this._fromGeo(pt.mesh.geometry);},
+    this._fromGeo(pt.mesh.geometry,pt._vgroups);},
 
-  _fromGeo:function(geo){
+  // vgroups (optional): [{name,w}] keyed 1:1 to the incoming geometry's UNWELDED position
+  // order (exactly how exportToModel wrote them — see _exportVGroups). Assigned to
+  // this.groups BEFORE _weld runs so _weld's own remap (via _remapGroups) consolidates them
+  // onto the welded/deduped vertex indices for free — the same machinery every topology op uses.
+  _fromGeo:function(geo,vgroups){
     this.clear();
     var pos=geo.attributes.position,idx=geo.index,uvA=geo.attributes.uv;
     for(var i=0;i<pos.count;i++){var v=new THREE.Vector3().fromBufferAttribute(pos,i);v.sel=false;
       if(uvA){v.u0=uvA.getX(i);v.v0=uvA.getY(i);}this.V.push(v);}
     if(idx){for(var i=0;i<idx.count;i+=3)this.F.push({vi:[idx.getX(i),idx.getX(i+1),idx.getX(i+2)],sel:false});}
     else{for(var i=0;i<pos.count;i+=3)this.F.push({vi:[i,i+1,i+2],sel:false});}
+    if(vgroups&&vgroups.length){
+      this.groups=vgroups.map(function(g){var w={};for(var k in g.w)w[+k]=g.w[k];return {name:g.name,w:w};});
+      this.activeGroup=0;
+    }
     this._weld(1e-4);this._buildEdges();this._refresh();},
 
   _weld:function(t){
@@ -1685,9 +1700,118 @@ var EM={
     for(var i=0;i<this.V.length;i++){
       var f=-1;for(var j=0;j<kept.length;j++){if(this.V[kept[j]].distanceTo(this.V[i])<t){f=j;break;}}
       if(f<0){R[i]=kept.length;kept.push(i);}else R[i]=f;}
+    this._remapGroups(R);
     this.V=kept.map(function(i){return this.V[i];},this);
     this.F.forEach(function(f){f.vi=f.vi.map(function(v){return R[v];});});
     this.F=this.F.filter(function(f){var s={},ok=true;for(var i=0;i<f.vi.length;i++){if(s[f.vi[i]]){ok=false;break;}s[f.vi[i]]=true;}return ok&&f.vi.length>=3;});},
+
+  // ─── Wave A5: vertex-group remap helper ──────────────────────────────────────────────
+  // Shared by EVERY topology op that removes or reindexes verts (_weld — and therefore
+  // fromPrim/weldClose/applyMirror/symmetrize/spin/screw/_fromGeo — plus deleteSelected,
+  // mergeSelected, bevelVerts, symmetrize's own drop-unused pass). `remap` is an old-index
+  // -> new-index array/object; a missing/null/-1 entry means that old vertex was deleted
+  // outright (its weight, if any, is dropped — nothing else references it anymore). When
+  // several old indices collapse onto the same new index (weld/merge), their weights are
+  // AVERAGED — but only across old indices that actually HAD an explicit weight entry, so an
+  // unweighted vertex merging into a weighted one never dilutes the survivor's weight, and a
+  // never-weighted survivor never sprouts a phantom nonzero weight.
+  _remapGroups:function(remap){
+    if(!this.groups||!this.groups.length)return;
+    this.groups.forEach(function(g){
+      var sums={},counts={};
+      for(var k in g.w){
+        var ni=remap[k];
+        if(ni==null||ni<0)continue;
+        sums[ni]=(sums[ni]||0)+g.w[k];counts[ni]=(counts[ni]||0)+1;}
+      var nw={};for(var ni in sums)nw[ni]=sums[ni]/counts[ni];
+      g.w=nw;});},
+
+  // Deep-ish clone of a groups array (or this.groups) — used by _topoSnapshot/_topoRestore so
+  // undo/redo of a weight-destroying topology op (merge/weld/delete/symmetrize/bevelVerts)
+  // round-trips weights exactly like it already does for V/F.
+  _cloneGroups:function(src){src=src||this.groups||[];return src.map(function(g){var w={};for(var k in g.w)w[k]=g.w[k];return {name:g.name,w:w};});},
+
+  // Standard Blender-style weight-paint ramp: blue(0) → cyan → green → yellow → red(1).
+  _weightColor:function(w){
+    w=Math.max(0,Math.min(1,w));
+    var stops=[[0,0,1],[0,1,1],[0,1,0],[1,1,0],[1,0,0]],seg=1/(stops.length-1);
+    var i=Math.min(stops.length-2,Math.floor(w/seg)),t=(w-i*seg)/seg,a=stops[i],b=stops[i+1];
+    return {r:a[0]+(b[0]-a[0])*t,g:a[1]+(b[1]-a[1])*t,b:a[2]+(b[2]-a[2])*t};},
+
+  // ─── Wave A5: Vertex group management (create/rename/delete/assign/select) ──────────────
+  addGroup:function(name){
+    var g={name:(name||'Group '+(this.groups.length+1)),w:{}};
+    this.groups.push(g);var gi=this.groups.length-1,prevActive=this.activeGroup;this.activeGroup=gi;
+    var self=this;
+    History.push(function(){self.groups.splice(gi,1);self.activeGroup=prevActive;self._refresh();renderPanel();},
+                 function(){self.groups.splice(gi,0,g);self.activeGroup=gi;self._refresh();renderPanel();});
+    toast('Added group "'+g.name+'"');this._refresh();return gi;},
+
+  renameGroup:function(gi){
+    var g=this.groups[gi];if(!g)return;
+    var nv=prompt('Rename vertex group:',g.name);if(nv==null)return;nv=nv.trim();if(!nv||nv===g.name)return;
+    var old=g.name;g.name=nv;
+    History.push(function(){g.name=old;renderPanel();},function(){g.name=nv;renderPanel();});
+    renderPanel();toast('Renamed to "'+nv+'"');},
+
+  // Two-tap confirm (no blocking window.confirm — matches the app's toast-driven mobile UX):
+  // the first tap arms a 3s window, a second tap within it actually deletes.
+  _delGroupArm:-1,_delGroupTimer:null,
+  deleteGroup:function(gi){
+    var g=this.groups[gi];if(!g)return;
+    if(this._delGroupArm===gi){
+      clearTimeout(this._delGroupTimer);this._delGroupArm=-1;
+      var self=this,prevActive=this.activeGroup;
+      this.groups.splice(gi,1);
+      if(this.activeGroup>=this.groups.length)this.activeGroup=this.groups.length-1;
+      History.push(function(){self.groups.splice(gi,0,g);self.activeGroup=prevActive;self._refresh();renderPanel();},
+                   function(){self.groups.splice(gi,1);if(self.activeGroup>=self.groups.length)self.activeGroup=self.groups.length-1;self._refresh();renderPanel();});
+      this._refresh();renderPanel();toast('Deleted group "'+g.name+'"');
+      return;}
+    this._delGroupArm=gi;var self2=this;
+    this._delGroupTimer=setTimeout(function(){self2._delGroupArm=-1;},3000);
+    toast('Tap Delete again to confirm removing "'+g.name+'"');},
+
+  setActiveGroup:function(gi){this.activeGroup=gi;this._refresh();renderPanel();},
+
+  toggleShowWeights:function(){this.showWeights=!this.showWeights;this._refresh();renderPanel();},
+
+  // Assign the current selection to the active group at `weight` (0..1) — undoable.
+  assignToGroup:function(weight){
+    var g=this.groups[this.activeGroup];if(!g){toast('Create or select a vertex group first');return;}
+    var set=this._selVertSet();if(!set.size){toast('Select vert(s) first');return;}
+    var w=Math.max(0,Math.min(1,weight==null?1:weight));
+    var before={};for(var kb in g.w)before[kb]=g.w[kb];
+    set.forEach(function(vi){g.w[vi]=w;});
+    var after={};for(var k in g.w)after[k]=g.w[k];
+    var self=this,gi=this.activeGroup;
+    History.push(function(){self.groups[gi].w=before;self._refresh();renderPanel();},
+                 function(){self.groups[gi].w=after;self._refresh();renderPanel();});
+    this._refresh();toast('Assigned '+set.size+' vert'+(set.size>1?'s':'')+' at weight '+w.toFixed(2));},
+
+  // Remove the current selection from the active group — undoable.
+  removeFromGroup:function(){
+    var g=this.groups[this.activeGroup];if(!g){toast('Create or select a vertex group first');return;}
+    var set=this._selVertSet();if(!set.size){toast('Select vert(s) first');return;}
+    var before={};for(var kb in g.w)before[kb]=g.w[kb];
+    set.forEach(function(vi){delete g.w[vi];});
+    var after={};for(var k in g.w)after[k]=g.w[k];
+    var self=this,gi=this.activeGroup;
+    History.push(function(){self.groups[gi].w=before;self._refresh();renderPanel();},
+                 function(){self.groups[gi].w=after;self._refresh();renderPanel();});
+    this._refresh();toast('Removed from group');},
+
+  selectGroupVerts:function(){
+    var g=this.groups[this.activeGroup];if(!g){toast('Create or select a vertex group first');return;}
+    var self=this,added=0;
+    Object.keys(g.w).forEach(function(k){var vi=+k;if(self.V[vi]&&!self.V[vi].sel){self.V[vi].sel=true;added++;}});
+    this._refresh();renderPanel();toast(added?('Selected '+added+' group vert'+(added>1?'s':'')):'Group has no members');},
+
+  deselectGroupVerts:function(){
+    var g=this.groups[this.activeGroup];if(!g){toast('Create or select a vertex group first');return;}
+    var self=this;
+    Object.keys(g.w).forEach(function(k){var vi=+k;if(self.V[vi])self.V[vi].sel=false;});
+    this._refresh();renderPanel();toast('Deselected group members');},
 
   _buildEdges:function(){
     this.E=[];var m={};
@@ -1707,7 +1831,17 @@ var EM={
   _refresh:function(){
     // Main mesh
     if(!this._meshObj){this._meshObj=new THREE.Mesh(new THREE.BufferGeometry(),this._mat);this._meshObj.castShadow=true;editScene.add(this._meshObj);}
-    var g=this._toGeo();this._meshObj.geometry.dispose();this._meshObj.geometry=g;
+    var g=this._toGeo();
+    // Wave A5 weight-paint visualization: tint the solid mesh by the active group's weight
+    // (blue 0 → red 1). Only recomputed here — on topology rebuild / group switch / toggle —
+    // never per drag-frame (_syncPositions, the fast per-frame path, never touches color).
+    var activeG=this.groups[this.activeGroup];
+    if(this.showWeights&&activeG){
+      var col=[];for(var wi=0;wi<this.V.length;wi++){var c=this._weightColor(activeG.w[wi]||0);col.push(c.r,c.g,c.b);}
+      g.setAttribute('color',new THREE.Float32BufferAttribute(col,3));
+      if(!this._mat.vertexColors){this._mat.vertexColors=true;this._mat.needsUpdate=true;}
+    }else if(this._mat.vertexColors){this._mat.vertexColors=false;this._mat.needsUpdate=true;}
+    this._meshObj.geometry.dispose();this._meshObj.geometry=g;
 
     // Live mirror preview: a negative-scale ghost on the chosen axis sharing the same
     // geometry, so sculpting and every mesh op are mirrored live without duplicating verts.
@@ -1889,8 +2023,8 @@ var EM={
   // have since changed length — skip any index the snapshot doesn't cover instead of throwing.
   _pushVertHistory:function(snap){var curr=this.V.map(function(v){return v.clone();});
     History.push(function(){EM.V.forEach(function(v,i){if(snap[i])v.copy(snap[i]);});EM._refresh();},function(){EM.V.forEach(function(v,i){if(curr[i])v.copy(curr[i]);});EM._refresh();});},
-  _topoSnapshot:function(){return {V:this.V.map(function(v){var c=v.clone();c.sel=v.sel;return c;}),F:this.F.map(function(f){return {vi:f.vi.slice(),sel:f.sel};})};},
-  _topoRestore:function(s){this.V=s.V.map(function(v){var c=v.clone();c.sel=v.sel;return c;});this.F=s.F.map(function(f){return {vi:f.vi.slice(),sel:f.sel};});this._buildEdges();this._refresh();if(active.view==='edit')renderPanel();},
+  _topoSnapshot:function(){return {V:this.V.map(function(v){var c=v.clone();c.sel=v.sel;return c;}),F:this.F.map(function(f){return {vi:f.vi.slice(),sel:f.sel};}),groups:this._cloneGroups()};},
+  _topoRestore:function(s){this.V=s.V.map(function(v){var c=v.clone();c.sel=v.sel;return c;});this.F=s.F.map(function(f){return {vi:f.vi.slice(),sel:f.sel};});this.groups=this._cloneGroups(s.groups||[]);this._buildEdges();this._refresh();if(active.view==='edit')renderPanel();},
   _pushTopo:function(before){var after=this._topoSnapshot();History.push(function(){EM._topoRestore(before);},function(){EM._topoRestore(after);});},
   // Flatten selected verts onto their average plane along one axis (0=X 1=Y 2=Z)
   alignSelection:function(ax){var set=this._selVertSet();if(!set.size){toast('Select something first');return;}
@@ -2222,6 +2356,7 @@ var EM={
       this.F=this.F.filter(function(f){return !f.vi.some(function(v){return delV.has(v);});});
       var nV=[],remap=[];
       for(var i=0;i<this.V.length;i++)if(!delV.has(i)){remap[i]=nV.length;nV.push(this.V[i]);}else remap[i]=-1;
+      this._remapGroups(remap);
       this.V=nV;this.F.forEach(function(f){f.vi=f.vi.map(function(v){return remap[v];});});}
     else{
       var delFi=new Set();this.E.forEach(function(e){if(e.sel)e.fi.forEach(function(fi){delFi.add(fi);});});
@@ -2237,6 +2372,7 @@ var EM={
     var delS=new Set(selI.slice(1)),nV=[],remap=new Array(this.V.length);
     for(var i=0;i<this.V.length;i++)if(!delS.has(i)){remap[i]=nV.length;nV.push(this.V[i]);}
     for(var i=0;i<this.V.length;i++)if(delS.has(i))remap[i]=remap[target];
+    this._remapGroups(remap);
     this.V=nV;this.F.forEach(function(f){f.vi=f.vi.map(function(v){return remap[v];});});
     this.F=this.F.filter(function(f){var s={},ok=true;for(var i=0;i<f.vi.length;i++){if(s[f.vi[i]]){ok=false;break;}s[f.vi[i]]=true;}return ok&&f.vi.length>=3;});
     this._buildEdges();this._refresh();this._pushTopo(_b);renderPanel();},
@@ -2583,6 +2719,7 @@ var EM={
     this.F.forEach(function(f){f.vi.forEach(function(vi){used[vi]=true;});});
     var nV=[],remap=new Array(this.V.length);
     for(var i2=0;i2<this.V.length;i2++)if(used[i2]){remap[i2]=nV.length;nV.push(this.V[i2]);}
+    this._remapGroups(remap);
     this.V=nV;this.F.forEach(function(f){f.vi=f.vi.map(function(x){return remap[x];});});
     this.clearSel();this._buildEdges();this._refresh();this._pushTopo(_b);
     renderPanel();toast('Beveled '+done+' corner'+(done>1?'s':''));},
@@ -2606,6 +2743,7 @@ var EM={
     this.F.forEach(function(f){f.vi.forEach(function(vi){used[vi]=true;});});
     var nV=[],remap=new Array(this.V.length);
     for(var i=0;i<this.V.length;i++)if(used[i]){remap[i]=nV.length;nV.push(this.V[i]);}
+    this._remapGroups(remap);
     this.V=nV;this.F.forEach(function(f){f.vi=f.vi.map(function(x){return remap[x];});});
     // mirror the kept half across the plane (applyMirror's reflect + reverse-winding + weld)
     var n=this.V.length;
@@ -2625,12 +2763,27 @@ var EM={
     var geo=keepUV?this._facesToGeoKeepUV(this.F):this._toExportGeo();
     var mat=makeMaterial({color:EM._srcTex?0xffffff:0xcacdd3,rough:.55});
     if(EM._srcTex){mat.map=EM._srcTex;mat.needsUpdate=true;}
-    var name='Mesh '+(state.models.length+1);var m=makeModel(name,[{geo:geo,mat:mat}]);
+    var vgroups=this._exportVGroups();
+    var name='Mesh '+(state.models.length+1);var m=makeModel(name,[{geo:geo,mat:mat,_vgroups:vgroups}]);
     // Inherit the real-unwrap status from the source model (not the texture's flipY, which is
     // true for painted-canvas sources even when the underlying UVs are a proper GLB unwrap) so
     // the exported model paints non-destructively iff its source did.
     if(keepUV)m.userData.parts[0]._hasProperUVs=!!EM._srcProperUVs;
     addModel(m);setActiveModel(m.userData.id);toast('"'+name+'" added — open Viewer');renderPanel();},
+
+  // Wave A5: build a vgroups payload (or null) matching the UNWELDED, per-face-corner vertex
+  // order that _facesToGeo/_facesToGeoKeepUV emit (fan triangulation vi[0],vi[t],vi[t+1] per
+  // face, in face order) — i.e. exactly the position order the exported geometry ends up with.
+  // On the reload side (_fromGeo) that same order is fed straight back into groups BEFORE
+  // welding, so _weld's remap (_remapGroups) reconstitutes the correct per-vertex weights.
+  _exportVGroups:function(){
+    if(!this.groups||!this.groups.length)return null;
+    var vertMap=[];
+    this.F.forEach(function(f){var vi=f.vi;for(var t=1;t<vi.length-1;t++)vertMap.push(vi[0],vi[t],vi[t+1]);});
+    return this.groups.map(function(g){
+      var w={};
+      vertMap.forEach(function(origIdx,expIdx){var wt=g.w[origIdx];if(wt!==undefined)w[expIdx]=wt;});
+      return {name:g.name,w:w};});},
 
   // Unindexed triangles keeping each vertex's carried u0/v0 (flat per-face normals)
   _facesToGeoKeepUV:function(faces){
@@ -3055,7 +3208,8 @@ function renderEditHud(){
         if(selN>0){
           mr2.appendChild(el('button',{class:'hud-btn',title:'Grow to the whole connected island',text:'Linked',onclick:function(){EM.selectLinked();}}));
           if(mode==='face'){mr2.appendChild(el('button',{class:'hud-btn',text:'Extrude',onclick:function(){EM.extrude();}}));mr2.appendChild(el('button',{class:'hud-btn',title:'Extrude inward',text:'Emboss',onclick:function(){EM.extrude(-editState.extrudeAmt);}}));mr2.appendChild(el('button',{class:'hud-btn',title:'Push faces out along normal',text:'Push+',onclick:function(){EM.pushSel(editState.extrudeAmt*.5);}}));mr2.appendChild(el('button',{class:'hud-btn',title:'Push faces in along normal',text:'Push−',onclick:function(){EM.pushSel(-editState.extrudeAmt*.5);}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Inset',onclick:function(){EM.inset();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Dup',onclick:function(){EM.duplicateSelection();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Separate',onclick:function(){EM.separateSelection();}}));}
-          if(mode==='vert'){mr2.appendChild(el('button',{class:'hud-btn',text:'Merge',onclick:function(){EM.mergeSelected();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Smooth',onclick:function(){EM.smoothVerts();renderPanel();}}));mr2.appendChild(el('button',{class:'hud-btn',title:'Chamfer selected corners (3+ edges) into an n-gon cap',text:'BevelV',onclick:function(){EM.bevelVerts();}}));}
+          if(mode==='vert'){mr2.appendChild(el('button',{class:'hud-btn',text:'Merge',onclick:function(){EM.mergeSelected();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Smooth',onclick:function(){EM.smoothVerts();renderPanel();}}));mr2.appendChild(el('button',{class:'hud-btn',title:'Chamfer selected corners (3+ edges) into an n-gon cap',text:'BevelV',onclick:function(){EM.bevelVerts();}}));
+            if(EM.groups[EM.activeGroup]){mr2.appendChild(el('button',{class:'hud-btn',title:'Assign selection to the active vertex group',text:'VG+',onclick:function(){EM.assignToGroup(editState.assignWeight);}}));mr2.appendChild(el('button',{class:'hud-btn',title:'Remove selection from the active vertex group',text:'VG−',onclick:function(){EM.removeFromGroup();}}));}}
           if(mode==='edge'){mr2.appendChild(el('button',{class:'hud-btn',text:'Loop',onclick:function(){EM.selectLoops();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Bevel',onclick:function(){EM.bevelEdges();}}));mr2.appendChild(el('button',{class:'hud-btn',text:'Bridge',onclick:function(){EM.bridgeEdges();renderPanel();}}));mr2.appendChild(el('button',{class:'hud-btn',title:'Cap a whole boundary loop with one face',text:'Fill',onclick:function(){EM.fillHole();}}));}
           mr2.appendChild(el('button',{class:'hud-btn',text:'Subdiv',onclick:function(){EM.subdivide();renderPanel();}}));
           mr2.appendChild(el('button',{class:'hud-btn',text:'Delete',onclick:function(){EM.deleteSelected();}}));
@@ -3164,6 +3318,10 @@ function renderEditHud(){
       or.appendChild(el('button',{class:'hud-btn',text:'Merge',onclick:function(){EM.mergeSelected();}}));
       or.appendChild(el('button',{class:'hud-btn',text:'Smooth',onclick:function(){EM.smoothVerts();renderPanel();}}));
       or.appendChild(el('button',{class:'hud-btn',title:'Chamfer selected corners (3+ edges) into an n-gon cap',text:'Bevel V',onclick:function(){EM.bevelVerts();}}));
+      if(EM.groups[EM.activeGroup]){
+        or.appendChild(el('button',{class:'hud-btn',title:'Assign selection to the active vertex group',text:'VG+',onclick:function(){EM.assignToGroup(editState.assignWeight);}}));
+        or.appendChild(el('button',{class:'hud-btn',title:'Remove selection from the active vertex group',text:'VG−',onclick:function(){EM.removeFromGroup();}}));
+      }
     }
     if(mode==='edge'){
       or.appendChild(el('button',{class:'hud-btn',text:'Loop',onclick:function(){EM.selectLoops();}}));
@@ -3193,6 +3351,40 @@ function renderEditHud(){
   var er=el('div',{class:'hud-row'});
   er.appendChild(el('button',{class:'hud-btn',text:'Save as model →',onclick:function(){EM.exportToModel();}}));
   hud.appendChild(er);}
+
+/* ----- Wave A5: Vertex Groups panel section ----- */
+function panelVertexGroups(b){
+  b.appendChild(el('div',{class:'section-title',text:'Vertex Groups'}));
+  b.appendChild(el('p',{class:'small muted',style:'margin-bottom:6px',text:'Named per-vertex weight sets — the foundation weight painting and armature skinning build on. Weights carry through "Save mesh as model" and project save/load.'}));
+  var list=el('div',{});
+  EM.groups.forEach(function(g,gi){
+    var cnt=Object.keys(g.w).length,on=gi===EM.activeGroup;
+    var row=el('div',{class:'spread'+(on?' on':''),style:'align-items:center;margin-bottom:4px;padding:4px 6px;border-radius:8px;cursor:pointer;'+(on?'background:rgba(255,111,163,.16)':''),
+      onclick:function(){EM.setActiveGroup(gi);}},[
+      el('span',{class:'tap-edit',title:'Tap to rename',text:g.name+'  ('+cnt+')',onclick:function(e){e.stopPropagation();EM.renameGroup(gi);}}),
+      el('button',{class:'hud-btn',title:'Delete group (tap twice to confirm)',text:'Delete',onclick:function(e){e.stopPropagation();EM.deleteGroup(gi);}})
+    ]);
+    list.appendChild(row);});
+  if(!EM.groups.length)list.appendChild(el('p',{class:'small muted',text:'No vertex groups yet.'}));
+  b.appendChild(list);
+  b.appendChild(el('button',{style:'width:100%',text:'+ New Group',onclick:function(){EM.addGroup();renderPanel();}}));
+
+  if(EM.groups[EM.activeGroup]){
+    b.appendChild(el('p',{class:'small muted',style:'margin:8px 0 4px',text:'Active: "'+EM.groups[EM.activeGroup].name+'" — select vert(s) (Vert mode) then Assign/Remove below.'}));
+    b.appendChild(slider('Assign weight',0,1,editState.assignWeight,.01,function(x){editState.assignWeight=x;}));
+    b.appendChild(el('div',{class:'grid2'},[
+      el('button',{text:'Assign',title:'Set selected verts to the weight above',onclick:function(){EM.assignToGroup(editState.assignWeight);}}),
+      el('button',{text:'Remove',title:'Remove selected verts from this group',onclick:function(){EM.removeFromGroup();}})
+    ]));
+    b.appendChild(el('div',{class:'grid2',style:'margin-top:6px'},[
+      el('button',{text:'Select',title:'Add this group\'s verts to the selection',onclick:function(){EM.selectGroupVerts();}}),
+      el('button',{text:'Deselect',title:'Remove this group\'s verts from the selection',onclick:function(){EM.deselectGroupVerts();}})
+    ]));
+    b.appendChild(el('button',{style:'width:100%;margin-top:6px',class:EM.showWeights?'on':'',
+      text:EM.showWeights?'✓ Weight visualization (blue→red)':'Weight visualization (blue→red)',
+      title:'Tint the mesh by this group\'s weight (blue=0, red=1)',
+      onclick:function(){EM.toggleShowWeights();}}));
+  }}
 
 /* ----- Edit panel ----- */
 function panelEdit(b){
@@ -3382,6 +3574,9 @@ function panelEdit(b){
     el('button',{text:'Axis: '+'XYZ'[editState.symmAxis],title:'Cycle the symmetry axis X → Y → Z',onclick:cycleSymmAxis}),
     el('button',{text:'Symmetrize + → −',title:'Keep the positive side, rebuild the negative side as its mirror',onclick:function(){EM.symmetrize();}})
   ]));
+
+  b.appendChild(el('hr',{class:'sep'}));
+  panelVertexGroups(b);
 
   b.appendChild(el('hr',{class:'sep'}));
   b.appendChild(el('div',{class:'section-title',text:'Keyboard shortcuts (desktop)'}));

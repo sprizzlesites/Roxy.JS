@@ -9,7 +9,7 @@ const SP = __dirname;
 
 // Debug handles injected inside the app IIFE (test copy only — repo file untouched)
 const INJECT = `
-window.__R={setView:setView,EM:EM,editState:editState,Sculpt:Sculpt,Knife:Knife,getModel:getModel,state:state,paint:paint,paintInit:paintInit,applyPaintTex:applyPaintTex,ensureAtlasUVs:ensureAtlasUVs,do3dPaint:do3dPaint,exportOBJ:exportOBJ,parseOBJ:parseOBJ,History:History,addModel:addModel,buildDonut:buildDonut,doAutosave:doAutosave,clearAutosave:clearAutosave,AUTOSAVE_KEY:AUTOSAVE_KEY,active:active,addPrim:addPrim,renameModel:renameModel,duplicateModel:duplicateModel,deleteModel:deleteModel,renderAssets:renderAssets,filterAssetGrid:filterAssetGrid,setAssetQuery:function(q){assetSearchQuery=q;filterAssetGrid();},applyEditSnap:applyEditSnap,addPlacement:addPlacement,sceneScene:sceneScene,disposeModelResources:disposeModelResources,resetHintsSeen:function(){try{localStorage.removeItem('roxyHints');}catch(e){}},syncPaintHud:syncPaintHud,snapView:snapView,pickColorAt2D:pickColorAt2D,pickColorAt3D:pickColorAt3D,setPaintColor:setPaintColor,setActiveModel:setActiveModel,resizeActive:resizeActive,renderEditHud:renderEditHud,makeModel:makeModel,makeMaterial:makeMaterial,rebuildModel:rebuildModel,tex:tex,addLight:addLight,frameObject:frameObject,viewState:viewState,invalidate:invalidate};
+window.__R={setView:setView,EM:EM,editState:editState,Sculpt:Sculpt,Knife:Knife,getModel:getModel,state:state,paint:paint,paintInit:paintInit,applyPaintTex:applyPaintTex,ensureAtlasUVs:ensureAtlasUVs,do3dPaint:do3dPaint,exportOBJ:exportOBJ,parseOBJ:parseOBJ,History:History,addModel:addModel,buildDonut:buildDonut,doAutosave:doAutosave,clearAutosave:clearAutosave,AUTOSAVE_KEY:AUTOSAVE_KEY,active:active,addPrim:addPrim,renameModel:renameModel,duplicateModel:duplicateModel,deleteModel:deleteModel,renderAssets:renderAssets,filterAssetGrid:filterAssetGrid,setAssetQuery:function(q){assetSearchQuery=q;filterAssetGrid();},applyEditSnap:applyEditSnap,addPlacement:addPlacement,sceneScene:sceneScene,disposeModelResources:disposeModelResources,resetHintsSeen:function(){try{localStorage.removeItem('roxyHints');}catch(e){}},syncPaintHud:syncPaintHud,snapView:snapView,pickColorAt2D:pickColorAt2D,pickColorAt3D:pickColorAt3D,setPaintColor:setPaintColor,setActiveModel:setActiveModel,resizeActive:resizeActive,renderEditHud:renderEditHud,makeModel:makeModel,makeMaterial:makeMaterial,rebuildModel:rebuildModel,tex:tex,addLight:addLight,frameObject:frameObject,viewState:viewState,invalidate:invalidate,buildProjectData:buildProjectData,loadProject:loadProject,saveProject:saveProject};
 window.__setDownload=function(fn){download=fn;};
 `;
 
@@ -1483,6 +1483,103 @@ const server = http.createServer((req, res) => {
     if (restoredView !== 'edit') throw new Error('app should always land on the mesh editor on boot (even after restoring an autosave), got ' + restoredView);
     await page.evaluate(() => { __R.clearAutosave(); });
   });
+
+  // ─── Wave A5: Vertex groups ────────────────────────────────────────────────────────────
+  await step('vertex groups: create + assign selected verts at weight (sparse map correct)', () => page.evaluate(() => {
+    var R = __R, EM = R.EM;
+    EM.fromPrim('Cube');
+    R.editState.mode = 'vert'; EM.clearSel();
+    EM.V[0].sel = true; EM.V[1].sel = true;
+    var gi = EM.addGroup('TestGroup');
+    R.editState.assignWeight = .7;
+    EM.assignToGroup(.7);
+    var g = EM.groups[gi];
+    var keys = Object.keys(g.w).map(Number).sort(function (a, b) { return a - b; });
+    if (keys.length !== 2 || keys[0] !== 0 || keys[1] !== 1) throw new Error('sparse map keys wrong: ' + JSON.stringify(keys));
+    if (Math.abs(g.w[0] - .7) > 1e-9 || Math.abs(g.w[1] - .7) > 1e-9) throw new Error('assigned weight not .7: ' + JSON.stringify(g.w));
+  }));
+
+  await step('vertex groups: rename + delete (two-tap confirm)', async () => {
+    await page.evaluate(() => { var R = __R, EM = R.EM; EM.fromPrim('Cube'); EM.addGroup('Grp'); });
+    let dialogSeen = false;
+    page.once('dialog', d => { dialogSeen = true; d.accept('Renamed'); });
+    await page.evaluate(() => __R.EM.renameGroup(0));
+    await page.waitForTimeout(50);
+    if (!dialogSeen) throw new Error('rename prompt did not appear');
+    const nameAfter = await page.evaluate(() => __R.EM.groups[0].name);
+    if (nameAfter !== 'Renamed') throw new Error('rename did not apply, got ' + nameAfter);
+    // first tap only arms the delete (no confirm dialog — toast-driven two-tap pattern)
+    await page.evaluate(() => { __R.EM.deleteGroup(0); });
+    const stillThere = await page.evaluate(() => __R.EM.groups.length);
+    if (stillThere !== 1) throw new Error('first Delete tap should only arm, not delete yet');
+    // second tap within the confirm window actually deletes
+    await page.evaluate(() => { __R.EM.deleteGroup(0); });
+    const afterDelete = await page.evaluate(() => __R.EM.groups.length);
+    if (afterDelete !== 0) throw new Error('second Delete tap did not remove the group');
+  });
+
+  await step('vertex groups: merge remaps weights onto the survivor, no orphan keys', () => page.evaluate(() => {
+    var R = __R, EM = R.EM;
+    EM.fromPrim('Cube');
+    R.editState.mode = 'vert'; EM.clearSel();
+    var gi = EM.addGroup('MergeGrp'), g = EM.groups[gi];
+    g.w[0] = .4; g.w[1] = .8; // two coincident-by-selection verts, both weighted
+    EM.V[0].sel = true; EM.V[1].sel = true;
+    EM.mergeSelected();
+    var g2 = EM.groups[gi], keys = Object.keys(g2.w);
+    var orphan = keys.some(function (k) { return +k >= EM.V.length || +k < 0; });
+    if (orphan) throw new Error('orphan key(s) point past the surviving vert array: ' + JSON.stringify(g2.w) + ' V.length=' + EM.V.length);
+    if (keys.length !== 1) throw new Error('expected exactly 1 surviving weight entry after merging 2 weighted verts, got ' + keys.length);
+    if (Math.abs(g2.w[keys[0]] - .6) > 1e-9) throw new Error('survivor weight should average .4 and .8 -> .6, got ' + g2.w[keys[0]]);
+  }));
+
+  await step('vertex groups: undo/redo of a weight-destroying op (merge) restores weights', () => page.evaluate(() => {
+    var R = __R, EM = R.EM;
+    EM.fromPrim('Cube');
+    R.editState.mode = 'vert'; EM.clearSel();
+    var gi = EM.addGroup('UndoGrp'), g = EM.groups[gi];
+    g.w[0] = .3; g.w[1] = .9; g.w[2] = .5;
+    EM.V[0].sel = true; EM.V[1].sel = true;
+    EM.mergeSelected();
+    var afterMergeCount = Object.keys(EM.groups[gi].w).length;
+    if (afterMergeCount >= 3) throw new Error('merge should have collapsed the weight-map key count below 3');
+    R.History.undo();
+    var g3 = EM.groups[gi];
+    if (Math.abs((g3.w[0] || 0) - .3) > 1e-9 || Math.abs((g3.w[1] || 0) - .9) > 1e-9 || Math.abs((g3.w[2] || 0) - .5) > 1e-9)
+      throw new Error('undo did not restore the pre-merge weights: ' + JSON.stringify(g3.w));
+    R.History.redo();
+    var g4 = EM.groups[gi];
+    if (Object.keys(g4.w).length !== afterMergeCount) throw new Error('redo did not reapply the post-merge weight state');
+  }));
+
+  await step('vertex groups: survive exportToModel->edit-load AND saveProject->loadProject round trips', () => page.evaluate(() => {
+    var R = __R, EM = R.EM;
+    R.state.models.length = 0;
+    EM.fromPrim('Cube');
+    R.editState.mode = 'vert'; EM.clearSel();
+    var gi = EM.addGroup('RTGroup'), g = EM.groups[gi];
+    var beforeVLen = EM.V.length;
+    for (var i = 0; i < EM.V.length; i++) g.w[i] = +(0.1 + 0.05 * i).toFixed(3);
+
+    // Leg 1: exportToModel (bakes into an unindexed part._vgroups) -> EM.fromModel edit-load
+    EM.exportToModel();
+    var m = R.state.models[R.state.models.length - 1], pt = m.userData.parts[0];
+    if (!pt._vgroups || !pt._vgroups.length) throw new Error('exportToModel did not attach _vgroups to the exported part');
+    EM.fromModel(m, 0);
+    if (EM.V.length !== beforeVLen) throw new Error('vert count changed across exportToModel->edit-load round trip: ' + beforeVLen + ' -> ' + EM.V.length);
+    if (!EM.groups.length) throw new Error('EM.fromModel did not restore any vertex groups');
+    var g2 = EM.groups[0], missing = 0;
+    for (var vi = 0; vi < EM.V.length; vi++) if (!(vi in g2.w)) missing++;
+    if (missing > 0) throw new Error('verts lost their weight across exportToModel->edit-load round trip: missing=' + missing + ' of ' + EM.V.length);
+
+    // Leg 2: saveProject/loadProject (buildProjectData/loadProject) round trip of that same model
+    var data = R.buildProjectData(true);
+    var savedVG = data.models[data.models.length - 1].parts[0].vgroups;
+    if (!savedVG || !savedVG.length || savedVG[0].name !== 'RTGroup') throw new Error('buildProjectData did not serialize vgroups: ' + JSON.stringify(savedVG));
+    R.loadProject(data);
+    var m2 = R.state.models[R.state.models.length - 1], pt2 = m2.userData.parts[0];
+    if (!pt2._vgroups || !pt2._vgroups.length || pt2._vgroups[0].name !== 'RTGroup') throw new Error('loadProject did not restore _vgroups onto the part: ' + JSON.stringify(pt2._vgroups));
+  }));
 
   await page.evaluate(() => __R.setView('edit'));
   await page.waitForTimeout(400);
