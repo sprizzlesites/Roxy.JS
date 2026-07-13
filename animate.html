@@ -1291,14 +1291,17 @@ function scheduleAnimAutosave(){clearTimeout(animAutosaveTimer);animAutosaveTime
 // v4 (Wave C4): bones may carry a `constraints` field (copyLoc/copyRot/trackTo/limitRot list).
 // v2/v3 saves load unchanged (missing field -> empty constraints array). Scene-object
 // constraints are intentionally NOT part of this payload — see the C4 section header above.
+// Wave D3 adds `loop` (transport loop toggle) additively — still v4: older payloads simply
+// lack the field and restore to the default (true), older code ignores it.
 function doAnimAutosave(){try{localStorage.setItem(ANIM_AUTOSAVE_KEY,JSON.stringify(
-  {v:4,fps:Anim.fps,start:Anim.start,end:Anim.end,tracks:Anim.tracks,rigs:serializeRigs()}));}catch(e){}}
+  {v:4,fps:Anim.fps,start:Anim.start,end:Anim.end,loop:Anim.loop,tracks:Anim.tracks,rigs:serializeRigs()}));}catch(e){}}
 function tryRestoreAnimAutosave(){
   var raw;try{raw=localStorage.getItem(ANIM_AUTOSAVE_KEY);}catch(e){return false;}
   if(!raw)return false;
   var data;try{data=JSON.parse(raw);}catch(e){return false;}
   if(!data)return false;
-  Anim.fps=data.fps||24;Anim.start=data.start||0;Anim.end=data.end!=null?data.end:96;Anim.tracks=data.tracks||[];
+  Anim.fps=data.fps||24;Anim.start=data.start||0;Anim.end=data.end!=null?data.end:96;
+  Anim.loop=data.loop!==false;Anim.tracks=data.tracks||[];
   var maxId=0;Anim.tracks.forEach(function(tr){var n=+(''+tr.id).replace(/\D/g,'');if(n>maxId)maxId=n;});trackIdc=maxId+1;
   if(data.rigs&&data.rigs.length){data.rigs.forEach(rebuildRigFromSerialized);
     var rigIds=Object.keys(Rigs);if(rigIds.length&&!Arm.rigId)Arm.rigId=rigIds[0];} // v1 saves simply have no rigs to restore
@@ -1310,14 +1313,22 @@ function stepPlayback(now){
   if(!Anim.playing){pbLast=null;pbAcc=0;return;}
   if(pbLast==null){pbLast=now;return;}
   var dt=(now-pbLast)/1000;pbLast=now;pbAcc+=dt;
-  var stepDur=1/Math.max(1,Anim.fps),moved=false;
+  var stepDur=1/Math.max(1,Anim.fps),moved=false,stopped=false;
   while(pbAcc>=stepDur){pbAcc-=stepDur;Anim.time+=1;moved=true;
-    if(Anim.time>Anim.end)Anim.time=Anim.start;} // loop
-  if(moved){Anim.sample(Anim.time);syncScrubUI();invalidate();}}
+    if(Anim.time>Anim.end){
+      if(Anim.loop)Anim.time=Anim.start; // wrap (Wave D3: loop is a transport toggle now)
+      else{Anim.time=Anim.end;Anim.playing=false;stopped=true;break;}}} // hold the last frame
+  if(moved){Anim.sample(Anim.time);syncScrubUI();invalidate();}
+  if(stopped)renderPanel();} // refresh the Play/Pause label after an auto-stop
 
 function syncScrubUI(){var s=$('#tlScrub');if(s)s.value=Anim.time;
-  var l=$('#tlTimeLbl');if(l)l.textContent='t='+Anim.time.toFixed(0)+'  ('+(Anim.time/Math.max(1,Anim.fps)).toFixed(2)+'s)';}
+  var l=$('#tlTimeLbl');if(l)l.textContent='t='+Anim.time.toFixed(0)+'  ('+(Anim.time/Math.max(1,Anim.fps)).toFixed(2)+'s)';
+  if(typeof Dope==='object'&&Dope.canvas&&Dope.canvas.isConnected)Dope.draw();} // keep the dope-sheet playhead in lockstep with the scrub bar
 function clampTime(){if(Anim.time<Anim.start)Anim.time=Anim.start;if(Anim.time>Anim.end)Anim.time=Anim.end;}
+// Transport helpers (Wave D3): whole-frame jumps shared by the |< -1 +1 >| buttons, the
+// tap-to-type frame label, and the dope-sheet ruler scrub. One step = 1 frame = 1/fps s.
+function gotoFrame(t){Anim.time=clamp(Math.round(t),Anim.start,Anim.end);Anim.sample(Anim.time);syncScrubUI();invalidate();}
+function stepFrame(d){gotoFrame(Anim.time+d);}
 
 /* ---------------- numeric field + tap-to-type slider (same pattern as index.html's slider()) ---------------- */
 function slider(label,min,max,val,step,on){
@@ -1583,13 +1594,29 @@ function panelTimeline(b){
   b.appendChild(el('div',{class:'section-title',text:'Target'}));
   b.appendChild(targetSelect());
 
-  b.appendChild(el('div',{class:'section-title',text:'Scrub'}));
-  b.appendChild(el('span',{class:'muted small',id:'tlTimeLbl',
-    text:'t='+Anim.time.toFixed(0)+'  ('+(Anim.time/Math.max(1,Anim.fps)).toFixed(2)+'s)'}));
+  b.appendChild(el('div',{class:'section-title',text:'Scrub + Transport'}));
+  var tlbl=el('span',{class:'muted small tap-edit',id:'tlTimeLbl',title:'Tap to type an exact frame',
+    text:'t='+Anim.time.toFixed(0)+'  ('+(Anim.time/Math.max(1,Anim.fps)).toFixed(2)+'s)'});
+  tlbl.addEventListener('click',function(){ // tap-to-type current frame (slider() label convention)
+    var v=prompt('Go to frame ('+Anim.start+' to '+Anim.end+'):',Anim.time.toFixed(0));
+    if(v==null)return;var n=+v;if(!isFinite(n)){toast('Enter a frame number');return;}
+    gotoFrame(n);});
+  b.appendChild(tlbl);
   b.appendChild(el('input',{type:'range',id:'tlScrub',class:'scrubRange',min:Anim.start,max:Anim.end,step:1,value:Anim.time,
     oninput:function(e){Anim.time=+e.target.value;Anim.sample(Anim.time);syncScrubUI();invalidate();}}));
-  b.appendChild(el('div',{class:'grid2'},[
-    el('button',{class:'pri',text:Anim.playing?'Pause':'Play',onclick:function(){Anim.playing=!Anim.playing;renderPanel();}}),
+  var tp=el('div',{style:'display:flex;gap:6px'});
+  tp.appendChild(el('button',{title:'Jump to start',style:'flex:1;padding:9px 4px',text:'|◀',onclick:function(){gotoFrame(Anim.start);}}));
+  tp.appendChild(el('button',{title:'Back one frame',style:'flex:1;padding:9px 4px',text:'−1',onclick:function(){stepFrame(-1);}}));
+  tp.appendChild(el('button',{class:'pri',style:'flex:2',text:Anim.playing?'Pause':'Play',onclick:function(){
+    Anim.playing=!Anim.playing;
+    if(Anim.playing&&Anim.time>=Anim.end)Anim.time=Anim.start; // restart a run that stopped on the last frame
+    renderPanel();}}));
+  tp.appendChild(el('button',{title:'Forward one frame',style:'flex:1;padding:9px 4px',text:'+1',onclick:function(){stepFrame(1);}}));
+  tp.appendChild(el('button',{title:'Jump to end',style:'flex:1;padding:9px 4px',text:'▶|',onclick:function(){gotoFrame(Anim.end);}}));
+  b.appendChild(tp);
+  b.appendChild(el('div',{class:'grid2',style:'margin-top:6px'},[
+    el('button',{class:Anim.loop?'on':'',text:Anim.loop?'Loop: On':'Loop: Off',onclick:function(){
+      Anim.loop=!Anim.loop;scheduleAnimAutosave();renderPanel();}}),
     el('button',{text:'Stop',onclick:function(){Anim.playing=false;Anim.time=Anim.start;Anim.sample(Anim.time);renderPanel();invalidate();}})]));
 
   b.appendChild(el('div',{class:'section-title',text:'Author'}));
