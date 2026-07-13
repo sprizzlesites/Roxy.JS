@@ -1344,6 +1344,365 @@ function numField(label,val,step,on){
   var inp=el('input',{type:'number',value:val,step:step||1,onchange:function(e){on(+e.target.value);}});
   return el('div',{},[el('label',{class:'fld',text:label}),inp]);}
 
+/* ═══════════════════════════════════════════════════════
+   Wave D3 — DOPE SHEET (the Timeline tab's centerpiece).
+
+   Canvas-drawn sheet: rows = tracks grouped by target (one collapsible
+   header row per targetId with a merged-key summary), columns = time
+   (ruler with frame numbers at nice steps, fps-aware). The layout model
+   is a flat `Dope.rows` array rebuilt by buildRows() on every draw —
+   {kind:'group'|'track', tid, track?, y, label} — plus a pure time<->x
+   mapping (timeToX/xToTime from Dope.t0 + Dope.pxf), so hit-testing
+   (hitTest) and the verification suite share the exact geometry the
+   renderer draws.
+
+   Mobile-first interaction (GAP_ANALYSIS §3: keyframe diamonds need
+   >=36px effective touch targets even though they draw ~12px — the
+   hit-test uses an 18px horizontal slop across the full 36px row):
+     - tap a diamond -> select it; an action bar under the canvas offers
+       Frame / Value tap-to-type (prompt(), the slider() convention),
+       Duplicate, Delete, Undo
+     - drag a selected diamond -> retime, snapped to whole frames and
+       clamped so no selected key crosses below t=0; exactly ONE undo
+       snapshot per drag
+     - long-press a diamond -> ADD it to the selection (multi-select);
+       the Box Select toggle turns empty-area drags into a marquee
+     - group-header diamonds are merged summaries: tapping one selects
+       every key at that frame across the group's tracks (drag moves
+       them together)
+     - ruler tap/drag scrubs (same whole-frame snap + start/end clamp as
+       #tlScrub; both stay in sync through syncScrubUI)
+     - empty-area drag pans; two-pointer pinch zooms the time axis
+       (the viewport's ptrs-Map two-pointer pattern), clamped between
+       whole-anim-visible and 60 px/frame
+
+   Undo: this file has no global History object yet, so key edits get a
+   minimal dedicated stack (KeyUndo) of JSON snapshots of Anim.tracks —
+   tracks are JSON-safe by design (see the Anim section header). One
+   snapshot per user action (drag / delete / duplicate / type-in).
+   Every edit mutates Anim.tracks directly (single source of truth) and
+   re-runs Anim.sample(Anim.time), so playback and the 3D view reflect
+   edits immediately; scheduleAnimAutosave keeps persistence.
+   ═══════════════════════════════════════════════════════ */
+var KeyUndo=[]; // JSON snapshots of Anim.tracks — minimal undo for KEY edits only (see header)
+function pushKeyUndo(){try{KeyUndo.push(JSON.stringify(Anim.tracks));if(KeyUndo.length>40)KeyUndo.shift();}catch(e){}}
+function trackById(id){for(var i=0;i<Anim.tracks.length;i++)if(Anim.tracks[i].id===id)return Anim.tracks[i];return null;}
+function keyIndexAt(tr,t){for(var i=0;i<tr.keys.length;i++)if(Math.abs(tr.keys[i].t-t)<1e-6)return i;return -1;}
+function dopeGroupLabel(tid){var m=/bone:([^\/]+)/.exec(tid);if(m)return m[1];
+  var c=/con:(\w+)$/.exec(tid);if(c)return 'con:'+c[1];return tid;}
+function dopeGroupTimes(row){var seen={},out=[];row.tracks.forEach(function(tr){tr.keys.forEach(function(k){
+  var kk=k.t.toFixed(4);if(!seen[kk]){seen[kk]=1;out.push(k.t);}});});out.sort(function(a,b){return a-b;});return out;}
+function diamondPath(c,x,y,r){c.beginPath();c.moveTo(x,y-r);c.lineTo(x+r,y);c.lineTo(x,y+r);c.lineTo(x-r,y);c.closePath();}
+// Nice ruler label interval: smallest candidate giving >=44px between labels; fps multiples
+// are included so second boundaries land on labels at typical zooms.
+function rulerStep(pxf,fps){var cand=[1,2,5,10,20,50,100,200,500,1000,2000,5000];
+  if(fps>2)cand.push(fps,fps*2,fps*4);
+  cand.sort(function(a,b){return a-b;});
+  for(var i=0;i<cand.length;i++)if(cand[i]*pxf>=44)return cand[i];
+  return cand[cand.length-1];}
+
+var Dope={
+ canvas:null,ctx:null,cssW:0,cssH:0,
+ t0:0,pxf:0, // left visible frame + horizontal zoom (px per frame); pxf=0 means "fit on first draw"
+ labelW:92,rowH:36,rulerH:26,
+ collapsed:{},sel:[],boxMode:false,box:null,rows:[],
+ _ptrs:new Map(),_drag:null,_pinch:null,_longT:null,
+
+ attach:function(cv){ // called by panelTimeline for each freshly built canvas
+  this.canvas=cv;this.ctx=cv.getContext('2d');
+  this._ptrs.clear();this._drag=null;this._pinch=null;this.box=null;
+  var self=this;
+  cv.addEventListener('pointerdown',function(e){self._down(e);});
+  cv.addEventListener('pointermove',function(e){self._move(e);});
+  cv.addEventListener('pointerup',function(e){self._up(e,false);});
+  cv.addEventListener('pointercancel',function(e){self._up(e,true);});
+  cv.addEventListener('wheel',function(e){e.preventDefault();self.zoomAt(self._ex(e),Math.pow(1.0015,-e.deltaY));self.draw();},{passive:false});},
+ _ex:function(e){return e.clientX-this.canvas.getBoundingClientRect().left;},
+ _ey:function(e){return e.clientY-this.canvas.getBoundingClientRect().top;},
+
+ /* ---- view maths ---- */
+ timeToX:function(t){return this.labelW+(t-this.t0)*this.pxf;},
+ xToTime:function(x){return this.t0+(x-this.labelW)/this.pxf;},
+ _minPxf:function(){var vw=Math.max(40,this.cssW-this.labelW);
+  return Math.min(vw/(Math.max(1,Anim.end-Anim.start)+1),60);},
+ fitAll:function(){this.pxf=this._minPxf();this.t0=Anim.start;},
+ clampView:function(){this.pxf=clamp(this.pxf,this._minPxf(),60); // whole-anim-visible <-> per-frame detail
+  var visSpan=Math.max(1,this.cssW-this.labelW)/this.pxf,lo=Math.min(Anim.start,0);
+  this.t0=clamp(this.t0,lo,Math.max(lo,Anim.end+1-visSpan));},
+ zoomAt:function(px,f){var t=this.xToTime(px);this.pxf=this.pxf*f;this.clampView();
+  this.t0+=t-this.xToTime(px);this.clampView();},
+
+ /* ---- layout ---- */
+ buildRows:function(){
+  var rows=[],groups=[],byTid={},self=this;
+  Anim.tracks.forEach(function(tr){if(!tr.keys.length)return;
+   var g=byTid[tr.targetId];
+   if(!g){g={tid:tr.targetId,tracks:[]};byTid[tr.targetId]=g;groups.push(g);}
+   g.tracks.push(tr);});
+  var y=this.rulerH;
+  groups.forEach(function(g){
+   rows.push({kind:'group',tid:g.tid,tracks:g.tracks,y:y,label:dopeGroupLabel(g.tid)});y+=self.rowH;
+   if(!self.collapsed[g.tid])g.tracks.forEach(function(tr){
+    rows.push({kind:'track',tid:g.tid,track:tr,y:y,label:tr.path});y+=self.rowH;});});
+  this.rows=rows;return rows;},
+ rowAt:function(y){var i=Math.floor((y-this.rulerH)/this.rowH);
+  return (i>=0&&i<this.rows.length)?this.rows[i]:null;},
+ hitTest:function(x,y){
+  if(y<this.rulerH)return x>=this.labelW?{kind:'ruler'}:{kind:'empty'};
+  var row=this.rowAt(y);
+  if(!row)return {kind:'empty'};
+  if(x<this.labelW)return {kind:row.kind==='group'?'grouplabel':'tracklabel',row:row};
+  var self=this,bestT=null,bd=18; // 18px slop each side + the full 36px row height => >=36px effective target
+  var times=row.kind==='track'?row.track.keys.map(function(k){return k.t;}):dopeGroupTimes(row);
+  times.forEach(function(t){var d=Math.abs(self.timeToX(t)-x);if(d<bd){bd=d;bestT=t;}});
+  if(bestT!=null)return row.kind==='track'
+    ?{kind:'key',row:row,track:row.track,t:bestT}
+    :{kind:'groupkey',row:row,t:bestT};
+  return {kind:'empty',row:row};},
+
+ /* ---- selection ---- */
+ isSel:function(trackId,t){return this.sel.some(function(s){return s.trackId===trackId&&Math.abs(s.t-t)<1e-6;});},
+ selectOnly:function(list){this.sel=list.slice();},
+ clearSel:function(){this.sel=[];},
+ selKeys:function(){var out=[];this.sel.forEach(function(s){var tr=trackById(s.trackId);if(!tr)return;
+  var i=keyIndexAt(tr,s.t);if(i>=0)out.push({tr:tr,key:tr.keys[i]});});return out;},
+ _hitKeyList:function(hit){ // the concrete keys a key/groupkey hit refers to
+  if(hit.kind==='key')return [{trackId:hit.track.id,t:hit.t}];
+  var out=[];hit.row.tracks.forEach(function(tr){if(keyIndexAt(tr,hit.t)>=0)out.push({trackId:tr.id,t:hit.t});});
+  return out;},
+
+ /* ---- edits (all undoable, all flow through Anim.tracks + resample) ---- */
+ _afterEdit:function(){Anim.sample(Anim.time);scheduleAnimAutosave();invalidate();this.draw();renderDopeActions();},
+ deleteSel:function(){var sk=this.selKeys();if(!sk.length)return;
+  pushKeyUndo();
+  sk.forEach(function(s){var i=s.tr.keys.indexOf(s.key);if(i>=0)s.tr.keys.splice(i,1);});
+  Anim.tracks=Anim.tracks.filter(function(tr){return tr.keys.length;}); // prune emptied tracks
+  this.sel=[];toast('Deleted '+sk.length+' key'+(sk.length===1?'':'s'));this._afterEdit();},
+ dupSel:function(){var sk=this.selKeys();if(!sk.length)return;
+  pushKeyUndo();var ns=[];
+  sk.forEach(function(s){var nt=s.key.t+1; // land one frame later; drag places it precisely
+   var copy={t:nt,v:Array.isArray(s.key.v)?s.key.v.slice():s.key.v,interp:s.key.interp};
+   var i=keyIndexAt(s.tr,nt);
+   if(i>=0)s.tr.keys[i]=copy;else{s.tr.keys.push(copy);s.tr.keys.sort(function(a,b){return a.t-b.t;});}
+   ns.push({trackId:s.tr.id,t:nt});});
+  this.sel=ns;toast('Duplicated to +1 frame — drag to place');this._afterEdit();},
+ setSelFrame:function(nt){var sk=this.selKeys();if(sk.length!==1)return;
+  nt=Math.max(0,Math.round(nt));var s=sk[0];
+  if(Math.abs(nt-s.key.t)<1e-9)return;
+  pushKeyUndo();
+  var i=keyIndexAt(s.tr,nt);if(i>=0)s.tr.keys.splice(i,1); // typing onto an occupied frame replaces that key
+  s.key.t=nt;s.tr.keys.sort(function(a,b){return a.t-b.t;});
+  this.sel=[{trackId:s.tr.id,t:nt}];this._afterEdit();},
+ setSelValue:function(v){var sk=this.selKeys();
+  if(sk.length!==1||typeof sk[0].key.v!=='number'||!isFinite(v))return;
+  pushKeyUndo();sk[0].key.v=v;this._afterEdit();},
+ undo:function(){if(!KeyUndo.length){toast('Nothing to undo');return;}
+  Anim.tracks=JSON.parse(KeyUndo.pop());this.sel=[];
+  toast('Key edit undone');this._afterEdit();},
+
+ /* ---- pointer interaction ---- */
+ _cancelLong:function(){if(this._longT){clearTimeout(this._longT);this._longT=null;}},
+ _scrubTo:function(x){var t=clamp(Math.round(this.xToTime(x)),Anim.start,Anim.end);
+  if(t!==Anim.time){Anim.time=t;Anim.sample(t);syncScrubUI();invalidate();}else this.draw();},
+ _down:function(e){
+  e.preventDefault();
+  try{this.canvas.setPointerCapture(e.pointerId);}catch(err){} // synthetic test pointers can't be captured
+  var x=this._ex(e),y=this._ey(e);
+  this._ptrs.set(e.pointerId,{x:x,y:y});
+  if(this._ptrs.size===2){ // second finger: pinch-zoom takes over, whatever the first was doing
+   this._cancelLong();this._drag=null;this.box=null;
+   var v=Array.from(this._ptrs.values());
+   this._pinch={d:Math.max(8,Math.abs(v[0].x-v[1].x)),mx:(v[0].x+v[1].x)/2};
+   return;}
+  if(this._ptrs.size>2)return;
+  var hit=this.hitTest(x,y),self=this;
+  this._drag={id:e.pointerId,sx:x,sy:y,px:x,hit:hit,moved:false,df:0,undoPushed:false,mode:'tap'};
+  if(hit.kind==='ruler'){this._drag.mode='scrub';this._scrubTo(x);}
+  else if(hit.kind==='key'||hit.kind==='groupkey'){
+   this._drag.mode='key';
+   var list=this._hitKeyList(hit);
+   this._drag.prevSel=this.sel.slice();
+   if(!list.every(function(s){return self.isSel(s.trackId,s.t);}))this.selectOnly(list); // tapping an already-selected key keeps the multi-selection for a group drag
+   this._drag.orig=this.selKeys().map(function(sk){return {tr:sk.tr,key:sk.key,ot:sk.key.t};});
+   this._longT=setTimeout(function(){self._longPress();},480);
+   this.draw();renderDopeActions();}
+  else if(hit.kind==='grouplabel'||hit.kind==='tracklabel'){this._drag.mode='tap';}
+  else{this._drag.mode=this.boxMode?'box':'pan';
+   if(this._drag.mode==='box')this.box={x0:x,y0:y,x1:x,y1:y};}},
+ _longPress:function(){ // long-press a key: ADD it to the previous selection instead of replacing it
+  this._longT=null;var d=this._drag;if(!d||d.mode!=='key'||d.moved)return;
+  var union=d.prevSel.slice();
+  this.sel.forEach(function(s){if(!union.some(function(u){return u.trackId===s.trackId&&Math.abs(u.t-s.t)<1e-6;}))union.push(s);});
+  this.sel=union;
+  d.orig=this.selKeys().map(function(sk){return {tr:sk.tr,key:sk.key,ot:sk.key.t};});
+  toast(this.sel.length+' key'+(this.sel.length===1?'':'s')+' selected');
+  this.draw();renderDopeActions();},
+ _move:function(e){
+  var p=this._ptrs.get(e.pointerId);if(!p)return;
+  var x=this._ex(e),y=this._ey(e);p.x=x;p.y=y;
+  if(this._ptrs.size===2&&this._pinch){
+   var v=Array.from(this._ptrs.values());
+   var d=Math.max(8,Math.abs(v[0].x-v[1].x)),mx=(v[0].x+v[1].x)/2;
+   this.zoomAt(mx,d/this._pinch.d);
+   this.t0-=(mx-this._pinch.mx)/this.pxf;this.clampView(); // two-finger drag also pans
+   this._pinch.d=d;this._pinch.mx=mx;this.draw();return;}
+  var dg=this._drag;if(!dg||dg.id!==e.pointerId)return;
+  var dx=x-dg.sx,dy=y-dg.sy;
+  if(!dg.moved&&Math.hypot(dx,dy)>6){dg.moved=true;this._cancelLong();}
+  if(dg.mode==='scrub'){this._scrubTo(x);return;}
+  if(dg.mode==='pan'){if(dg.moved){this.t0-=(x-dg.px)/this.pxf;this.clampView();this.draw();}dg.px=x;return;}
+  if(dg.mode==='box'){if(this.box){this.box.x1=x;this.box.y1=y;this.draw();}return;}
+  if(dg.mode==='key'&&dg.moved){
+   var df=Math.round(dx/this.pxf); // snap to whole frames
+   var minOt=Infinity;dg.orig.forEach(function(o){if(o.ot<minOt)minOt=o.ot;});
+   df=Math.max(df,Math.ceil(-minOt)); // no selected key may cross into negative time
+   if(df!==dg.df){
+    if(!dg.undoPushed){pushKeyUndo();dg.undoPushed=true;} // one undo snapshot per drag (keys still at original times here)
+    dg.df=df;
+    dg.orig.forEach(function(o){o.key.t=o.ot+df;});
+    var seen={};dg.orig.forEach(function(o){if(!seen[o.tr.id]){seen[o.tr.id]=1;o.tr.keys.sort(function(a,b){return a.t-b.t;});}});
+    this.sel=dg.orig.map(function(o){return {trackId:o.tr.id,t:o.key.t};});
+    Anim.sample(Anim.time);invalidate();this.draw();renderDopeActions();} // live preview
+   return;}},
+ _up:function(e,cancelled){
+  this._ptrs.delete(e.pointerId);
+  if(this._ptrs.size<2)this._pinch=null;
+  var dg=this._drag;if(!dg||dg.id!==e.pointerId)return;
+  this._cancelLong();this._drag=null;
+  if(dg.mode==='box'&&this.box){
+   var b=this.box;this.box=null;
+   if(Math.abs(b.x1-b.x0)>6||Math.abs(b.y1-b.y0)>6)this._boxSelect(b);
+   else if(!cancelled&&this.sel.length)this.clearSel(); // tiny box = tap on empty: clear
+   this.draw();renderDopeActions();return;}
+  if(dg.mode==='key'){
+   if(dg.moved&&dg.df!==0){scheduleAnimAutosave();
+    toast('Moved '+dg.orig.length+' key'+(dg.orig.length===1?'':'s')+' '+(dg.df>0?'+':'')+dg.df+' frame'+(Math.abs(dg.df)===1?'':'s'));}
+   this.draw();renderDopeActions();return;}
+  if(!dg.moved&&!cancelled)this._tap(dg);},
+ _tap:function(dg){var hit=dg.hit;
+  if(hit.kind==='grouplabel'){this.collapsed[hit.row.tid]=!this.collapsed[hit.row.tid];this.draw();return;}
+  if(hit.kind==='empty'||hit.kind==='tracklabel'){
+   if(this.sel.length){this.clearSel();renderDopeActions();}this.draw();}},
+ _boxSelect:function(b){
+  var x0=Math.min(b.x0,b.x1),x1=Math.max(b.x0,b.x1),y0=Math.min(b.y0,b.y1),y1=Math.max(b.y0,b.y1);
+  var self=this,added=0;
+  this.rows.forEach(function(row){
+   if(row.kind!=='track')return;
+   var cy=row.y+self.rowH/2;if(cy<y0||cy>y1)return;
+   row.track.keys.forEach(function(k){var kx=self.timeToX(k.t);
+    if(kx>=x0-6&&kx<=x1+6&&!self.isSel(row.track.id,k.t)){self.sel.push({trackId:row.track.id,t:k.t});added++;}});});
+  if(added)toast(this.sel.length+' keys selected');},
+
+ /* ---- rendering ---- */
+ draw:function(){
+  var cv=this.canvas;if(!cv||!cv.isConnected)return;
+  var rows=this.buildRows();
+  var w=cv.clientWidth||320;
+  var h=this.rulerH+Math.max(2,rows.length)*this.rowH+6;
+  var dpr=Math.min(window.devicePixelRatio||1,2);
+  if(cv.width!==Math.round(w*dpr)||cv.height!==Math.round(h*dpr)){cv.width=Math.round(w*dpr);cv.height=Math.round(h*dpr);}
+  if(cv.style.height!==h+'px')cv.style.height=h+'px';
+  this.cssW=w;this.cssH=h;
+  if(!this.pxf)this.fitAll();
+  this.clampView();
+  var c=this.ctx,self=this;
+  c.setTransform(dpr,0,0,dpr,0,0);
+  c.fillStyle='#fbfbfc';c.fillRect(0,0,w,h);
+  // row bands + labels
+  c.textBaseline='middle';c.textAlign='left';
+  rows.forEach(function(row){
+   if(row.kind==='group'){c.fillStyle='rgba(0,0,0,.05)';c.fillRect(0,row.y,w,self.rowH);}
+   c.strokeStyle='rgba(0,0,0,.07)';c.lineWidth=1;
+   c.beginPath();c.moveTo(0,row.y+self.rowH+.5);c.lineTo(w,row.y+self.rowH+.5);c.stroke();
+   c.save();c.beginPath();c.rect(0,row.y,self.labelW-4,self.rowH);c.clip();
+   c.fillStyle=row.kind==='group'?'#14161a':'#6b7280';
+   c.font=(row.kind==='group'?'600 ':'')+'11px "Space Grotesk",system-ui,sans-serif';
+   var lx=8;
+   if(row.kind==='group'){c.fillText(self.collapsed[row.tid]?'▸':'▾',5,row.y+self.rowH/2);lx=18;}
+   else lx=16;
+   c.fillText(row.label,lx,row.y+self.rowH/2);
+   c.restore();});
+  if(!rows.length){c.fillStyle='#9aa1ab';c.font='11.5px "Space Grotesk",system-ui,sans-serif';
+   c.fillText('No keys yet — key something below.',this.labelW+10,this.rulerH+this.rowH);}
+  // sheet area (clipped): range shading, ruler, grid, diamonds, playhead, marquee
+  c.save();c.beginPath();c.rect(this.labelW,0,w-this.labelW,h);c.clip();
+  var xs=this.timeToX(Anim.start),xe=this.timeToX(Anim.end);
+  c.fillStyle='rgba(0,0,0,.045)';
+  if(xs>this.labelW)c.fillRect(this.labelW,0,xs-this.labelW,h);
+  if(xe<w)c.fillRect(xe,0,w-xe,h);
+  c.fillStyle='rgba(0,0,0,.045)';c.fillRect(this.labelW,0,w-this.labelW,this.rulerH);
+  var step=rulerStep(this.pxf,Anim.fps),tFirst=Math.ceil(this.xToTime(this.labelW)/step)*step;
+  c.font='10px "Space Grotesk",system-ui,sans-serif';c.textAlign='center';
+  for(var t=tFirst;this.timeToX(t)<w+step*this.pxf;t+=step){
+   var gx=this.timeToX(t);
+   c.strokeStyle='rgba(0,0,0,.08)';c.beginPath();c.moveTo(gx+.5,this.rulerH);c.lineTo(gx+.5,h);c.stroke();
+   c.fillStyle='#6b7280';c.fillText(''+t,gx,this.rulerH/2);}
+  c.strokeStyle='rgba(0,0,0,.14)';c.beginPath();c.moveTo(this.labelW,this.rulerH+.5);c.lineTo(w,this.rulerH+.5);c.stroke();
+  rows.forEach(function(row){
+   var cy=row.y+self.rowH/2;
+   if(row.kind==='group'){
+    dopeGroupTimes(row).forEach(function(t){
+     var x=self.timeToX(t);if(x<self.labelW-8||x>w+8)return;
+     var any=false,all=true;
+     row.tracks.forEach(function(tr){if(keyIndexAt(tr,t)>=0){if(self.isSel(tr.id,t))any=true;else all=false;}});
+     var s=any&&all;
+     diamondPath(c,x,cy,s?6.5:5);
+     c.fillStyle=s?'#ff6f9c':'#9aa1ab';c.fill();
+     c.strokeStyle='rgba(0,0,0,.35)';c.lineWidth=1;c.stroke();});
+   }else{
+    row.track.keys.forEach(function(k){
+     var x=self.timeToX(k.t);if(x<self.labelW-8||x>w+8)return;
+     var s=self.isSel(row.track.id,k.t);
+     diamondPath(c,x,cy,s?8:6);
+     c.fillStyle=s?'#ff6f9c':'#8a93a3';c.fill();
+     c.strokeStyle=s?'#c2386a':'rgba(0,0,0,.4)';c.lineWidth=s?1.6:1;c.stroke();});}});
+  var phx=this.timeToX(Anim.time);
+  if(phx>=this.labelW-1){
+   c.strokeStyle='#ff6f9c';c.lineWidth=2;c.beginPath();c.moveTo(phx,3);c.lineTo(phx,h);c.stroke();
+   c.fillStyle='#ff6f9c';c.beginPath();c.moveTo(phx-5,1);c.lineTo(phx+5,1);c.lineTo(phx,10);c.closePath();c.fill();}
+  if(this.box){var bx=Math.min(this.box.x0,this.box.x1),by=Math.min(this.box.y0,this.box.y1),
+   bw=Math.abs(this.box.x1-this.box.x0),bh=Math.abs(this.box.y1-this.box.y0);
+   c.fillStyle='rgba(255,111,156,.14)';c.fillRect(bx,by,bw,bh);
+   c.strokeStyle='#ff6f9c';c.lineWidth=1;c.strokeRect(bx+.5,by+.5,bw,bh);}
+  c.restore();
+  c.strokeStyle='rgba(0,0,0,.14)';c.beginPath();c.moveTo(this.labelW+.5,0);c.lineTo(this.labelW+.5,h);c.stroke();}
+};
+
+/* Selected-key action bar (DOM, under the canvas): value/frame tap-to-type via prompt()
+   (the slider() convention), Duplicate, Delete, Box Select toggle, Undo. Rebuilt in place so
+   mid-gesture canvas state survives. */
+function renderDopeActions(){
+ var bar=$('#dopeActions');if(!bar)return;bar.innerHTML='';
+ var sk=Dope.selKeys();
+ var row=el('div',{style:'display:flex;flex-wrap:wrap;gap:6px;align-items:center'});
+ if(!sk.length){
+  row.appendChild(el('span',{class:'small muted',style:'flex:1 1 100%',
+   text:Anim.tracks.length?'Tap a key to edit. Drag retimes. Long-press adds to the selection. Pinch zooms, drag empty space pans.':'No keys yet — use Key Position below (or Key Rotation on a posed bone).'}));
+ }else if(sk.length===1){
+  var k=sk[0].key,tr=sk[0].tr;
+  row.appendChild(el('button',{text:'Frame: '+k.t,title:'Tap to type an exact frame',onclick:function(){
+   var v=prompt('Move key to frame:',k.t);if(v==null)return;
+   var n=+v;if(!isFinite(n)){toast('Enter a number');return;}
+   Dope.setSelFrame(n);}}));
+  if(typeof k.v==='number')
+   row.appendChild(el('button',{text:'Value: '+(Math.round(k.v*1000)/1000),title:'Tap to type an exact value',onclick:function(){
+    var v=prompt('Key value for '+tr.path+':',k.v);if(v==null)return;
+    var n=+v;if(!isFinite(n)){toast('Enter a number');return;}
+    Dope.setSelValue(n);}}));
+  else row.appendChild(el('span',{class:'small muted',text:'rotation key'}));
+  row.appendChild(el('button',{text:'Duplicate',onclick:function(){Dope.dupSel();}}));
+  row.appendChild(el('button',{text:'Delete',onclick:function(){Dope.deleteSel();}}));
+ }else{
+  row.appendChild(el('span',{class:'small',style:'font-weight:600',text:sk.length+' keys'}));
+  row.appendChild(el('button',{text:'Duplicate',onclick:function(){Dope.dupSel();}}));
+  row.appendChild(el('button',{text:'Delete',onclick:function(){Dope.deleteSel();}}));
+ }
+ row.appendChild(el('button',{class:Dope.boxMode?'on':'',text:'Box Select',onclick:function(){
+  Dope.boxMode=!Dope.boxMode;renderDopeActions();
+  toast(Dope.boxMode?'Drag on the sheet to box-select keys':'Box select off');}}));
+ if(KeyUndo.length)row.appendChild(el('button',{text:'Undo',onclick:function(){Dope.undo();}}));
+ bar.appendChild(row);}
+
 /* ---------------- VIEW SWITCH + PANELS ---------------- */
 function setView(v){active.view=v;
   $$('.view').forEach(function(s){s.classList.toggle('on',s.getAttribute('data-view')===v);});
@@ -1584,7 +1943,7 @@ function panelArmPose(b,rig){
 
 function panelTimeline(b){
   b.appendChild(el('h2',{text:'Timeline'}));
-  b.appendChild(el('p',{class:'sub',text:'Keyframe core (D1, this wave). Dope sheet (D3) and graph editor (D4) arrive in later waves.'}));
+  b.appendChild(el('p',{class:'sub',text:'Dope sheet: rows are tracks grouped by target, diamonds are keys. Tap to select, drag to retime, long-press for multi-select, pinch to zoom. Graph editor (D4) arrives in a later wave.'}));
   b.appendChild(el('div',{class:'section-title',text:'Playback'}));
   b.appendChild(el('div',{class:'grid2'},[
     numField('FPS',Anim.fps,1,function(v){Anim.fps=Math.max(1,Math.round(v));scheduleAnimAutosave();renderPanel();}),
@@ -1619,17 +1978,25 @@ function panelTimeline(b){
       Anim.loop=!Anim.loop;scheduleAnimAutosave();renderPanel();}}),
     el('button',{text:'Stop',onclick:function(){Anim.playing=false;Anim.time=Anim.start;Anim.sample(Anim.time);renderPanel();invalidate();}})]));
 
+  b.appendChild(el('div',{class:'section-title',text:'Dope Sheet'}));
+  var cv=el('canvas',{id:'dopeSheet',style:'width:100%;display:block;touch-action:none;border:1px solid var(--line);border-radius:12px;background:#fbfbfc'});
+  b.appendChild(cv);
+  Dope.attach(cv);
+  b.appendChild(el('div',{id:'dopeActions',style:'margin-top:6px'}));
+  renderDopeActions();
+  b.appendChild(el('div',{class:'grid2',style:'margin-top:6px'},[
+    el('button',{text:'Fit Whole Anim',onclick:function(){Dope.fitAll();Dope.draw();}}),
+    el('button',{text:'Zoom to Frames',onclick:function(){Dope.pxf=24;Dope.clampView();Dope.draw();}})]));
+  setTimeout(function(){Dope.draw();},0); // canvas has a real clientWidth once laid out
+
   b.appendChild(el('div',{class:'section-title',text:'Author'}));
   b.appendChild(el('button',{style:'width:100%',text:'Key Position — '+(state.selTarget||'no target'),onclick:function(){
     if(!state.selTarget){toast('No target selected');return;}
     insertPositionKey(state.selTarget,Anim.time);toast('Keyed position @ t='+Anim.time);renderPanel();}}));
 
   if(Anim.tracks.length){
-    b.appendChild(el('div',{class:'section-title',text:'Tracks'}));
-    Anim.tracks.forEach(function(tr){
-      b.appendChild(el('div',{class:'card small',style:'margin-bottom:6px'},[tr.targetId+' · '+tr.path+' — '+tr.keys.length+' key'+(tr.keys.length===1?'':'s')]));});
-    b.appendChild(el('button',{style:'width:100%',text:'Clear all keyframes',onclick:function(){
-      Anim.tracks=[];scheduleAnimAutosave();toast('Cleared');renderPanel();}}));
+    b.appendChild(el('button',{style:'width:100%;margin-top:6px',text:'Clear all keyframes',onclick:function(){
+      pushKeyUndo();Anim.tracks=[];Dope.clearSel();scheduleAnimAutosave();toast('Cleared (undo available on the sheet)');renderPanel();}}));
   }}
 
 function panelExport(b){
@@ -1687,6 +2054,7 @@ $('#fileProj').addEventListener('change',function(e){var f=e.target.files[0];if(
 $('#emptyBannerClose').addEventListener('click',function(){$('#emptyBanner').classList.remove('show');});
 
 window.addEventListener('resize',resizeActive);
+window.addEventListener('resize',function(){if(Dope.canvas&&Dope.canvas.isConnected)Dope.draw();});
 
 /* ---------------- main loop ---------------- */
 function loop(){requestAnimationFrame(loop);stepPlayback(performance.now());updateCam();
