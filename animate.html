@@ -1214,7 +1214,7 @@ function rebuildRigFromSerialized(rd){
        seed does not yet store quaternion/vector keys as one unit)
    ═══════════════════════════════════════════════════════ */
 var trackIdc=1;
-var Anim={fps:24,start:0,end:96,time:0,playing:false,tracks:[]};
+var Anim={fps:24,start:0,end:96,time:0,playing:false,loop:true,tracks:[]};
 
 // Resolve a dotted path ('position.x') against a live object into {obj,key}
 // so callers can do obj[key] to read or obj[key]=v to write.
