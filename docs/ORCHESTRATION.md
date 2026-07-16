@@ -94,7 +94,7 @@ Wave definitions live in `docs/GAP_ANALYSIS.md` §4 — this table only tracks s
 | A9 | Bezier curves, curve-to-mesh, array-along-curve | TODO | | |
 | A10 | Text objects (billboard then extruded) | TODO | | |
 | A11 | Voxel remesh (stretch) | TODO | | |
-| B1 | Weight painting | TODO | | |
+| B1 | Weight painting | DONE | 5d161b0+678e28a | modeling suite now 88; `WeightPaint` mirrors Sculpt pipeline, writes A5 group weights, Add/Sub/Blur/Set + symmetry, per-stroke undo; agent cut off, tests written by orchestrator |
 | B2 | Serialization v2 (weights/keys/skeleton through save + localStorage bridge) | TODO | | |
 | B3 | Shape keys / morph targets | TODO | | |
 | B4 | Vertex colors | TODO | | |
@@ -104,7 +104,7 @@ Wave definitions live in `docs/GAP_ANALYSIS.md` §4 — this table only tracks s
 | C4 | Constraints (copyLoc/copyRot/trackTo/limitRot, influence keyable) | DONE | 52007de | animate suite now 45; influence track ids use stable `con:<id>` not index; object-level constraints runtime-only (not serialized) |
 | D1 | Keyframe core (Track model + sampler) | TODO | | load-bearing for D/E |
 | D2 | Timeline + playback transport | TODO | | |
-| D3 | Dope sheet | TODO | | |
+| D3 | Dope sheet + transport polish | DONE | 1c55117+b1a0387+5292d3f | animate suite now 58; canvas sheet, frame-snapped retime, marquee multi-select, pinch-zoom; agent cut off, tests committed by orchestrator |
 | D4 | Graph editor | TODO | | |
 | D5 | Camera animation + path-follow | TODO | | |
 | D6 | Action clips (NLA-lite) | TODO | | |
