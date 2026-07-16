@@ -9,7 +9,7 @@ const SP = __dirname;
 
 // Debug handles injected inside the app IIFE (test copy only — repo file untouched)
 const INJECT = `
-window.__R={setView:setView,EM:EM,editState:editState,Sculpt:Sculpt,Knife:Knife,getModel:getModel,state:state,paint:paint,paintInit:paintInit,applyPaintTex:applyPaintTex,ensureAtlasUVs:ensureAtlasUVs,do3dPaint:do3dPaint,exportOBJ:exportOBJ,parseOBJ:parseOBJ,History:History,addModel:addModel,buildDonut:buildDonut,doAutosave:doAutosave,clearAutosave:clearAutosave,AUTOSAVE_KEY:AUTOSAVE_KEY,active:active,addPrim:addPrim,renameModel:renameModel,duplicateModel:duplicateModel,deleteModel:deleteModel,renderAssets:renderAssets,filterAssetGrid:filterAssetGrid,setAssetQuery:function(q){assetSearchQuery=q;filterAssetGrid();},applyEditSnap:applyEditSnap,addPlacement:addPlacement,sceneScene:sceneScene,disposeModelResources:disposeModelResources,resetHintsSeen:function(){try{localStorage.removeItem('roxyHints');}catch(e){}},syncPaintHud:syncPaintHud,snapView:snapView,pickColorAt2D:pickColorAt2D,pickColorAt3D:pickColorAt3D,setPaintColor:setPaintColor,setActiveModel:setActiveModel,resizeActive:resizeActive,renderEditHud:renderEditHud,makeModel:makeModel,makeMaterial:makeMaterial,rebuildModel:rebuildModel,tex:tex,addLight:addLight,frameObject:frameObject,viewState:viewState,invalidate:invalidate,buildProjectData:buildProjectData,loadProject:loadProject,saveProject:saveProject};
+window.__R={setView:setView,EM:EM,editState:editState,Sculpt:Sculpt,WeightPaint:WeightPaint,Knife:Knife,getModel:getModel,state:state,paint:paint,paintInit:paintInit,applyPaintTex:applyPaintTex,ensureAtlasUVs:ensureAtlasUVs,do3dPaint:do3dPaint,exportOBJ:exportOBJ,parseOBJ:parseOBJ,History:History,addModel:addModel,buildDonut:buildDonut,doAutosave:doAutosave,clearAutosave:clearAutosave,AUTOSAVE_KEY:AUTOSAVE_KEY,active:active,addPrim:addPrim,renameModel:renameModel,duplicateModel:duplicateModel,deleteModel:deleteModel,renderAssets:renderAssets,filterAssetGrid:filterAssetGrid,setAssetQuery:function(q){assetSearchQuery=q;filterAssetGrid();},applyEditSnap:applyEditSnap,addPlacement:addPlacement,sceneScene:sceneScene,disposeModelResources:disposeModelResources,resetHintsSeen:function(){try{localStorage.removeItem('roxyHints');}catch(e){}},syncPaintHud:syncPaintHud,snapView:snapView,pickColorAt2D:pickColorAt2D,pickColorAt3D:pickColorAt3D,setPaintColor:setPaintColor,setActiveModel:setActiveModel,resizeActive:resizeActive,renderEditHud:renderEditHud,makeModel:makeModel,makeMaterial:makeMaterial,rebuildModel:rebuildModel,tex:tex,addLight:addLight,frameObject:frameObject,viewState:viewState,invalidate:invalidate,buildProjectData:buildProjectData,loadProject:loadProject,saveProject:saveProject};
 window.__setDownload=function(fn){download=fn;};
 `;
 
@@ -1579,6 +1579,116 @@ const server = http.createServer((req, res) => {
     R.loadProject(data);
     var m2 = R.state.models[R.state.models.length - 1], pt2 = m2.userData.parts[0];
     if (!pt2._vgroups || !pt2._vgroups.length || pt2._vgroups[0].name !== 'RTGroup') throw new Error('loadProject did not restore _vgroups onto the part: ' + JSON.stringify(pt2._vgroups));
+  }));
+
+  // ─── Wave B1: weight painting (WeightPaint reuses Sculpt's pipeline; _dab(center,null)
+  //     is the deterministic 3D-distance path used here so tests need no camera) ───────────
+  await step('weight paint: Add stroke raises weights within the footprint with falloff (center > edge)', () => page.evaluate(() => {
+    var R = __R, EM = R.EM, WP = R.WeightPaint;
+    EM.fromPrim('Sphere');
+    var gi = EM.addGroup('WPadd'); EM.activeGroup = gi;
+    WP.mode = 'add'; WP.radius = .7; WP.strength = 1; WP.weightTarget = 1; WP.symmetry = 0;
+    var c = EM.V[0].clone();               // dab centred exactly on vertex 0
+    WP._dab(c, null);
+    var g = EM.groups[gi], keys = Object.keys(g.w).map(Number);
+    if (keys.length < 2) throw new Error('Add weighted fewer than 2 verts (no gradient to check): ' + keys.length);
+    var near = keys[0], far = keys[0];
+    keys.forEach(function (k) {
+      if (EM.V[k].distanceTo(c) < EM.V[near].distanceTo(c)) near = k;
+      if (EM.V[k].distanceTo(c) > EM.V[far].distanceTo(c)) far = k;
+    });
+    if (!(g.w[near] > g.w[far])) throw new Error('falloff not decreasing with distance: near=' + g.w[near] + ' far=' + g.w[far]);
+    if (g.w[near] > 1 + 1e-6 || g.w[far] < 0) throw new Error('weights escaped [0,1]');
+  }));
+
+  await step('weight paint: Subtract lowers existing weights', () => page.evaluate(() => {
+    var R = __R, EM = R.EM, WP = R.WeightPaint;
+    EM.fromPrim('Sphere');
+    var gi = EM.addGroup('WPsub'); EM.activeGroup = gi;
+    var g = EM.groups[gi];
+    for (var i = 0; i < EM.V.length; i++) g.w[i] = 1;
+    WP.mode = 'subtract'; WP.radius = .7; WP.strength = 1; WP.weightTarget = 1; WP.symmetry = 0;
+    WP._dab(EM.V[0].clone(), null);
+    if (!((g.w[0] || 0) < 1)) throw new Error('Subtract did not lower the centre weight: ' + (g.w[0] || 0));
+  }));
+
+  await step('weight paint: Set drives the centre vertex to the target weight exactly', () => page.evaluate(() => {
+    var R = __R, EM = R.EM, WP = R.WeightPaint;
+    EM.fromPrim('Sphere');
+    var gi = EM.addGroup('WPset'); EM.activeGroup = gi;
+    WP.mode = 'set'; WP.radius = .5; WP.strength = 1; WP.weightTarget = .5; WP.symmetry = 0;
+    WP._dab(EM.V[0].clone(), null);          // falloff(0,R)=1, strength 1 => exact set at centre
+    var g = EM.groups[gi];
+    if (Math.abs((g.w[0] || 0) - .5) > 1e-6) throw new Error('Set did not reach target .5 exactly at centre: ' + (g.w[0] || 0));
+  }));
+
+  await step('weight paint: Blur pulls a spike toward the neighbour average', () => page.evaluate(() => {
+    var R = __R, EM = R.EM, WP = R.WeightPaint;
+    EM.fromPrim('Sphere');
+    var gi = EM.addGroup('WPblur'); EM.activeGroup = gi;
+    var g = EM.groups[gi];
+    g.w[0] = 1;                              // lone spike, every neighbour 0
+    WP.mode = 'blur'; WP.radius = .5; WP.strength = 1; WP.weightTarget = 1; WP.symmetry = 0;
+    WP._dab(EM.V[0].clone(), null);
+    if (!((g.w[0] || 0) < 1)) throw new Error('Blur did not pull the spike toward the (zero) neighbour average: ' + (g.w[0] || 0));
+  }));
+
+  await step('weight paint: symmetry X also paints the mirrored side', () => page.evaluate(() => {
+    var R = __R, EM = R.EM, WP = R.WeightPaint;
+    EM.fromPrim('Sphere');
+    var gi = EM.addGroup('WPsym'); EM.activeGroup = gi;
+    WP.mode = 'add'; WP.radius = .5; WP.strength = 1; WP.weightTarget = 1; WP.symmetry = 1; // X
+    var ci = -1;
+    for (var i = 0; i < EM.V.length; i++) if (EM.V[i].x > .4) { ci = i; break; }
+    if (ci < 0) throw new Error('no +X vertex on the sphere to seed the symmetric stroke');
+    WP.apply(EM.V[ci].clone(), null);        // apply() adds the mirrored dab
+    WP.symmetry = 0;
+    var g = EM.groups[gi], pos = false, neg = false;
+    Object.keys(g.w).forEach(function (k) { if (EM.V[k].x > .1) pos = true; if (EM.V[k].x < -.1) neg = true; });
+    if (!pos || !neg) throw new Error('symmetry X weighted only one side: +X=' + pos + ' -X=' + neg);
+  }));
+
+  await step('weight paint: one stroke = one undo entry that restores the pre-stroke weights', () => page.evaluate(() => {
+    var R = __R, EM = R.EM, WP = R.WeightPaint;
+    EM.fromPrim('Sphere');
+    var gi = EM.addGroup('WPundo'); EM.activeGroup = gi;
+    var g = EM.groups[gi];
+    g.w[3] = .25;
+    var before = JSON.stringify(g.w);
+    WP.mode = 'add'; WP.radius = .6; WP.strength = 1; WP.weightTarget = 1; WP.symmetry = 0;
+    WP.painting = true; WP._snap = {}; for (var k in g.w) WP._snap[k] = g.w[k]; // as down() snapshots
+    WP._dab(EM.V[0].clone(), null);
+    WP.up();                                 // pushes the single per-stroke History entry
+    if (JSON.stringify(EM.groups[gi].w) === before) throw new Error('stroke changed nothing');
+    R.History.undo();
+    var after = JSON.stringify(EM.groups[gi].w);
+    if (after !== before) throw new Error('undo did not restore pre-stroke weights: ' + before + ' -> ' + after);
+  }));
+
+  await step('weight paint: painting with no active group auto-creates one', () => page.evaluate(() => {
+    var R = __R, EM = R.EM, WP = R.WeightPaint;
+    EM.fromPrim('Cube');
+    EM.groups.length = 0; EM.activeGroup = -1;
+    WP.down({ pointerId: 99, clientX: 150, clientY: 150 }); // auto-creates before any hit test
+    var created = EM.groups.length;
+    WP.up();
+    if (created !== 1) throw new Error('down() with no group did not auto-create exactly one group, got ' + created);
+  }));
+
+  await step('weight paint: the weight-viz vertex colours update after a stroke', () => page.evaluate(() => {
+    var R = __R, EM = R.EM, WP = R.WeightPaint;
+    R.setView('edit');
+    EM.fromPrim('Sphere');
+    var gi = EM.addGroup('WPviz'); EM.activeGroup = gi;
+    WP.enter();                              // forces showWeights + _refresh => builds the color attr
+    var col = EM._meshObj.geometry.attributes.color;
+    if (!col) throw new Error('weight-viz color attribute missing after enter()');
+    var r0 = col.getX(0);                    // ramp: weight 0 = blue (r=0), weight 1 = red (r=1)
+    WP.mode = 'add'; WP.radius = .6; WP.strength = 1; WP.weightTarget = 1; WP.symmetry = 0;
+    WP.apply(EM.V[0].clone(), null);         // apply() calls _syncWeightColors()
+    var r1 = EM._meshObj.geometry.attributes.color.getX(0);
+    WP.exit();
+    if (!(r1 > r0 + 1e-4)) throw new Error('vertex-0 red channel did not rise after weighting it: ' + r0 + ' -> ' + r1);
   }));
 
   await page.evaluate(() => __R.setView('edit'));
