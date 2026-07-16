@@ -1,7 +1,9 @@
 // Headless verification of Roxy Animate (animate.html): boot, theme chrome, model bridge,
 // Track/keyframe core (insertKey/sample), playback, scrub bar, anim autosave, mobile chrome,
 // armatures (C1), FK axis constraints + rotation limits + CCD IK + pole targets (C3),
-// Copy Location/Rotation + Track-To + Limit Rotation constraints on bones and objects (C4).
+// Copy Location/Rotation + Track-To + Limit Rotation constraints on bones and objects (C4),
+// dope sheet + transport polish (D3: canvas rows/diamonds, select/retime/delete/duplicate,
+// box multi-select, pinch-zoom/pan, loop/jump/step transport, key-edit undo, autosave).
 // Modeled on tests/verify.js's harness pattern — separate suite, does not touch index.html.
 const { chromium } = require('playwright-core');
 const http = require('http');
@@ -31,7 +33,9 @@ window.__A={Anim:Anim,Registry:Registry,resolvePath:resolvePath,setView:setView,
   applyConstraints:applyConstraints,applyAllConstraints:applyAllConstraints,applyObjectConstraints:applyObjectConstraints,
   addConstraint:addConstraint,removeConstraint:removeConstraint,constraintListFor:constraintListFor,
   constraintTargetId:constraintTargetId,wouldCreateCycle:wouldCreateCycle,findBoneByTargetId:findBoneByTargetId,
-  CONSTRAINT_LABELS:CONSTRAINT_LABELS};
+  CONSTRAINT_LABELS:CONSTRAINT_LABELS,
+  Dope:Dope,KeyUndo:KeyUndo,gotoFrame:gotoFrame,stepFrame:stepFrame,renderDopeActions:renderDopeActions,
+  trackById:trackById,keyIndexAt:keyIndexAt,pushKeyUndo:pushKeyUndo,dopeGroupTimes:dopeGroupTimes,rulerStep:rulerStep};
 `;
 
 const server = http.createServer((req, res) => {
@@ -882,6 +886,342 @@ function syntheticProject() {
     if (w.distanceTo(tw) > 1e-4) throw new Error('object-level copyLoc did not pin head to torso, dist=' + w.distanceTo(tw));
     A.removeConstraint('demo.head', con.id); // clean up so later assumptions about the shared demo figure aren't affected
   }));
+
+  // ==== Wave D3: Dope sheet + transport polish ====
+  // Pointer tests run at a desktop viewport so the Timeline panel is the always-visible right
+  // column (on mobile it lives in the bottom sheet); the sheet's own touch behavior (hit slop,
+  // pinch, long-press timing) is asserted geometrically/synthetically below.
+
+  const dopeSetup = async () => {
+    await page.evaluate(() => {
+      const A = window.__A;
+      A.buildDemoFigure();
+      A.Anim.tracks.length = 0; A.KeyUndo.length = 0;
+      A.Dope.sel = []; A.Dope.boxMode = false; A.Dope.box = null; A.Dope.collapsed = {};
+      A.Dope.pxf = 0; A.Dope.t0 = 0; // force fit-to-anim on next draw
+      A.Anim.fps = 24; A.Anim.start = 0; A.Anim.end = 48; A.Anim.time = 0; A.Anim.playing = false; A.Anim.loop = true;
+      const t = A.Registry['demo.torso'];
+      t.position.x = 0; A.Anim.insertKey('demo.torso', 'position.x', 0);
+      t.position.x = 2; A.Anim.insertKey('demo.torso', 'position.x', 24);
+      t.position.y = 1.15; A.Anim.insertKey('demo.torso', 'position.y', 12);
+      A.setView('timeline');
+      document.getElementById('panel').classList.add('open'); // no-op on desktop
+    });
+    await page.waitForTimeout(120); // let panelTimeline's setTimeout(draw) fire
+    await page.evaluate(() => { window.__A.Dope.draw(); window.__A.renderDopeActions(); });
+  };
+
+  await step('D3 sheet: group header + property-track rows render with key diamonds (pixel probe), collapse folds the group', async () => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.waitForTimeout(120);
+    await dopeSetup();
+    const res = await page.evaluate(() => {
+      const A = window.__A, D = A.Dope;
+      if (!document.getElementById('dopeSheet')) return { err: '#dopeSheet canvas missing' };
+      const group = D.rows.find(r => r.kind === 'group' && r.tid === 'demo.torso');
+      const tracks = D.rows.filter(r => r.kind === 'track');
+      if (!group) return { err: 'no group header row for demo.torso' };
+      if (D.rows[0].kind !== 'group') return { err: 'first row should be the group header' };
+      if (tracks.length !== 2) return { err: 'expected 2 property rows, got ' + tracks.length };
+      const trx = A.Anim.findTrack('demo.torso', 'position.x');
+      const rowx = D.rows.find(r => r.kind === 'track' && r.track === trx);
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const y = rowx.y + D.rowH / 2;
+      const px = D.ctx.getImageData(Math.round(D.timeToX(24) * dpr), Math.round(y * dpr), 1, 1).data;
+      const bg = D.ctx.getImageData(Math.round(D.timeToX(18) * dpr), Math.round(y * dpr), 1, 1).data;
+      const diff = Math.abs(px[0] - bg[0]) + Math.abs(px[1] - bg[1]) + Math.abs(px[2] - bg[2]);
+      // summary diamond on the group header at a time only one child track has (frame 12)
+      const gTimes = window.__A.dopeGroupTimes(group);
+      D.collapsed['demo.torso'] = true; D.draw();
+      const collapsedRows = D.rows.length;
+      D.collapsed['demo.torso'] = false; D.draw();
+      return { diff, gTimes, collapsedRows, expandedRows: D.rows.length };
+    });
+    if (res.err) throw new Error(res.err);
+    if (res.diff < 30) throw new Error('no diamond pixels at the key position (color delta ' + res.diff + ')');
+    if (res.gTimes.join(',') !== '0,12,24') throw new Error('group summary should merge child key times 0,12,24 — got ' + res.gTimes.join(','));
+    if (res.collapsedRows !== 1) throw new Error('collapsed group should leave only the header row, got ' + res.collapsedRows);
+    if (res.expandedRows !== 3) throw new Error('expanded group should show header + 2 tracks, got ' + res.expandedRows);
+  });
+
+  await step('D3 ruler scrub: drag on the ruler sets Anim.time (frame-snapped) and #tlScrub follows', async () => {
+    const r = await page.evaluate(() => {
+      const D = window.__A.Dope, rect = D.canvas.getBoundingClientRect();
+      return { l: rect.left, t: rect.top, x0: D.timeToX(12), x1: D.timeToX(30), ry: D.rulerH / 2 };
+    });
+    await page.mouse.move(r.l + r.x0, r.t + r.ry);
+    await page.mouse.down();
+    await page.mouse.move(r.l + r.x1, r.t + r.ry, { steps: 4 });
+    await page.mouse.up();
+    const res = await page.evaluate(() => ({ t: window.__A.Anim.time, scrub: +document.getElementById('tlScrub').value }));
+    if (res.t !== 30) throw new Error('ruler scrub should land on frame 30, got ' + res.t);
+    if (res.scrub !== 30) throw new Error('#tlScrub out of sync with the ruler scrub, got ' + res.scrub);
+  });
+
+  await step('D3 select: tapping a diamond selects that key, action bar appears, hit target is >=36px effective', async () => {
+    await dopeSetup();
+    const r = await page.evaluate(() => {
+      const A = window.__A, D = A.Dope;
+      const tr = A.Anim.findTrack('demo.torso', 'position.x');
+      const row = D.rows.find(rw => rw.kind === 'track' && rw.track === tr);
+      const rect = D.canvas.getBoundingClientRect();
+      return { x: rect.left + D.timeToX(24), y: rect.top + row.y + D.rowH / 2, trId: tr.id };
+    });
+    await page.mouse.click(r.x, r.y);
+    const res = await page.evaluate(() => {
+      const A = window.__A, D = A.Dope;
+      const tr = A.Anim.findTrack('demo.torso', 'position.x');
+      const row = D.rows.find(rw => rw.kind === 'track' && rw.track === tr);
+      const slopHit = D.hitTest(D.timeToX(24) + 16, row.y + 2); // 16px off-center, top edge of the row
+      return { sel: D.sel.slice(), slopKind: slopHit.kind, slopT: slopHit.t,
+        bar: Array.from(document.querySelectorAll('#dopeActions button')).map(b => b.textContent) };
+    });
+    if (res.sel.length !== 1 || res.sel[0].t !== 24 || res.sel[0].trackId !== r.trId)
+      throw new Error('tap did not select the frame-24 key: ' + JSON.stringify(res.sel));
+    if (!res.bar.some(t => t === 'Delete') || !res.bar.some(t => /^Frame: 24$/.test(t)) || !res.bar.some(t => /^Value:/.test(t)))
+      throw new Error('action bar missing Frame/Value/Delete: ' + res.bar.join(' | '));
+    if (res.slopKind !== 'key' || res.slopT !== 24)
+      throw new Error('16px-offset tap missed the key — effective touch target under 36px (' + res.slopKind + ')');
+  });
+
+  await step('D3 retime: dragging a selected diamond snaps to whole frames, updates Anim, resamples, one undo per drag, never below t=0', async () => {
+    await dopeSetup();
+    const r = await page.evaluate(() => {
+      const A = window.__A, D = A.Dope;
+      const tr = A.Anim.findTrack('demo.torso', 'position.x');
+      const row = D.rows.find(rw => rw.kind === 'track' && rw.track === tr);
+      const rect = D.canvas.getBoundingClientRect();
+      return { x: rect.left + D.timeToX(24), y: rect.top + row.y + D.rowH / 2, x0: rect.left + D.timeToX(0), pxf: D.pxf };
+    });
+    await page.mouse.move(r.x, r.y); await page.mouse.down();
+    await page.mouse.move(r.x + 10 * r.pxf, r.y, { steps: 6 });
+    await page.mouse.up();
+    let res = await page.evaluate(() => {
+      const A = window.__A;
+      const tr = A.Anim.findTrack('demo.torso', 'position.x');
+      A.Anim.sample(34);
+      return { times: tr.keys.map(k => k.t).join(','), atNew: A.Registry['demo.torso'].position.x, undo: A.KeyUndo.length };
+    });
+    if (res.times !== '0,34') throw new Error('key should retime 24 -> 34, got ' + res.times);
+    if (Math.abs(res.atNew - 2) > 1e-6) throw new Error('resampling at the retimed frame should hit the keyed value 2, got ' + res.atNew);
+    if (res.undo !== 1) throw new Error('one drag must push exactly one undo snapshot, got ' + res.undo);
+    // negative-time clamp: drag the frame-0 key hard left — it must stay at 0 (and no-op => no extra undo)
+    await page.mouse.move(r.x0, r.y); await page.mouse.down();
+    await page.mouse.move(r.x0 - 20 * r.pxf, r.y, { steps: 5 });
+    await page.mouse.up();
+    res = await page.evaluate(() => {
+      const A = window.__A;
+      return { times: A.Anim.findTrack('demo.torso', 'position.x').keys.map(k => k.t).join(','), undo: A.KeyUndo.length };
+    });
+    if (res.times !== '0,34') throw new Error('leftward drag crossed into negative time: ' + res.times);
+    if (res.undo !== 1) throw new Error('a fully-clamped no-op drag should not push an undo snapshot, got ' + res.undo);
+  });
+
+  await step('D3 multi-select: box-select marquee grabs 2 keys, dragging one moves all selected by the same delta', async () => {
+    await dopeSetup();
+    await page.evaluate(() => { window.__A.Dope.boxMode = true; window.__A.renderDopeActions(); });
+    const r = await page.evaluate(() => {
+      const D = window.__A.Dope, rect = D.canvas.getBoundingClientRect();
+      const tracks = D.rows.filter(rw => rw.kind === 'track');
+      return { l: rect.left, t: rect.top, x0: D.timeToX(6), x1: D.timeToX(30),
+        yTop: tracks[0].y + 4, yBot: tracks[tracks.length - 1].y + D.rowH - 4 };
+    });
+    await page.mouse.move(r.l + r.x0, r.t + r.yTop); await page.mouse.down();
+    await page.mouse.move(r.l + r.x1, r.t + r.yBot, { steps: 5 }); await page.mouse.up();
+    const selN = await page.evaluate(() => window.__A.Dope.sel.length);
+    if (selN !== 2) throw new Error('marquee over frames 6-30 should select 2 keys (12 + 24), got ' + selN);
+    await page.evaluate(() => { window.__A.Dope.boxMode = false; });
+    const k = await page.evaluate(() => {
+      const A = window.__A, D = A.Dope;
+      const tr = A.Anim.findTrack('demo.torso', 'position.x');
+      const row = D.rows.find(rw => rw.kind === 'track' && rw.track === tr);
+      const rect = D.canvas.getBoundingClientRect();
+      return { x: rect.left + D.timeToX(24), y: rect.top + row.y + D.rowH / 2, pxf: D.pxf };
+    });
+    await page.mouse.move(k.x, k.y); await page.mouse.down();
+    await page.mouse.move(k.x + 6 * k.pxf, k.y, { steps: 5 }); await page.mouse.up();
+    const res = await page.evaluate(() => {
+      const A = window.__A;
+      return { x: A.Anim.findTrack('demo.torso', 'position.x').keys.map(kk => kk.t).join(','),
+               y: A.Anim.findTrack('demo.torso', 'position.y').keys.map(kk => kk.t).join(','),
+               undo: A.KeyUndo.length };
+    });
+    if (res.x !== '0,30') throw new Error('position.x key should move 24 -> 30, got ' + res.x);
+    if (res.y !== '18') throw new Error('position.y key should move 12 -> 18 (same +6 delta), got ' + res.y);
+    if (res.undo !== 1) throw new Error('multi-key drag should still be a single undo action, got ' + res.undo);
+  });
+
+  await step('D3 delete: action-bar Delete removes the selected key from Anim and prunes emptied tracks', async () => {
+    await dopeSetup();
+    await page.evaluate(() => {
+      const A = window.__A, D = A.Dope;
+      const tr = A.Anim.findTrack('demo.torso', 'position.y');
+      D.sel = [{ trackId: tr.id, t: 12 }]; A.renderDopeActions();
+      const btn = Array.from(document.querySelectorAll('#dopeActions button')).find(b => b.textContent === 'Delete');
+      if (!btn) throw new Error('Delete button missing from the action bar');
+      btn.click();
+    });
+    const res = await page.evaluate(() => {
+      const A = window.__A;
+      return { yTrack: !!A.Anim.findTrack('demo.torso', 'position.y'), total: A.Anim.tracks.length, sel: A.Dope.sel.length };
+    });
+    if (res.yTrack) throw new Error('position.y track should be pruned once its only key is deleted');
+    if (res.total !== 1) throw new Error('expected 1 surviving track, got ' + res.total);
+    if (res.sel !== 0) throw new Error('selection should clear after delete');
+  });
+
+  await step('D3 value tap-to-type: edits the key value through Anim (resample reflects it, undoable)', async () => {
+    await dopeSetup();
+    const res = await page.evaluate(() => {
+      const A = window.__A, D = A.Dope;
+      const tr = A.Anim.findTrack('demo.torso', 'position.x');
+      D.sel = [{ trackId: tr.id, t: 24 }]; A.renderDopeActions();
+      const old = window.prompt; window.prompt = () => ' -1.5 ';
+      const btn = Array.from(document.querySelectorAll('#dopeActions button')).find(b => /^Value:/.test(b.textContent));
+      if (!btn) { window.prompt = old; return { err: 'Value button missing' }; }
+      btn.click(); window.prompt = old;
+      A.Anim.sample(24);
+      return { v: tr.keys[1].v, live: A.Registry['demo.torso'].position.x, undo: A.KeyUndo.length };
+    });
+    if (res.err) throw new Error(res.err);
+    if (Math.abs(res.v - -1.5) > 1e-9) throw new Error('key value should be -1.5, got ' + res.v);
+    if (Math.abs(res.live - -1.5) > 1e-9) throw new Error('resample does not reflect the typed value, got ' + res.live);
+    if (res.undo < 1) throw new Error('value edit should push an undo snapshot');
+  });
+
+  await step('D3 frame tap-to-type: moves the selected key to the typed frame exactly', async () => {
+    await dopeSetup();
+    const res = await page.evaluate(() => {
+      const A = window.__A, D = A.Dope;
+      const tr = A.Anim.findTrack('demo.torso', 'position.x');
+      D.sel = [{ trackId: tr.id, t: 24 }]; A.renderDopeActions();
+      const old = window.prompt; window.prompt = () => '40';
+      const btn = Array.from(document.querySelectorAll('#dopeActions button')).find(b => /^Frame: 24$/.test(b.textContent));
+      if (!btn) { window.prompt = old; return { err: 'Frame button missing' }; }
+      btn.click(); window.prompt = old;
+      return { times: tr.keys.map(k => k.t).join(','), sel: D.sel.slice() };
+    });
+    if (res.err) throw new Error(res.err);
+    if (res.times !== '0,40') throw new Error('typed frame 40 not applied, got ' + res.times);
+    if (res.sel.length !== 1 || res.sel[0].t !== 40) throw new Error('selection should follow the retimed key: ' + JSON.stringify(res.sel));
+  });
+
+  await step('D3 navigation: pinch-zoom + one-finger pan change the visible range without corrupting key times (clamped)', async () => {
+    await dopeSetup();
+    const res = await page.evaluate(() => {
+      const A = window.__A, D = A.Dope;
+      const before = { pxf: D.pxf, t0: D.t0, keys: A.Anim.findTrack('demo.torso', 'position.x').keys.map(k => k.t).join(',') };
+      const rect = D.canvas.getBoundingClientRect();
+      const y = D.rulerH + D.rowH * 1.5; // inside the first track row, away from its keys
+      const ev = (type, id, x) => D.canvas.dispatchEvent(new PointerEvent(type, { pointerId: id, clientX: rect.left + x, clientY: rect.top + y, bubbles: true }));
+      ev('pointerdown', 101, 120); ev('pointerdown', 102, 200);       // two synthetic touch points
+      ev('pointermove', 101, 110); ev('pointermove', 102, 240);       // spread -> zoom in
+      const zoomed = D.pxf;
+      ev('pointerup', 101, 110); ev('pointerup', 102, 240);
+      ev('pointerdown', 103, 250); ev('pointermove', 103, 200); ev('pointermove', 103, 180); ev('pointerup', 103, 180); // one-finger pan left
+      const after = { pxf: D.pxf, t0: D.t0, keys: A.Anim.findTrack('demo.torso', 'position.x').keys.map(k => k.t).join(',') };
+      // clamp check: zooming way out never shows less than the whole anim, way in never exceeds 60px/frame
+      D.zoomAt(150, 0.0001); const minP = D.pxf;
+      D.zoomAt(150, 1e9); const maxP = D.pxf;
+      D.fitAll(); D.draw();
+      return { before, zoomed, after, minP, maxP, minAllowed: D._minPxf() };
+    });
+    if (!(res.zoomed > res.before.pxf)) throw new Error('pinch spread did not zoom in (' + res.before.pxf + ' -> ' + res.zoomed + ')');
+    if (!(res.after.t0 > res.before.t0)) throw new Error('leftward pan did not advance t0 (' + res.before.t0 + ' -> ' + res.after.t0 + ')');
+    if (res.after.keys !== res.before.keys) throw new Error('zoom/pan corrupted key times: ' + res.after.keys);
+    if (Math.abs(res.minP - res.minAllowed) > 1e-9) throw new Error('zoom-out clamp should stop at whole-anim-visible, got ' + res.minP);
+    if (Math.abs(res.maxP - 60) > 1e-9) throw new Error('zoom-in clamp should stop at 60px/frame, got ' + res.maxP);
+  });
+
+  await step('D2/D3 transport: frame-step is exactly 1 frame (1/fps s), jump start/end, frame tap-to-type, loop toggle honored', async () => {
+    await dopeSetup();
+    let r = await page.evaluate(() => {
+      const A = window.__A;
+      A.gotoFrame(10); A.stepFrame(1);
+      const t1 = A.Anim.time;
+      const s0 = A.Anim.time / A.Anim.fps; A.stepFrame(1);
+      const dSec = A.Anim.time / A.Anim.fps - s0;
+      A.stepFrame(-1); const t3 = A.Anim.time;
+      return { t1, dSec, t3, fps: A.Anim.fps };
+    });
+    if (r.t1 !== 11) throw new Error('stepFrame(+1) from 10 should give 11, got ' + r.t1);
+    if (Math.abs(r.dSec - 1 / r.fps) > 1e-12) throw new Error('frame step is not exactly 1/fps seconds: ' + r.dSec);
+    if (r.t3 !== 11) throw new Error('stepFrame(-1) should step back exactly one frame, got ' + r.t3);
+    r = await page.evaluate(() => {
+      const q = (t) => document.querySelector('#panelBody button[title="' + t + '"]');
+      if (!q('Jump to start') || !q('Jump to end') || !q('Back one frame') || !q('Forward one frame')) return { err: 'transport buttons missing' };
+      q('Jump to end').click(); const tEnd = window.__A.Anim.time;
+      q('Jump to start').click(); const tStart = window.__A.Anim.time;
+      q('Forward one frame').click(); const tFwd = window.__A.Anim.time;
+      const old = window.prompt; window.prompt = () => '25';
+      document.getElementById('tlTimeLbl').click(); window.prompt = old;
+      return { tEnd, tStart, tFwd, tTyped: window.__A.Anim.time };
+    });
+    if (r.err) throw new Error(r.err);
+    if (r.tEnd !== 48 || r.tStart !== 0 || r.tFwd !== 1) throw new Error('jump/step buttons wrong: ' + JSON.stringify(r));
+    if (r.tTyped !== 25) throw new Error('frame tap-to-type should land on 25, got ' + r.tTyped);
+    // loop OFF: playback stops and holds the last frame
+    await page.evaluate(() => { const A = window.__A; A.Anim.loop = false; A.Anim.time = 46; A.Anim.playing = true; });
+    await page.waitForTimeout(500);
+    const st = await page.evaluate(() => ({ t: window.__A.Anim.time, playing: window.__A.Anim.playing }));
+    if (st.playing || st.t !== 48) throw new Error('loop-off playback should auto-stop holding the end frame, got ' + JSON.stringify(st));
+    // loop ON: wraps back to start and keeps playing
+    await page.evaluate(() => { const A = window.__A; A.Anim.loop = true; A.Anim.time = 47; A.Anim.playing = true; });
+    await page.waitForTimeout(400);
+    const st2 = await page.evaluate(() => { const A = window.__A; const s = { t: A.Anim.time, playing: A.Anim.playing }; A.Anim.playing = false; return s; });
+    if (!st2.playing) throw new Error('loop-on playback should keep playing past the end');
+    if (!(st2.t < 47)) throw new Error('loop-on playback should have wrapped to the start range, got t=' + st2.t);
+  });
+
+  await step('D3 undo: retime + delete are individually undoable (LIFO), restoring exact key layouts', async () => {
+    await dopeSetup();
+    const res = await page.evaluate(() => {
+      const A = window.__A, D = A.Dope;
+      const tid = A.Anim.findTrack('demo.torso', 'position.x').id;
+      D.sel = [{ trackId: tid, t: 24 }]; D.setSelFrame(30);
+      const afterMove = A.trackById(tid).keys.map(k => k.t).join(',');
+      D.sel = [{ trackId: tid, t: 30 }]; D.deleteSel();
+      const tr2 = A.trackById(tid);
+      const afterDel = tr2 ? tr2.keys.map(k => k.t).join(',') : 'gone';
+      D.undo();
+      const afterUndo1 = A.Anim.findTrack('demo.torso', 'position.x').keys.map(k => k.t).join(',');
+      D.undo();
+      const afterUndo2 = A.Anim.findTrack('demo.torso', 'position.x').keys.map(k => k.t).join(',');
+      return { afterMove, afterDel, afterUndo1, afterUndo2 };
+    });
+    if (res.afterMove !== '0,30') throw new Error('setSelFrame(30) should give keys 0,30 — got ' + res.afterMove);
+    if (res.afterDel !== '0') throw new Error('delete should leave only the frame-0 key, got ' + res.afterDel);
+    if (res.afterUndo1 !== '0,30') throw new Error('first undo should restore the deleted key, got ' + res.afterUndo1);
+    if (res.afterUndo2 !== '0,24') throw new Error('second undo should restore the original frame 24, got ' + res.afterUndo2);
+  });
+
+  await step('D3 persistence: loop flag + edited key times ride the (still v4, additive) anim autosave', async () => {
+    await dopeSetup();
+    const res = await page.evaluate(() => {
+      const A = window.__A, D = A.Dope;
+      const tid = A.Anim.findTrack('demo.torso', 'position.x').id;
+      D.sel = [{ trackId: tid, t: 24 }]; D.setSelFrame(33); // an edit that must persist
+      A.Anim.loop = false;
+      A.doAnimAutosave();
+      const saved = JSON.parse(localStorage.getItem(A.ANIM_AUTOSAVE_KEY));
+      const savedKeys = saved.tracks.map(t => t.path + ':' + t.keys.map(k => k.t).join('/')).sort().join('|');
+      const liveKeys = A.Anim.tracks.map(t => t.path + ':' + t.keys.map(k => k.t).join('/')).sort().join('|');
+      // restore path honors the flag (older payloads without `loop` default to true)
+      A.Anim.loop = true;
+      A.tryRestoreAnimAutosave();
+      const loopRestored = A.Anim.loop;
+      localStorage.setItem(A.ANIM_AUTOSAVE_KEY, JSON.stringify({ v: 4, fps: 24, start: 0, end: 96, tracks: [] })); // pre-D3 payload, no loop field
+      A.tryRestoreAnimAutosave();
+      const loopDefault = A.Anim.loop;
+      localStorage.removeItem(A.ANIM_AUTOSAVE_KEY);
+      return { v: saved.v, savedLoop: saved.loop, savedKeys, liveKeys, loopRestored, loopDefault };
+    });
+    if (res.v !== 4) throw new Error('autosave format should remain v4 (additive change), got ' + res.v);
+    if (res.savedLoop !== false) throw new Error('loop flag not persisted');
+    if (res.savedKeys !== res.liveKeys) throw new Error('autosaved key times diverge from live tracks: ' + res.savedKeys + ' vs ' + res.liveKeys);
+    if (res.loopRestored !== false) throw new Error('restore did not apply the saved loop flag');
+    if (res.loopDefault !== true) throw new Error('pre-D3 payload without loop field should default loop to true');
+  });
 
   await browser.close();
   server.close();
