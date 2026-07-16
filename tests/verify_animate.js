@@ -35,7 +35,11 @@ window.__A={Anim:Anim,Registry:Registry,resolvePath:resolvePath,setView:setView,
   constraintTargetId:constraintTargetId,wouldCreateCycle:wouldCreateCycle,findBoneByTargetId:findBoneByTargetId,
   CONSTRAINT_LABELS:CONSTRAINT_LABELS,
   Dope:Dope,KeyUndo:KeyUndo,gotoFrame:gotoFrame,stepFrame:stepFrame,renderDopeActions:renderDopeActions,
-  trackById:trackById,keyIndexAt:keyIndexAt,pushKeyUndo:pushKeyUndo,dopeGroupTimes:dopeGroupTimes,rulerStep:rulerStep};
+  trackById:trackById,keyIndexAt:keyIndexAt,pushKeyUndo:pushKeyUndo,dopeGroupTimes:dopeGroupTimes,rulerStep:rulerStep,
+  bindMeshToRig:bindMeshToRig,unbindMesh:unbindMesh,bindModelToRig:bindModelToRig,unbindModel:unbindModel,
+  recomputeAutoWeightsForModel:recomputeAutoWeightsForModel,activeModelGroup:activeModelGroup,
+  SkinBinds:SkinBinds,serializeSkinBinds:serializeSkinBinds,applyPendingSkinBinds:applyPendingSkinBinds,
+  computeAutoWeightsForMesh:computeAutoWeightsForMesh,computeGroupWeightsForMesh:computeGroupWeightsForMesh};
 `;
 
 const server = http.createServer((req, res) => {
@@ -658,7 +662,7 @@ function syntheticProject() {
     }, mkChain);
     const raw = await page.evaluate(() => localStorage.getItem(window.__A.ANIM_AUTOSAVE_KEY));
     const saved = JSON.parse(raw);
-    if (saved.v !== 4) throw new Error('autosave should be format v4 (bumped by Wave C4), got ' + saved.v); // was v3 as of Wave C3; C4 bumped it additively
+    if (saved.v !== 5) throw new Error('autosave should be format v5 (bumped again by Wave C2 skins field), got ' + saved.v); // was v3 as of Wave C3, v4 as of C4
     const savedRig = saved.rigs.find(r => r.name === 'LimitSaveRig');
     const savedBone = savedRig && savedRig.bones.find(b => b.limits);
     if (!savedBone || !savedBone.limits.z) throw new Error('limits did not serialize into the autosave payload');
@@ -809,7 +813,7 @@ function syntheticProject() {
     });
     const raw = await page.evaluate(() => localStorage.getItem(window.__A.ANIM_AUTOSAVE_KEY));
     const saved = JSON.parse(raw);
-    if (saved.v !== 4) throw new Error('autosave should be format v4, got ' + saved.v);
+    if (saved.v !== 5) throw new Error('autosave should be format v5, got ' + saved.v);
     const savedRig = saved.rigs.find(r => r.name === 'C4SaveRig');
     const savedSrc = savedRig && savedRig.bones.find(b => b.name === 'SaveSrc');
     if (!savedSrc || !savedSrc.constraints || savedSrc.constraints.length !== 2) throw new Error('constraints did not serialize: ' + JSON.stringify(savedSrc));
@@ -1216,11 +1220,217 @@ function syntheticProject() {
       localStorage.removeItem(A.ANIM_AUTOSAVE_KEY);
       return { v: saved.v, savedLoop: saved.loop, savedKeys, liveKeys, loopRestored, loopDefault };
     });
-    if (res.v !== 4) throw new Error('autosave format should remain v4 (additive change), got ' + res.v);
+    if (res.v !== 5) throw new Error('autosave format should be v5 (additive C2 bump), got ' + res.v);
     if (res.savedLoop !== false) throw new Error('loop flag not persisted');
     if (res.savedKeys !== res.liveKeys) throw new Error('autosaved key times diverge from live tracks: ' + res.savedKeys + ' vs ' + res.liveKeys);
     if (res.loopRestored !== false) throw new Error('restore did not apply the saved loop flag');
     if (res.loopDefault !== true) throw new Error('pre-D3 payload without loop field should default loop to true');
+  });
+
+  // ---- Wave C2: skinning (bind mesh->skeleton, automatic + explicit-group weights) ----
+  // Fixture builder used by several checks below: a straight 2-bone rig along +Y (Root
+  // 0->1, Tip 1->2, parented) plus a tiny standalone mesh/group (not part of the bridged
+  // model — direct THREE construction is enough since bindMeshToRig only needs a Mesh with
+  // a parent, a position attribute, and optionally userData.vgroups).
+  const SKIN_FIXTURE = `
+    function skinFixture(A, positions, indexArr, vgroups) {
+      const rig = A.newRig('SkinRig' + (Math.random()*1e6|0));
+      const b0 = A.addBone(rig, 'Root', new THREE.Vector3(0,0,0), new THREE.Vector3(0,1,0), null);
+      const b1 = A.addBone(rig, 'Tip', new THREE.Vector3(0,1,0), new THREE.Vector3(0,2,0), b0.id);
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      geo.setIndex(indexArr);
+      const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial());
+      if (vgroups) mesh.userData.vgroups = vgroups;
+      const grp = new THREE.Group(); grp.add(mesh);
+      return { rig, b0, b1, mesh, grp };
+    }
+  `;
+
+  await step('C2 bind: binding a mesh to a 2-bone rig produces a SkinnedMesh with skinIndex/skinWeight attributes', async () => {
+    const res = await page.evaluate(`(function(){
+      ${SKIN_FIXTURE}
+      const A = window.__A;
+      const f = skinFixture(A, [0.05,0,0, 0.05,0.4,0, 0.05,1.6,0, 0.05,2,0], [0,1,2, 1,2,3], null);
+      A.registerTarget('bindFixture.part0', f.mesh);
+      const skinned = A.bindMeshToRig(f.mesh, f.rig, {});
+      return {
+        ok: !!skinned && skinned.isSkinnedMesh === true,
+        hasAttrs: !!(skinned.geometry.attributes.skinIndex && skinned.geometry.attributes.skinWeight),
+        influences: skinned.geometry.attributes.skinIndex.itemSize,
+        registryUpdated: A.Registry['bindFixture.part0'] === skinned,
+        sharesSkeleton: skinned.skeleton === f.rig.skeleton,
+      };
+    })();`);
+    if (!res.ok) throw new Error('bind did not produce a SkinnedMesh');
+    if (!res.hasAttrs) throw new Error('bound mesh missing skinIndex/skinWeight attributes');
+    if (res.influences !== 4) throw new Error('expected 4 influences per vertex, got ' + res.influences);
+    if (!res.registryUpdated) throw new Error('Registry entry was not repointed at the new SkinnedMesh');
+    if (!res.sharesSkeleton) throw new Error("SkinnedMesh should share the rig's THREE.Skeleton object");
+  });
+
+  await step('C2 auto weights: skinWeight influences are normalized to sum to 1 per vertex', async () => {
+    const sums = await page.evaluate(`(function(){
+      ${SKIN_FIXTURE}
+      const A = window.__A;
+      const f = skinFixture(A, [0.05,0,0, 0.05,0.4,0, 0.05,1.6,0, 0.05,2,0], [0,1,2, 1,2,3], null);
+      const skinned = A.bindMeshToRig(f.mesh, f.rig, {});
+      const sw = skinned.geometry.attributes.skinWeight, out = [];
+      for (let i = 0; i < sw.count; i++) out.push(sw.getX(i) + sw.getY(i) + sw.getZ(i) + sw.getW(i));
+      return out;
+    })();`);
+    sums.forEach((s, i) => { if (Math.abs(s - 1) > 1e-4) throw new Error('vertex ' + i + ' skinWeight sums to ' + s + ' (expected 1)'); });
+  });
+
+  await step('C2 auto weights: nearest-bone-segment dominance (a vertex beside a bone weights mostly to it)', async () => {
+    const res = await page.evaluate(`(function(){
+      ${SKIN_FIXTURE}
+      const A = window.__A;
+      // v0 sits right beside Root's head, v1 right beside Tip's tail.
+      const f = skinFixture(A, [0.02,0.05,0, 0.02,1.95,0], [0,1,0], null);
+      const skinned = A.bindMeshToRig(f.mesh, f.rig, {});
+      const rootIdx = f.rig.skeleton.bones.indexOf(f.b0.bone), tipIdx = f.rig.skeleton.bones.indexOf(f.b1.bone);
+      const si = skinned.geometry.attributes.skinIndex, sw = skinned.geometry.attributes.skinWeight;
+      function dominant(vi) {
+        const idxs = [si.getX(vi), si.getY(vi), si.getZ(vi), si.getW(vi)];
+        const ws = [sw.getX(vi), sw.getY(vi), sw.getZ(vi), sw.getW(vi)];
+        let best = -1, bw = -1;
+        for (let k = 0; k < 4; k++) { if (ws[k] > bw) { bw = ws[k]; best = idxs[k]; } }
+        return best;
+      }
+      return { v0dom: dominant(0), v1dom: dominant(1), rootIdx, tipIdx };
+    })();`);
+    if (res.v0dom !== res.rootIdx) throw new Error('vertex beside Root should weight mostly to Root, dominant index=' + res.v0dom);
+    if (res.v1dom !== res.tipIdx) throw new Error("vertex beside Tip's tail should weight mostly to Tip, dominant index=" + res.v1dom);
+  });
+
+  await step("C2 deform: rotating a bound bone moves the skinned vertex's world position", async () => {
+    const dist = await page.evaluate(`(function(){
+      ${SKIN_FIXTURE}
+      const A = window.__A;
+      const f = skinFixture(A, [0.02,1.9,0], [0,0,0], null); // beside Tip's tail — should move a lot when Tip rotates
+      const skinned = A.bindMeshToRig(f.mesh, f.rig, {});
+      f.rig.root.updateMatrixWorld(true); skinned.updateMatrixWorld(true); skinned.skeleton.update();
+      const before = skinned.boneTransform(0, new THREE.Vector3());
+      f.b1.bone.quaternion.setFromAxisAngle(new THREE.Vector3(1,0,0), Math.PI/2);
+      f.rig.root.updateMatrixWorld(true); skinned.updateMatrixWorld(true); skinned.skeleton.update();
+      const after = skinned.boneTransform(0, new THREE.Vector3());
+      return before.distanceTo(after);
+    })();`);
+    if (!(dist > 0.1)) throw new Error('rotating the bound bone should move the skinned vertex significantly, moved ' + dist);
+  });
+
+  await step('C2 weight source: a vertex group named after a bone binds via groups; no match falls back to auto', async () => {
+    const res = await page.evaluate(`(function(){
+      ${SKIN_FIXTURE}
+      const A = window.__A;
+      const f = skinFixture(A, [0.02,0.5,0, 0.02,1.5,0], [0,1,0], [{ name: 'Root', w: { 0: 1, 1: 1 } }]);
+      const skinnedG = A.bindMeshToRig(f.mesh, f.rig, {});
+      const f2 = skinFixture(A, [0.02,0.5,0, 0.02,1.5,0], [0,1,0], null);
+      const skinnedA = A.bindMeshToRig(f2.mesh, f2.rig, {});
+      const sw = skinnedG.geometry.attributes.skinWeight;
+      let groupsSumOk = true;
+      for (let i = 0; i < sw.count; i++) if (Math.abs(sw.getX(i)+sw.getY(i)+sw.getZ(i)+sw.getW(i) - 1) > 1e-4) groupsSumOk = false;
+      return { srcG: skinnedG.userData.skinBind.source, srcA: skinnedA.userData.skinBind.source, groupsSumOk };
+    })();`);
+    if (res.srcG !== 'groups') throw new Error('mesh with a bone-matching vertex group should bind via groups, got ' + res.srcG);
+    if (res.srcA !== 'auto') throw new Error('mesh with no matching vertex group should fall back to auto, got ' + res.srcA);
+    if (!res.groupsSumOk) throw new Error('groups-path skinWeight should also normalize to sum 1 per vertex');
+  });
+
+  await step('C2 recompute: forceAuto overrides a matching vertex group even when one is present', async () => {
+    const res = await page.evaluate(`(function(){
+      ${SKIN_FIXTURE}
+      const A = window.__A;
+      const f = skinFixture(A, [0.02,0.5,0, 0.02,0.6,0], [0,1,0], [{ name: 'Root', w: { 0: 1, 1: 1 } }]);
+      const skinned1 = A.bindMeshToRig(f.mesh, f.rig, {});
+      const src1 = skinned1.userData.skinBind.source;
+      const skinned2 = A.bindMeshToRig(skinned1, f.rig, { forceAuto: true });
+      const src2 = skinned2.userData.skinBind.source;
+      return { src1, src2 };
+    })();`);
+    if (res.src1 !== 'groups') throw new Error('initial bind with a matching group should use groups, got ' + res.src1);
+    if (res.src2 !== 'auto') throw new Error('forceAuto rebind should use auto despite the matching group, got ' + res.src2);
+  });
+
+  await step('C2 unbind: restores a plain Mesh, drops skin attributes, clears SkinBinds', async () => {
+    const res = await page.evaluate(`(function(){
+      ${SKIN_FIXTURE}
+      const A = window.__A;
+      const f = skinFixture(A, [0,0.5,0, 0,0.6,0, 0,0.4,0], [0,1,2], null);
+      A.registerTarget('unbindFixture.part0', f.mesh);
+      const skinned = A.bindMeshToRig(f.mesh, f.rig, {});
+      const wasBoundInSkins = Object.keys(A.SkinBinds).indexOf('unbindFixture.part0') >= 0;
+      const plain = A.unbindMesh(skinned);
+      const stillBoundInSkins = Object.keys(A.SkinBinds).indexOf('unbindFixture.part0') >= 0;
+      return {
+        wasBoundInSkins,
+        isPlainMesh: plain.isMesh === true && plain.isSkinnedMesh !== true,
+        hasSkinAttrs: !!(plain.geometry.attributes.skinIndex || plain.geometry.attributes.skinWeight),
+        registryUpdated: A.Registry['unbindFixture.part0'] === plain,
+        stillBoundInSkins,
+      };
+    })();`);
+    if (!res.wasBoundInSkins) throw new Error('SkinBinds should have recorded the bind before unbind');
+    if (!res.isPlainMesh) throw new Error('unbind should produce a plain (non-skinned) Mesh');
+    if (res.hasSkinAttrs) throw new Error('unbound geometry should not still carry skinIndex/skinWeight attributes');
+    if (!res.registryUpdated) throw new Error('Registry should point at the restored plain mesh');
+    if (res.stillBoundInSkins) throw new Error('SkinBinds entry should be cleared on unbind');
+  });
+
+  await step('C2 UI: Pose tab Skinning section binds/unbinds the active model via buttons', async () => {
+    const res = await page.evaluate(() => {
+      const A = window.__A;
+      A.setView('pose');
+      if (!A.Rigs[A.Arm.rigId]) A.ensureRig();
+      const rig = A.Rigs[A.Arm.rigId];
+      if (!rig.bones.length) A.addBone(rig, 'Root', new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 1, 0), null);
+      A.renderPanel();
+      const q = t => Array.from(document.querySelectorAll('#panelBody button')).find(b => b.textContent.trim() === t);
+      const bindBtn = q('Bind to Armature');
+      if (!bindBtn) return { err: 'no Bind to Armature button in the Skinning section' };
+      bindBtn.click();
+      A.renderPanel();
+      const grp = A.activeModelGroup();
+      const boundNow = grp.children.some(c => c.isSkinnedMesh);
+      const unbindBtn = q('Unbind');
+      if (!unbindBtn) return { err: 'no Unbind button after binding' };
+      unbindBtn.click();
+      A.renderPanel();
+      const boundAfterUnbind = grp.children.some(c => c.isSkinnedMesh);
+      return { boundNow, boundAfterUnbind };
+    });
+    if (res.err) throw new Error(res.err);
+    if (!res.boundNow) throw new Error('clicking Bind to Armature should produce at least one SkinnedMesh part on the active model');
+    if (res.boundAfterUnbind) throw new Error('clicking Unbind should remove all SkinnedMesh parts from the active model');
+  });
+
+  await step('C2 persistence: bind survives the anim autosave v5 round-trip (reload reconstructs the SkinnedMesh)', async () => {
+    const pre = await page.evaluate(() => {
+      const A = window.__A;
+      if (!A.state.usingDemo || !A.Registry['demo.torso']) return { skip: true };
+      const rig = A.newRig('PersistRig');
+      A.addBone(rig, 'Spine', new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 1.7, 0), null);
+      const mesh = A.Registry['demo.torso'];
+      const skinned = A.bindMeshToRig(mesh, rig, {});
+      A.doAnimAutosave();
+      return { skip: false, rigId: rig.id, source: skinned.userData.skinBind.source };
+    });
+    if (pre.skip) { console.log('  (skipped — no demo.torso fixture available)'); return; }
+    await page.reload({ waitUntil: 'load' });
+    await page.waitForFunction(() => window.__A && document.getElementById('boot').style.display === 'none', null, { timeout: 30000 });
+    const post = await page.evaluate(() => {
+      const A = window.__A;
+      const m = A.Registry['demo.torso'];
+      return {
+        isSkinned: !!m && m.isSkinnedMesh === true,
+        rigId: m && m.userData.skinBind && m.userData.skinBind.rigId,
+        source: m && m.userData.skinBind && m.userData.skinBind.source,
+      };
+    });
+    if (!post.isSkinned) throw new Error('demo.torso should be a SkinnedMesh again after reload, got ' + JSON.stringify(post));
+    if (post.rigId !== pre.rigId) throw new Error('rebound rig id mismatch: expected ' + pre.rigId + ' got ' + post.rigId);
+    if (post.source !== pre.source) throw new Error('rebound weight source mismatch: expected ' + pre.source + ' got ' + post.source);
   });
 
   await browser.close();

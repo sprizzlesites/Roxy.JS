@@ -389,7 +389,12 @@ function partsToModel(md){
     mat.transparent=(mat.opacity<1)||(mat.transmission>0);
     if(pp.map){var im=new Image();im.onload=function(){var tx=new THREE.Texture(im);tx.encoding=THREE.sRGBEncoding;tx.needsUpdate=true;
       mat.map=tx;mat.color.setHex(0xffffff);mat.needsUpdate=true;invalidate();};im.src=pp.map;}
-    var mesh=new THREE.Mesh(g,mat);mesh.castShadow=true;mesh.receiveShadow=true;grp.add(mesh);});
+    var mesh=new THREE.Mesh(g,mat);mesh.castShadow=true;mesh.receiveShadow=true;
+    // Wave C2: carry the modeler's vertex groups through so bindMeshToRig can use them as
+    // explicit skin weights (see the Skinning section below) — {name,w:{vertIndex:weight}}[],
+    // sparse, indexed exactly like `pp.pos`/g.attributes.position (see index.html _exportVGroups).
+    mesh.userData.vgroups=pp.vgroups||null;
+    grp.add(mesh);});
   return grp;}
 
 function loadProjectData(data){
@@ -1201,6 +1206,248 @@ function rebuildRigFromSerialized(rd){
   syncSkeleton(rig);return rig;}
 
 /* ═══════════════════════════════════════════════════════
+   Wave C2 — SKINNING (mesh -> skeleton bind + automatic weights)
+
+   bindMeshToRig(mesh, rig, opts) turns a plain THREE.Mesh (one of a bridged
+   model's `grp.children`, or the demo figure's parts) into a THREE.SkinnedMesh
+   sharing `rig.skeleton` — Three.js r128's native SkinnedMesh/Skeleton runtime
+   does the actual per-frame deform for free once skinIndex/skinWeight
+   attributes + a correct bind pose are in place (GAP_ANALYSIS §2.7); this
+   section is entirely the authoring-time weight computation + bind wiring.
+
+   Weight source per mesh (a whole-part decision, not per-vertex): if
+   mesh.userData.vgroups (carried through from the modeler's project JSON by
+   partsToModel, or absent on the demo figure) has any group whose `name`
+   matches a bone name in the target rig, that mesh binds from EXPLICIT
+   GROUPS (computeGroupWeightsForMesh) — vertices no group covers fall back
+   to the nearest-bone automatic weight individually, so a mesh with partial
+   coverage never collapses to the origin (skinWeight summing to 0). A mesh
+   with no matching group at all binds fully from AUTOMATIC WEIGHTS
+   (computeAutoWeightsForMesh) — inverse-distance-to-nearest-bone-SEGMENT,
+   clearly NOT Blender's heat-diffusion solve (see GAP_ANALYSIS §2.7
+   "Automatic weights" row): for each vertex, take the AUTO_WEIGHT_K nearest
+   bone segments (head->tail, closest-point-on-segment distance) and weight
+   them by 1/distance^AUTO_WEIGHT_P, normalized to sum to 1. Cheap, O(verts *
+   bones), no linear solve — the documented, intentional approximation.
+
+   Bind pose: bindMeshToRig resets the rig's bone quaternions to identity
+   (rest) before computing anything and before calling `skinned.bind(skeleton)`
+   — SkinnedMesh.bind() with no explicit bindMatrix calls
+   `skeleton.calculateInverses()` itself, capturing THAT rest pose as the
+   permanent boneInverses, exactly the "posed to rest, then
+   calculateInverses()" sequence the wave brief calls for — then restores the
+   pose the rig was actually in, so binding never disturbs whatever the user
+   was posing. be.head/be.tail (the rest-pose joint positions the Armature
+   system already keeps in armature-local == world space, see the Armature
+   section header) are what the automatic-weights distance calculation reads,
+   so it works identically before/after the temporary rest-pose reset.
+
+   Deform integration: nothing else has to change. `loop()` already calls
+   applyAllConstraints() then renderer.render(poseScene,...) every frame;
+   THREE.WebGLRenderer calls `object.skeleton.update()` for every SkinnedMesh
+   it renders as part of that same render() call, which recomputes each
+   bone's skin offset matrix from its (possibly just-posed/IK'd/constrained)
+   current matrixWorld. A bound mesh moves the instant its rig is posed, FK,
+   IK, or constraint-driven, with zero extra plumbing.
+
+   Persistence (bumps ANIM_AUTOSAVE_KEY to v5, additive — see doAnimAutosave):
+   SkinBinds is a flat map partTargetId -> {rigId, forceAuto} recording INTENT
+   (which part is bound to which rig, and whether the user forced automatic
+   weights via "Recompute Auto Weights" even where matching groups exist) —
+   not the computed skinIndex/skinWeight arrays themselves. On restore,
+   applyPendingSkinBinds() re-runs bindMeshToRig for each recorded pair once
+   the bridged/demo model and the rigs are both back in the Registry, which
+   deterministically reproduces the same weights from the same mesh+rig
+   inputs. Chosen over persisting raw skin attribute arrays: much smaller
+   autosave payload, and "recompute" is exactly as correct here since neither
+   the vertex groups nor the bone rest positions change between saves for a
+   model that round-trips unchanged. Documented tradeoff: if the user reloads
+   with a DIFFERENT model (re-imported/re-bridged with different geometry) the
+   stored partTargetId simply won't resolve in the fresh Registry and the
+   stale bind record is silently skipped — same "best effort, ids assumed
+   stable" contract the rest of this file's Registry already relies on.
+   ═══════════════════════════════════════════════════════ */
+var AUTO_WEIGHT_K=4,AUTO_WEIGHT_P=3; // K nearest bones; inverse-distance power (~2-4 per GAP_ANALYSIS)
+var SkinBinds={}; // partTargetId -> {rigId, forceAuto} — see persistence note above
+function recordSkinBind(targetId,rigId,forceAuto){SkinBinds[targetId]={rigId:rigId,forceAuto:!!forceAuto};}
+function clearSkinBind(targetId){delete SkinBinds[targetId];}
+function serializeSkinBinds(){return Object.keys(SkinBinds).map(function(tid){var r=SkinBinds[tid];
+  return {targetId:tid,rigId:r.rigId,forceAuto:r.forceAuto};});}
+var pendingSkinBinds=null; // set by tryRestoreAnimAutosave (v5 `skins` field), consumed once by applyPendingSkinBinds()
+function applyPendingSkinBinds(){
+  if(!pendingSkinBinds||!pendingSkinBinds.length)return;
+  var list=pendingSkinBinds;pendingSkinBinds=null;
+  list.forEach(function(rec){
+    var mesh=Registry[rec.targetId],rig=Rigs[rec.rigId];
+    if(mesh&&rig&&!mesh.isSkinnedMesh)bindMeshToRig(mesh,rig,{forceAuto:rec.forceAuto,silent:true});});}
+
+function closestPointOnSegment(p,a,b){
+  var ab=b.clone().sub(a),len2=ab.lengthSq();
+  var t=len2>1e-12?clamp(p.clone().sub(a).dot(ab)/len2,0,1):0;
+  return a.clone().addScaledVector(ab,t);}
+function distPointToSegment(p,a,b){return p.distanceTo(closestPointOnSegment(p,a,b));}
+
+// Rest-pose bone segment endpoints in world space (be.head/be.tail are armature-local, which
+// the Armature section documents as effectively world space — still run through rig.root's
+// matrixWorld for correctness on the off chance the rig root itself carries a transform).
+function boneRestWorldSegment(rig,be){
+  var m=rig.root.matrixWorld;
+  return {head:be.head.clone().applyMatrix4(m),tail:be.tail.clone().applyMatrix4(m)};}
+
+function topKWeights(cands,K){ // cands: [{i,d}], smallest distance first after sort — inverse-distance-power, normalized
+  cands.sort(function(a,b){return a.d-b.d;});
+  var top=cands.slice(0,Math.min(K,cands.length));
+  var w=top.map(function(t){return 1/Math.pow(Math.max(t.d,1e-4),AUTO_WEIGHT_P);});
+  var sum=w.reduce(function(a,x){return a+x;},0)||1;
+  return top.map(function(t,idx){return {i:t.i,w:w[idx]/sum};});}
+
+function packInfluences(n,assignFn){ // assignFn(vi) -> [{i,w}] (already top-K, normalized or empty)
+  var skinIndex=new Float32Array(n*4),skinWeight=new Float32Array(n*4);
+  for(var vi=0;vi<n;vi++){
+    var infl=assignFn(vi);
+    for(var k=0;k<4;k++){
+      if(k<infl.length){skinIndex[vi*4+k]=infl[k].i;skinWeight[vi*4+k]=infl[k].w;}
+      else{skinIndex[vi*4+k]=0;skinWeight[vi*4+k]=0;}}}
+  return {skinIndex:skinIndex,skinWeight:skinWeight};}
+
+// Automatic weights (GAP_ANALYSIS §2.7 "Automatic weights" — explicitly an approximation, NOT
+// heat diffusion): every vertex gets the AUTO_WEIGHT_K nearest bone SEGMENTS (closest-point
+// distance, not just distance-to-head), weighted 1/distance^AUTO_WEIGHT_P and normalized.
+function computeAutoWeightsForMesh(mesh,rig,boneOrder){
+  var segs=boneOrder.map(function(be){return boneRestWorldSegment(rig,be);});
+  mesh.updateMatrixWorld(true);
+  var pos=mesh.geometry.attributes.position,n=pos.count,v=new THREE.Vector3();
+  return packInfluences(n,function(vi){
+    v.fromBufferAttribute(pos,vi).applyMatrix4(mesh.matrixWorld);
+    var cands=segs.map(function(s,i){return {i:i,d:distPointToSegment(v,s.head,s.tail)};});
+    return topKWeights(cands,AUTO_WEIGHT_K);});}
+
+// Explicit vertex-group weights: `matching` is the subset of mesh.userData.vgroups whose name
+// equals a bone's name in `boneOrder`. Per vertex, gather every matching group's weight at that
+// vertex index (index space matches g.attributes.position 1:1 — see index.html's _exportVGroups
+// header comment for the export-order contract), take the top 4 by weight, normalize. A vertex
+// with NO group weight at all (sum 0) falls back to that single vertex's nearest-bone automatic
+// weight so partial group coverage never leaves a vertex fully unweighted (would degenerate to
+// the origin under skinning, since skinWeight summing to 0 transforms by nothing).
+function computeGroupWeightsForMesh(mesh,rig,boneOrder,matching){
+  var boneIndexByName={};boneOrder.forEach(function(be,i){boneIndexByName[be.name]=i;});
+  var pos=mesh.geometry.attributes.position,n=pos.count;
+  var fallbackVerts=[];
+  var out=packInfluences(n,function(vi){
+    var cands=[];
+    matching.forEach(function(g){var w=g.w[vi];if(w!==undefined&&w>0)cands.push({i:boneIndexByName[g.name],d:1/Math.max(w,1e-6)});});
+    // reuse topKWeights' inverse-distance machinery: treat 1/weight as a pseudo-distance so
+    // higher explicit weights win exactly the same top-K + normalize path automatic weights use
+    if(!cands.length){fallbackVerts.push(vi);return [];}
+    var top=cands.sort(function(a,b){return a.d-b.d;}).slice(0,4);
+    var w=top.map(function(t){return 1/t.d;}); // back to the original weight
+    var sum=w.reduce(function(a,x){return a+x;},0)||1;
+    return top.map(function(t,idx){return {i:t.i,w:w[idx]/sum};});});
+  if(fallbackVerts.length){
+    var segs=boneOrder.map(function(be){return boneRestWorldSegment(rig,be);});
+    mesh.updateMatrixWorld(true);
+    var v=new THREE.Vector3();
+    fallbackVerts.forEach(function(vi){
+      v.fromBufferAttribute(pos,vi).applyMatrix4(mesh.matrixWorld);
+      var cands=segs.map(function(s,i){return {i:i,d:distPointToSegment(v,s.head,s.tail)};});
+      var infl=topKWeights(cands,AUTO_WEIGHT_K);
+      for(var k=0;k<4;k++){
+        if(k<infl.length){out.skinIndex[vi*4+k]=infl[k].i;out.skinWeight[vi*4+k]=infl[k].w;}
+        else{out.skinIndex[vi*4+k]=0;out.skinWeight[vi*4+k]=0;}}});}
+  out.fallbackCount=fallbackVerts.length;
+  return out;}
+
+// Bind (or re-bind, e.g. "Recompute Auto Weights") one mesh to one rig. `opts.forceAuto` skips
+// the vertex-group path even when matching groups exist. `opts.silent` suppresses the toast
+// (used by applyPendingSkinBinds so a normal reload doesn't spam toasts per part).
+function bindMeshToRig(mesh,rig,opts){
+  opts=opts||{};
+  if(!mesh||!rig||!rig.bones.length){toast('Rig has no bones yet');return null;}
+  var geo=mesh.geometry;
+  // Skeleton bone order is authoritative for skinIndex values (they index skeleton.bones /
+  // skeleton.boneInverses directly) — map each skeleton bone back to its `be` record rather
+  // than trusting rig.bones' own array order, which can drift after Set Parent.
+  var boneOrder=rig.skeleton.bones.map(function(boneObj){
+    for(var i=0;i<rig.bones.length;i++)if(rig.bones[i].bone===boneObj)return rig.bones[i];
+    return null;});
+  if(boneOrder.some(function(x){return !x;})){toast('Rig/skeleton out of sync — reselect the rig');return null;}
+
+  var vgroups=mesh.userData.vgroups;
+  var matching=(!opts.forceAuto&&vgroups)?vgroups.filter(function(g){
+    return boneOrder.some(function(be){return be.name===g.name;});}):[];
+
+  // Bind pose: rest the rig, compute weights + bind (which captures THIS rest pose via
+  // skeleton.calculateInverses()), then restore whatever pose the user was actually in.
+  var savedQuats=rig.bones.map(function(be){return be.bone.quaternion.clone();});
+  rig.bones.forEach(function(be){be.bone.quaternion.identity();});
+  rig.root.updateMatrixWorld(true);
+
+  var source,res;
+  if(matching.length){source='groups';res=computeGroupWeightsForMesh(mesh,rig,boneOrder,matching);}
+  else{source='auto';res=computeAutoWeightsForMesh(mesh,rig,boneOrder);}
+
+  geo.setAttribute('skinIndex',new THREE.Uint16BufferAttribute(res.skinIndex,4));
+  geo.setAttribute('skinWeight',new THREE.Float32BufferAttribute(res.skinWeight,4));
+
+  var skinned=mesh.isSkinnedMesh?mesh:new THREE.SkinnedMesh(geo,mesh.material);
+  if(!mesh.isSkinnedMesh){
+    skinned.name=mesh.name;skinned.castShadow=mesh.castShadow;skinned.receiveShadow=mesh.receiveShadow;
+    skinned.userData=mesh.userData;
+    skinned.position.copy(mesh.position);skinned.quaternion.copy(mesh.quaternion);skinned.scale.copy(mesh.scale);
+    var parent=mesh.parent;parent.add(skinned);parent.remove(mesh);}
+  skinned.bind(rig.skeleton); // no explicit bindMatrix -> calculateInverses() runs now, against the rest pose above
+  skinned.normalizeSkinWeights();
+
+  rig.bones.forEach(function(be,i){be.bone.quaternion.copy(savedQuats[i]);});
+  rig.root.updateMatrixWorld(true);
+
+  skinned.userData.skinBind={rigId:rig.id,source:source};
+  var tid=skinned.userData.targetId;
+  if(tid){registerTarget(tid,skinned);recordSkinBind(tid,rig.id,!!opts.forceAuto);}
+  if(!opts.silent)toast(source==='auto'?'Bound '+skinned.name+' — automatic weights (no matching vertex groups)':'Bound '+skinned.name+' — vertex groups');
+  scheduleAnimAutosave();invalidate();
+  return skinned;}
+
+function unbindMesh(mesh){
+  if(!mesh||!mesh.isSkinnedMesh)return null;
+  var geo=mesh.geometry;
+  geo.deleteAttribute('skinIndex');geo.deleteAttribute('skinWeight');
+  var plain=new THREE.Mesh(geo,mesh.material);
+  plain.name=mesh.name;plain.castShadow=mesh.castShadow;plain.receiveShadow=mesh.receiveShadow;
+  plain.userData=mesh.userData;
+  plain.position.copy(mesh.position);plain.quaternion.copy(mesh.quaternion);plain.scale.copy(mesh.scale);
+  delete plain.userData.skinBind;
+  var parent=mesh.parent;parent.add(plain);parent.remove(mesh);
+  var tid=plain.userData.targetId;
+  if(tid){registerTarget(tid,plain);clearSkinBind(tid);}
+  scheduleAnimAutosave();invalidate();
+  return plain;}
+
+// Whole-model convenience wrappers (the Skinning UI operates on the active model's parts as a
+// unit, Blender-"select mesh(es)+armature, bind"-style, rather than one part at a time).
+function activeModelGroup(){
+  if(!state.models||!state.models.length)return null;
+  var found=state.models.filter(function(g){return g.userData&&g.userData.targetId===state.activeId;})[0];
+  return found||state.models[0];}
+function bindModelToRig(grp,rig){
+  if(!grp||!rig||!rig.bones.length){toast('Rig has no bones yet');return;}
+  var parts=grp.children.slice(),usedAuto=false,n=0;
+  parts.forEach(function(mesh){if(!mesh.isMesh&&!mesh.isSkinnedMesh)return;
+    var sk=bindMeshToRig(mesh,rig,{silent:true});if(sk){n++;if(sk.userData.skinBind.source==='auto')usedAuto=true;}});
+  if(!n){toast('Nothing to bind');return;}
+  toast(usedAuto?'Bound '+n+' part(s) to '+rig.name+' — some used automatic weights (no matching vertex groups)':'Bound '+n+' part(s) to '+rig.name);}
+function unbindModel(grp){
+  if(!grp)return;var n=0;
+  grp.children.slice().forEach(function(mesh){if(mesh.isSkinnedMesh){unbindMesh(mesh);n++;}});
+  toast(n?'Unbound '+n+' part(s)':'Nothing was bound');}
+function recomputeAutoWeightsForModel(grp){
+  if(!grp)return;var n=0;
+  grp.children.slice().forEach(function(mesh){
+    if(!mesh.isSkinnedMesh)return;var rig=Rigs[mesh.userData.skinBind&&mesh.userData.skinBind.rigId];if(!rig)return;
+    bindMeshToRig(mesh,rig,{forceAuto:true,silent:true});n++;});
+  toast(n?'Recomputed automatic weights for '+n+' part(s)':'Nothing bound to recompute');}
+
+/* ═══════════════════════════════════════════════════════
    ANIMATION CORE (Wave D1 seed) — the load-bearing data model
    every later wave (dope sheet, graph editor, camera/path anim,
    action clips, onion skin, video/code export) builds on.
@@ -1293,8 +1540,12 @@ function scheduleAnimAutosave(){clearTimeout(animAutosaveTimer);animAutosaveTime
 // constraints are intentionally NOT part of this payload — see the C4 section header above.
 // Wave D3 adds `loop` (transport loop toggle) additively — still v4: older payloads simply
 // lack the field and restore to the default (true), older code ignores it.
+// v5 (Wave C2): adds `skins` (SkinBinds — which part is bound to which rig, groups-vs-forced-
+// auto — see the Skinning section header above for why intent, not raw skin arrays, is what's
+// persisted). v2/v3/v4 saves load unchanged (missing field -> pendingSkinBinds stays null, no
+// binds reconstructed, exactly like a save from before skinning existed).
 function doAnimAutosave(){try{localStorage.setItem(ANIM_AUTOSAVE_KEY,JSON.stringify(
-  {v:4,fps:Anim.fps,start:Anim.start,end:Anim.end,loop:Anim.loop,tracks:Anim.tracks,rigs:serializeRigs()}));}catch(e){}}
+  {v:5,fps:Anim.fps,start:Anim.start,end:Anim.end,loop:Anim.loop,tracks:Anim.tracks,rigs:serializeRigs(),skins:serializeSkinBinds()}));}catch(e){}}
 function tryRestoreAnimAutosave(){
   var raw;try{raw=localStorage.getItem(ANIM_AUTOSAVE_KEY);}catch(e){return false;}
   if(!raw)return false;
@@ -1303,6 +1554,7 @@ function tryRestoreAnimAutosave(){
   Anim.fps=data.fps||24;Anim.start=data.start||0;Anim.end=data.end!=null?data.end:96;
   Anim.loop=data.loop!==false;Anim.tracks=data.tracks||[];
   var maxId=0;Anim.tracks.forEach(function(tr){var n=+(''+tr.id).replace(/\D/g,'');if(n>maxId)maxId=n;});trackIdc=maxId+1;
+  pendingSkinBinds=(data.skins&&data.skins.length)?data.skins:null; // v5+; consumed by applyPendingSkinBinds() once the model is loaded
   if(data.rigs&&data.rigs.length){data.rigs.forEach(rebuildRigFromSerialized);
     var rigIds=Object.keys(Rigs);if(rigIds.length&&!Arm.rigId)Arm.rigId=rigIds[0];} // v1 saves simply have no rigs to restore
   return true;}
@@ -1725,9 +1977,53 @@ function targetSelect(onchange){
   if(state.selTarget)sel.value=state.selTarget;
   return sel;}
 
+// Wave C2: Skinning UI — bind/unbind the active model's parts to a rig, recompute automatic
+// weights, and a per-part bind-status readout (bound? which rig? weight source). Lives inside
+// the Pose tab (mobile-first: one less tab to navigate to reach it while posing/checking deform).
+function panelSkinning(b,rigArg){
+  b.appendChild(el('div',{class:'section-title',text:'Skinning'}));
+  var rigIds=Object.keys(Rigs);
+  if(!rigIds.length){b.appendChild(el('p',{class:'small muted',text:'Create an armature above, then bind the model to it here.'}));return;}
+  var grp=activeModelGroup();
+  if(!grp){b.appendChild(el('p',{class:'small muted',text:'No model loaded to bind.'}));return;}
+
+  if(!Arm.skinRigSel||rigIds.indexOf(Arm.skinRigSel)<0)Arm.skinRigSel=(rigArg?rigArg.id:null)||rigIds[0];
+  var rigSel=el('select',{onchange:function(e){Arm.skinRigSel=e.target.value;}});
+  rigIds.forEach(function(rid){rigSel.appendChild(el('option',{value:rid,text:Rigs[rid].name+' ('+rid+')'}));});
+  rigSel.value=Arm.skinRigSel;
+  b.appendChild(el('label',{class:'fld',text:'Rig to bind'+(rigIds.length>1?' (multiple armatures)':'')}));
+  b.appendChild(rigSel);
+
+  var parts=grp.children.filter(function(c){return c.isMesh||c.isSkinnedMesh;});
+  var boundCount=parts.filter(function(p){return p.isSkinnedMesh;}).length;
+  var row=el('div',{class:'grid2',style:'margin-top:6px'});
+  row.appendChild(el('button',{class:'pri',text:'Bind to Armature',onclick:function(){
+    var rig=Rigs[rigSel.value];if(!rig){toast('Pick a rig');return;}
+    bindModelToRig(grp,rig);renderPanel();invalidate();}}));
+  var unbindBtn=el('button',{text:'Unbind',onclick:function(){unbindModel(grp);renderPanel();invalidate();}});
+  if(!boundCount)unbindBtn.disabled=true;
+  row.appendChild(unbindBtn);
+  b.appendChild(row);
+  var recomputeBtn=el('button',{style:'width:100%;margin-top:6px',text:'Recompute Auto Weights',
+    title:'Force nearest-bone automatic weights on every bound part, ignoring any matching vertex groups',
+    onclick:function(){recomputeAutoWeightsForModel(grp);renderPanel();invalidate();}});
+  if(!boundCount)recomputeBtn.disabled=true;
+  b.appendChild(recomputeBtn);
+
+  b.appendChild(el('div',{class:'section-title',text:'Bind Status'}));
+  if(!parts.length)b.appendChild(el('p',{class:'small muted',text:'No mesh parts on this model.'}));
+  parts.forEach(function(p){
+    var label=p.name||p.userData.targetId||'part';
+    var status;
+    if(p.isSkinnedMesh&&p.userData.skinBind){
+      var sb=p.userData.skinBind,rn=Rigs[sb.rigId]?Rigs[sb.rigId].name:sb.rigId;
+      status='Bound to '+rn+' — '+(sb.source==='groups'?'vertex groups':'automatic weights');
+    }else status='Not bound';
+    b.appendChild(el('div',{class:'card small',style:'margin-bottom:4px'},[label+': '+status]));});}
+
 function panelPose(b){
   b.appendChild(el('h2',{text:'Pose'}));
-  b.appendChild(el('p',{class:'sub',text:'Build an armature in Edit Bones, then switch to Pose to rotate bones (FK drag, exact degrees, or IK targets). Add Copy Location/Rotation, Track-To and Limit Rotation constraints from the Constraints section below. Skin binding (C2) lands in a later wave.'}));
+  b.appendChild(el('p',{class:'sub',text:'Build an armature in Edit Bones, then switch to Pose to rotate bones (FK drag, exact degrees, or IK targets). Bind the model to a rig in Skinning below so posing deforms the mesh. Add Copy Location/Rotation, Track-To and Limit Rotation constraints from the Constraints section.'}));
   if(state.usingDemo)b.appendChild(el('div',{class:'card small',style:'margin-bottom:10px'},
     ['No modeling-suite autosave was found, so a demo figure is loaded. Build/save a project in the Modeler, or Import a project.json above, then reload this page.']));
 
@@ -1751,6 +2047,8 @@ function panelPose(b){
         text:be.name+(pName?'  ·  child of '+pName:''),
         onclick:function(){selectBone(rig,be.id);renderPanel();}}));});
   }
+
+  panelSkinning(b,rig);
 
   b.appendChild(el('div',{class:'section-title',text:'Target (any registered object)'}));
   b.appendChild(targetSelect(function(){renderPanel();}));
@@ -2070,6 +2368,7 @@ tryRestoreAnimAutosave();
 var bridged=bridgeLoadModelProject();
 state.usingDemo=!bridged;
 if(!bridged){buildDemoFigure();$('#emptyBanner').classList.add('show');}
+applyPendingSkinBinds(); // Wave C2: rigs + model are both in the Registry now — reconstruct any saved binds
 if(!state.selTarget){var ks=Object.keys(Registry);if(ks.length)state.selTarget=ks[0];}
 clampTime();
 Anim.sample(Anim.time);
