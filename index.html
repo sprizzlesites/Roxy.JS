@@ -3271,6 +3271,156 @@ function cycleActiveGroup(){
   if(!EM.groups.length){EM.addGroup();return;}
   EM.activeGroup=(EM.activeGroup+1)%EM.groups.length;EM._refresh();renderEditHud();renderPanel();}
 function activeGroupLabel(){var g=EM.groups[EM.activeGroup];return g?('Grp: '+g.name):'Grp: + New';}
+
+/* ================================================================================
+   Wave G0 — shared node-graph editor framework (data model + eval core)
+   ================================================================================
+   REGISTRY CONTRACT — every later node wave (G1 shader, G3a/b/c geometry, G4
+   compositor) MUST author its registry object in exactly this shape. The editor
+   widget (below, canvas/touch layer) and NodeGraph (this section, pure data/eval
+   layer) never special-case a system — they only read this shape.
+
+     REGISTRY = {
+       <typeName>: {
+         title: 'Human label shown on the card + inspector',
+         color: '#hex',                     // optional title-bar accent; falls back to a neutral grey
+         inputs:  [ {name, kind, default, label?}, ... ],   // input sockets, left edge, top→bottom
+         outputs: [ {name, kind, label?}, ... ],             // output sockets, right edge, top→bottom
+         params:  [ {name, type:'float'|'enum'|'color', default, min?, max?, options?}, ... ],
+         eval: function(inputs, params){ return { <outputName>: value, ... }; }
+       }, ...
+     }
+
+   - `kind` is an opaque string the widget/graph layer NEVER interprets beyond
+     equality (inputKind===outputKind ⇒ connectable). Each system invents its own
+     kind vocabulary ('float','color','vec','geometry','shader', …) — that is the
+     entire mechanism that keeps this widget system-agnostic.
+   - `inputs[i].default` is the value substituted when that input has no incoming
+     link — sockets, not just params, carry defaults (per GAP_ANALYSIS §6.1).
+   - `eval(inputs, params)` receives fully-resolved plain values: `inputs` is keyed
+     by input name with every entry already resolved (upstream node's matching
+     output value, or the socket default if unconnected); `params` is keyed by
+     param name with `node.params[name]` overriding `param.default` when present.
+     It MUST return a plain object keyed by output name and MUST NOT mutate
+     `inputs`/`params` — evalGraph memoizes per node per pass and re-evaluating
+     must be side-effect-free.
+
+   GRAPH MODEL — Graph = {nodes:[{id,type,params:{},x,y}], links:[{from:[nodeId,
+   socketName], to:[nodeId,socketName]}]}. `from` always names an OUTPUT socket,
+   `to` always names an INPUT socket (data flows from→to). An input socket holds
+   at most one incoming link — connecting a second link to the same input replaces
+   the first, matching every visual node editor's behavior. `node.params` is
+   sparse: only overrides are stored, everything else falls back to the
+   registry's `param.default`.
+   ================================================================================ */
+var NodeGraph={
+  make:function(){return {nodes:[],links:[],_seq:0};},
+  findNode:function(graph,id){for(var i=0;i<graph.nodes.length;i++)if(graph.nodes[i].id===id)return graph.nodes[i];return null;},
+  addNode:function(graph,type,x,y,params){
+    graph._seq=(graph._seq||0)+1;
+    var node={id:'n'+graph._seq,type:type,params:params||{},x:x||0,y:y||0};
+    graph.nodes.push(node);return node;},
+  removeNode:function(graph,id){
+    graph.nodes=graph.nodes.filter(function(n){return n.id!==id;});
+    graph.links=graph.links.filter(function(l){return l.from[0]!==id&&l.to[0]!==id;});},
+  moveNode:function(graph,id,x,y){var n=this.findNode(graph,id);if(!n)return false;n.x=x;n.y=y;return true;},
+  socketDef:function(registry,type,socketName,dir){
+    var def=registry[type];if(!def)return null;
+    var list=dir==='in'?(def.inputs||[]):(def.outputs||[]);
+    for(var i=0;i<list.length;i++)if(list[i].name===socketName)return list[i];
+    return null;},
+  // Would adding an edge fromNodeId→toNodeId create a cycle? True iff toNodeId can
+  // already reach fromNodeId by following existing links forward (from→to).
+  wouldCycle:function(graph,fromNodeId,toNodeId){
+    if(fromNodeId===toNodeId)return true;
+    var seen={},stack=[toNodeId];
+    while(stack.length){
+      var cur=stack.pop();
+      if(cur===fromNodeId)return true;
+      if(seen[cur])continue;seen[cur]=true;
+      for(var i=0;i<graph.links.length;i++)if(graph.links[i].from[0]===cur)stack.push(graph.links[i].to[0]);}
+    return false;},
+  // fromRef=[nodeId,socketName] naming an OUTPUT, toRef=[nodeId,socketName] naming an INPUT.
+  canConnect:function(graph,registry,fromRef,toRef){
+    var fn=this.findNode(graph,fromRef[0]),tn=this.findNode(graph,toRef[0]);
+    if(!fn||!tn||fn.id===tn.id)return false;
+    var fout=this.socketDef(registry,fn.type,fromRef[1],'out'),tin=this.socketDef(registry,tn.type,toRef[1],'in');
+    if(!fout||!tin)return false;
+    if(fout.kind!==tin.kind)return false;               // kind-equality is the ONLY compatibility rule
+    if(this.wouldCycle(graph,fn.id,tn.id))return false;  // refuse at connection time
+    return true;},
+  connect:function(graph,registry,fromRef,toRef){
+    if(!this.canConnect(graph,registry,fromRef,toRef))return false;
+    graph.links=graph.links.filter(function(l){return !(l.to[0]===toRef[0]&&l.to[1]===toRef[1]);}); // one link per input
+    graph.links.push({from:[fromRef[0],fromRef[1]],to:[toRef[0],toRef[1]]});
+    return true;},
+  disconnect:function(graph,toRef){
+    var before=graph.links.length;
+    graph.links=graph.links.filter(function(l){return !(l.to[0]===toRef[0]&&l.to[1]===toRef[1]);});
+    return before-graph.links.length;},
+  // Pull-based DAG walk from nodeId (the caller's designated "output" for this pass —
+  // any node in the graph may be evaluated this way, not only nodes of a literal
+  // "Output" type). Memoized per node per call; defensively cycle-guarded via a
+  // `visiting` set so a cycle that slips into graph.links some other way (bulk
+  // load, direct mutation) throws instead of recursing forever — caught below and
+  // reported as `false` rather than propagating.
+  evalGraph:function(graph,registry,nodeId){
+    var memo={},visiting={},self=this;
+    function evalNode(id){
+      if(Object.prototype.hasOwnProperty.call(memo,id))return memo[id];
+      if(visiting[id])throw new Error('cycle detected at node '+id);
+      visiting[id]=true;
+      var node=self.findNode(graph,id);
+      if(!node)throw new Error('missing node '+id);
+      var def=registry[node.type];
+      if(!def)throw new Error('unknown node type '+node.type);
+      var inputs={};
+      (def.inputs||[]).forEach(function(inp){
+        var link=null;
+        for(var i=0;i<graph.links.length;i++){var l=graph.links[i];if(l.to[0]===id&&l.to[1]===inp.name){link=l;break;}}
+        if(link){
+          var upstream=evalNode(link.from[0]);
+          var v=upstream?upstream[link.from[1]]:undefined;
+          inputs[inp.name]=(v===undefined)?inp.default:v;
+        }else inputs[inp.name]=inp.default;});
+      var params={};
+      (def.params||[]).forEach(function(p){
+        var v=node.params?node.params[p.name]:undefined;
+        params[p.name]=(v===undefined)?p.default:v;});
+      var outputs=def.eval(inputs,params)||{};
+      delete visiting[id];
+      memo[id]=outputs;
+      return outputs;}
+    try{return evalNode(nodeId);}catch(e){return false;}}
+};
+
+// Minimal demo registry — the template G1 (shader)/G3a (geometry)/G4 (compositor)
+// authors replace with their real node sets. Proves every mechanic end to end:
+// param→output, multi-input math, float→color composition, and a sink node.
+var NODE_DEMO={
+  Value:{title:'Value',color:'#6cc6ff',
+    inputs:[],outputs:[{name:'out',kind:'float'}],
+    params:[{name:'value',type:'float',default:0,min:-1000,max:1000}],
+    eval:function(inputs,params){return {out:params.value};}},
+  Math:{title:'Math',color:'#9be0a3',
+    inputs:[{name:'a',kind:'float',default:0},{name:'b',kind:'float',default:0}],
+    outputs:[{name:'out',kind:'float'}],
+    params:[{name:'op',type:'enum',default:'add',options:['add','mul','sub']}],
+    eval:function(inputs,params){
+      var a=inputs.a,b=inputs.b,out;
+      if(params.op==='mul')out=a*b;else if(params.op==='sub')out=a-b;else out=a+b;
+      return {out:out};}},
+  Combine:{title:'Combine RGB',color:'#ff8fb1',
+    inputs:[{name:'r',kind:'float',default:0},{name:'g',kind:'float',default:0},{name:'b',kind:'float',default:0}],
+    outputs:[{name:'color',kind:'color'}],
+    params:[],
+    eval:function(inputs){return {color:{r:inputs.r,g:inputs.g,b:inputs.b}};}},
+  Output:{title:'Output',color:'#ffd76c',
+    inputs:[{name:'color',kind:'color',default:{r:0,g:0,b:0}}],
+    outputs:[{name:'result',kind:'color'}],
+    params:[],
+    eval:function(inputs){return {result:inputs.color};}}
+};
 function renderEditHud(){
   var hud=$('#editHud');if(!hud)return;
   hud.innerHTML='';

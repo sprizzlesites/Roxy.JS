@@ -9,7 +9,7 @@ const SP = __dirname;
 
 // Debug handles injected inside the app IIFE (test copy only — repo file untouched)
 const INJECT = `
-window.__R={setView:setView,EM:EM,editState:editState,Sculpt:Sculpt,WeightPaint:WeightPaint,Knife:Knife,getModel:getModel,state:state,paint:paint,paintInit:paintInit,applyPaintTex:applyPaintTex,ensureAtlasUVs:ensureAtlasUVs,do3dPaint:do3dPaint,exportOBJ:exportOBJ,parseOBJ:parseOBJ,History:History,addModel:addModel,buildDonut:buildDonut,doAutosave:doAutosave,clearAutosave:clearAutosave,AUTOSAVE_KEY:AUTOSAVE_KEY,active:active,addPrim:addPrim,renameModel:renameModel,duplicateModel:duplicateModel,deleteModel:deleteModel,renderAssets:renderAssets,filterAssetGrid:filterAssetGrid,setAssetQuery:function(q){assetSearchQuery=q;filterAssetGrid();},applyEditSnap:applyEditSnap,addPlacement:addPlacement,sceneScene:sceneScene,disposeModelResources:disposeModelResources,resetHintsSeen:function(){try{localStorage.removeItem('roxyHints');}catch(e){}},syncPaintHud:syncPaintHud,snapView:snapView,pickColorAt2D:pickColorAt2D,pickColorAt3D:pickColorAt3D,setPaintColor:setPaintColor,setActiveModel:setActiveModel,resizeActive:resizeActive,renderEditHud:renderEditHud,makeModel:makeModel,makeMaterial:makeMaterial,rebuildModel:rebuildModel,tex:tex,addLight:addLight,frameObject:frameObject,viewState:viewState,invalidate:invalidate,buildProjectData:buildProjectData,loadProject:loadProject,saveProject:saveProject};
+window.__R={setView:setView,EM:EM,editState:editState,Sculpt:Sculpt,WeightPaint:WeightPaint,Knife:Knife,getModel:getModel,state:state,paint:paint,paintInit:paintInit,applyPaintTex:applyPaintTex,ensureAtlasUVs:ensureAtlasUVs,do3dPaint:do3dPaint,exportOBJ:exportOBJ,parseOBJ:parseOBJ,History:History,addModel:addModel,buildDonut:buildDonut,doAutosave:doAutosave,clearAutosave:clearAutosave,AUTOSAVE_KEY:AUTOSAVE_KEY,active:active,addPrim:addPrim,renameModel:renameModel,duplicateModel:duplicateModel,deleteModel:deleteModel,renderAssets:renderAssets,filterAssetGrid:filterAssetGrid,setAssetQuery:function(q){assetSearchQuery=q;filterAssetGrid();},applyEditSnap:applyEditSnap,addPlacement:addPlacement,sceneScene:sceneScene,disposeModelResources:disposeModelResources,resetHintsSeen:function(){try{localStorage.removeItem('roxyHints');}catch(e){}},syncPaintHud:syncPaintHud,snapView:snapView,pickColorAt2D:pickColorAt2D,pickColorAt3D:pickColorAt3D,setPaintColor:setPaintColor,setActiveModel:setActiveModel,resizeActive:resizeActive,renderEditHud:renderEditHud,makeModel:makeModel,makeMaterial:makeMaterial,rebuildModel:rebuildModel,tex:tex,addLight:addLight,frameObject:frameObject,viewState:viewState,invalidate:invalidate,buildProjectData:buildProjectData,loadProject:loadProject,saveProject:saveProject,NodeGraph:NodeGraph,NODE_DEMO:NODE_DEMO,NodeUI:(typeof NodeUI!=='undefined'?NodeUI:null),makeNodeEditor:(typeof makeNodeEditor!=='undefined'?makeNodeEditor:null),toast:toast};
 window.__setDownload=function(fn){download=fn;};
 `;
 
@@ -1689,6 +1689,122 @@ const server = http.createServer((req, res) => {
     var r1 = EM._meshObj.geometry.attributes.color.getX(0);
     WP.exit();
     if (!(r1 > r0 + 1e-4)) throw new Error('vertex-0 red channel did not rise after weighting it: ' + r0 + ' -> ' + r1);
+  }));
+
+  // ---------------- Wave G0: shared node-graph editor framework ----------------
+  await step('NodeGraph: Value(2)+Value(3) -> Math(add) evalGraph returns 5', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_DEMO;
+    var g = NG.make();
+    var v1 = NG.addNode(g, 'Value', 0, 0, { value: 2 });
+    var v2 = NG.addNode(g, 'Value', 0, 100, { value: 3 });
+    var m = NG.addNode(g, 'Math', 200, 50, { op: 'add' });
+    if (!NG.connect(g, REG, [v1.id, 'out'], [m.id, 'a'])) throw new Error('connect v1->a failed');
+    if (!NG.connect(g, REG, [v2.id, 'out'], [m.id, 'b'])) throw new Error('connect v2->b failed');
+    var res = NG.evalGraph(g, REG, m.id);
+    if (!res || res.out !== 5) throw new Error('expected 5, got ' + JSON.stringify(res));
+  }));
+
+  await step('NodeGraph: Math(mul) evalGraph returns 6', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_DEMO;
+    var g = NG.make();
+    var v1 = NG.addNode(g, 'Value', 0, 0, { value: 2 });
+    var v2 = NG.addNode(g, 'Value', 0, 100, { value: 3 });
+    var m = NG.addNode(g, 'Math', 200, 50, { op: 'mul' });
+    NG.connect(g, REG, [v1.id, 'out'], [m.id, 'a']);
+    NG.connect(g, REG, [v2.id, 'out'], [m.id, 'b']);
+    var res = NG.evalGraph(g, REG, m.id);
+    if (!res || res.out !== 6) throw new Error('expected 6, got ' + JSON.stringify(res));
+  }));
+
+  await step('NodeGraph: full Value->Math->Combine->Output demo chain round-trips', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_DEMO;
+    var g = NG.make();
+    var v1 = NG.addNode(g, 'Value', 0, 0, { value: 4 });
+    var v2 = NG.addNode(g, 'Value', 0, 60, { value: 5 });
+    var m = NG.addNode(g, 'Math', 160, 30, { op: 'add' }); // 4+5=9
+    var c = NG.addNode(g, 'Combine', 320, 0);
+    var o = NG.addNode(g, 'Output', 480, 0);
+    NG.connect(g, REG, [v1.id, 'out'], [m.id, 'a']);
+    NG.connect(g, REG, [v2.id, 'out'], [m.id, 'b']);
+    NG.connect(g, REG, [m.id, 'out'], [c.id, 'r']); // r=9, g/b default 0
+    NG.connect(g, REG, [c.id, 'color'], [o.id, 'color']);
+    var res = NG.evalGraph(g, REG, o.id);
+    if (!res || !res.result || res.result.r !== 9 || res.result.g !== 0 || res.result.b !== 0)
+      throw new Error('output node did not resolve the chained color: ' + JSON.stringify(res));
+  }));
+
+  await step('NodeGraph: cycle connection is refused at connect-time (no link added)', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_DEMO;
+    var g = NG.make();
+    var a = NG.addNode(g, 'Math', 0, 0, { op: 'add' });
+    var b = NG.addNode(g, 'Math', 200, 0, { op: 'add' });
+    if (!NG.connect(g, REG, [a.id, 'out'], [b.id, 'a'])) throw new Error('setup connect a->b failed');
+    var cyclic = NG.connect(g, REG, [b.id, 'out'], [a.id, 'a']); // would close a->b->a
+    if (cyclic !== false) throw new Error('expected cyclic connect to return false');
+    if (g.links.length !== 1) throw new Error('rejected connect must not mutate links, got ' + g.links.length);
+  }));
+
+  await step('NodeGraph: evalGraph defensively refuses a cycle injected directly into links (no hang)', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_DEMO;
+    var g = NG.make();
+    var x = NG.addNode(g, 'Math', 0, 0, { op: 'add' });
+    var y = NG.addNode(g, 'Math', 200, 0, { op: 'add' });
+    g.links.push({ from: [x.id, 'out'], to: [y.id, 'a'] });
+    g.links.push({ from: [y.id, 'out'], to: [x.id, 'a'] }); // manually bypass connect()'s guard
+    var res = NG.evalGraph(g, REG, x.id);
+    if (res !== false) throw new Error('expected evalGraph to detect the cycle and return false, got ' + JSON.stringify(res));
+  }));
+
+  await step('NodeGraph: unconnected input falls back to the socket default', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_DEMO;
+    var g = NG.make();
+    var v = NG.addNode(g, 'Value', 0, 0, { value: 7 });
+    var m = NG.addNode(g, 'Math', 200, 0, { op: 'add' });
+    NG.connect(g, REG, [v.id, 'out'], [m.id, 'a']); // 'b' left unconnected -> default 0
+    var res = NG.evalGraph(g, REG, m.id);
+    if (!res || res.out !== 7) throw new Error('expected default-b add to yield 7, got ' + JSON.stringify(res));
+  }));
+
+  await step('NodeGraph: Combine builds a color from 3 floats', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_DEMO;
+    var g = NG.make();
+    var r = NG.addNode(g, 'Value', 0, 0, { value: .2 });
+    var gg = NG.addNode(g, 'Value', 0, 60, { value: .5 });
+    var bb = NG.addNode(g, 'Value', 0, 120, { value: .9 });
+    var c = NG.addNode(g, 'Combine', 200, 60);
+    NG.connect(g, REG, [r.id, 'out'], [c.id, 'r']);
+    NG.connect(g, REG, [gg.id, 'out'], [c.id, 'g']);
+    NG.connect(g, REG, [bb.id, 'out'], [c.id, 'b']);
+    var res = NG.evalGraph(g, REG, c.id);
+    var col = res && res.color;
+    if (!col || Math.abs(col.r - .2) > 1e-6 || Math.abs(col.g - .5) > 1e-6 || Math.abs(col.b - .9) > 1e-6)
+      throw new Error('Combine did not build the expected color: ' + JSON.stringify(col));
+  }));
+
+  await step('NodeGraph: connecting incompatible kinds (float -> color) is rejected', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_DEMO;
+    var g = NG.make();
+    var v = NG.addNode(g, 'Value', 0, 0, { value: 1 });
+    var o = NG.addNode(g, 'Output', 200, 0);
+    var ok = NG.connect(g, REG, [v.id, 'out'], [o.id, 'color']); // float out -> color in
+    if (ok !== false) throw new Error('expected float->color connect to be rejected');
+    if (g.links.length !== 0) throw new Error('rejected connect must not mutate links');
+  }));
+
+  await step('NodeGraph: addNode/removeNode/moveNode mutate the graph model (incl. cascading link removal)', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_DEMO;
+    var g = NG.make();
+    var v = NG.addNode(g, 'Value', 5, 5, { value: 1 });
+    var m = NG.addNode(g, 'Math', 100, 5, { op: 'add' });
+    if (g.nodes.length !== 2) throw new Error('addNode did not append to graph.nodes');
+    NG.connect(g, REG, [v.id, 'out'], [m.id, 'a']);
+    if (g.links.length !== 1) throw new Error('connect did not add a link');
+    if (!NG.moveNode(g, v.id, 50, 60)) throw new Error('moveNode returned false');
+    var vv = NG.findNode(g, v.id);
+    if (vv.x !== 50 || vv.y !== 60) throw new Error('moveNode did not update x/y: ' + vv.x + ',' + vv.y);
+    NG.removeNode(g, v.id);
+    if (g.nodes.length !== 1) throw new Error('removeNode did not remove the node');
+    if (g.links.length !== 0) throw new Error('removeNode must cascade-delete links touching the removed node');
   }));
 
   await page.evaluate(() => __R.setView('edit'));
