@@ -593,7 +593,10 @@ function applyMatPreset(mat,name){var p=MATPRESETS[name];if(!p)return;
 
 /* a model = THREE.Group with userData.parts=[{baseGeo,mesh,mat}], userData.mods=[], userData.extras=Group */
 function makeModel(name,parts){var g=new THREE.Group();g.name=name;var extras=new THREE.Group();extras.name='__extras';
-  g.userData={id:uid(),name:name,parts:[],mods:[],extras:extras};
+  // geoNodes (Wave G3a): null until the user builds a graph on this model (Nodes tab, Geometry
+  // mode) — {graph:NodeGraph, enabled:bool, part:index}. Old saves/models simply lack it, so
+  // rebuildModel's `ud.geoNodes&&...` check is always false for them (additive, non-breaking).
+  g.userData={id:uid(),name:name,parts:[],mods:[],extras:extras,geoNodes:null};
   parts.forEach(function(p){var mesh=new THREE.Mesh(p.geo.clone(),p.mat);mesh.castShadow=true;mesh.receiveShadow=true;mesh.userData.part=true;
     g.add(mesh);g.userData.parts.push({baseGeo:p.geo.clone(),mesh:mesh,mat:p.mat,_hasProperUVs:!!p._hasProperUVs,_baseIsAtlas:!!p._baseIsAtlas,_vgroups:p._vgroups||null});});
   g.add(extras);return g;}
@@ -601,6 +604,21 @@ function makeModel(name,parts){var g=new THREE.Group();g.name=name;var extras=ne
 function rebuildModel(model){var ud=model.userData;
   ud.parts.forEach(function(part,pi){var geo=part.baseGeo.clone();
     ud.mods.forEach(function(m){var def=MODDB[m.def];if(def&&def.kind==='deform'&&m.on){var r=def.apply(geo,m.val);if(r&&r.isBufferGeometry&&r!==geo){var prev=geo;geo=r;if(prev.dispose)prev.dispose();}}});
+    // Wave G3a: Geometry Nodes modifier slot — non-destructive like a MODDB kind:'deform'
+    // entry (re-evaluates on every rebuild, i.e. every graph/param edit), but its "algorithm"
+    // is a per-model node graph (ud.geoNodes.graph) rather than a shared MODDB function, so it
+    // can't live in MODDB itself (MODDB entries are stateless and shared across every model; a
+    // graph is per-model instance data — see buildProjectData/loadProject for how it persists).
+    // Runs after deform mods, before atlas/paint bookkeeping, and only touches the ONE part
+    // slot the graph targets (ud.geoNodes.part). A graph error (cycle, no Group Output yet)
+    // just leaves this part's geometry as whatever the deform-mod chain above produced.
+    if(ud.geoNodes&&ud.geoNodes.enabled&&pi===(ud.geoNodes.part||0)){
+      var outId=geoGraphOutputId(ud.geoNodes.graph);
+      if(outId){
+        try{
+          var gres=evalGeoGraph(ud.geoNodes.graph,NODE_GEO,outId,geoToVF(geo));
+          if(gres&&gres.geometry&&gres.geometry.V.length){var ng=vfToGeo(gres.geometry);var prevGeo=geo;geo=ng;if(prevGeo&&prevGeo!==part.baseGeo)prevGeo.dispose();}
+        }catch(e){/* leave geo unchanged on a graph evaluation error */}}}
     // When the atlas has been promoted into baseGeo (_baseIsAtlas), the deformed geometry
     // already carries the atlas UVs, so the paint state survives the rebuild untouched.
     geo.computeVertexNormals();var old=part.mesh.geometry,wasAtlas=part._atlasUVs;part.mesh.geometry=geo;part._atlasUVs=!!part._baseIsAtlas;if(old&&old!==part.baseGeo)old.dispose();
@@ -620,6 +638,32 @@ function applyModifiers(m){if(!m)return;
   m.userData.parts.forEach(function(p,i){p.baseGeo=newBase[i];});m.userData.mods=bakedMods.slice();rebuildModel(m);renderPanel();toast('Deform modifiers baked into mesh');
   History.push(function(){m.userData.parts.forEach(function(p,i){p.baseGeo=prevBase[i];});m.userData.mods=prevMods.slice();rebuildModel(m);renderPanel();},
                function(){m.userData.parts.forEach(function(p,i){p.baseGeo=newBase[i];});m.userData.mods=bakedMods.slice();rebuildModel(m);renderPanel();});}
+
+/* Wave G3a — ensureModelGeoGraph(m): lazily create the model's Geometry Nodes slot the
+   first time the Nodes tab (Geometry mode) touches it, so old models/saves stay untouched
+   until the user opts in. applyGeoNodesModifier(m): "Apply" — bakes the graph's evaluated
+   result into the target part's baseGeo (same bake-then-disable shape as applyModifiers()
+   above, just for one part instead of every deform mod on every part) and disables the
+   slot so rebuildModel stops re-evaluating a now-redundant graph; Undo restores both the
+   prior baseGeo and the prior enabled flag together. */
+function ensureModelGeoGraph(m){
+  if(!m)return null;
+  if(!m.userData.geoNodes)m.userData.geoNodes={graph:NodeGraph.make(),enabled:true,part:0};
+  return m.userData.geoNodes;}
+function applyGeoNodesModifier(model){
+  if(!model)return;var ud=model.userData;
+  if(!ud.geoNodes||!ud.geoNodes.enabled){toast('Enable the Geometry Nodes modifier first');return;}
+  var pi=ud.geoNodes.part||0,part=ud.parts[pi];if(!part)return;
+  var outId=geoGraphOutputId(ud.geoNodes.graph);
+  if(!outId){toast('Add a Group Output node first');return;}
+  var res=evalGeoGraph(ud.geoNodes.graph,NODE_GEO,outId,geoToVF(part.baseGeo));
+  if(!res||!res.geometry||!res.geometry.V.length){toast('Nothing wired into Group Output');return;}
+  var newGeo=vfToGeo(res.geometry);
+  var prevBase=part.baseGeo,prevEnabled=ud.geoNodes.enabled;
+  part.baseGeo=newGeo;ud.geoNodes.enabled=false;
+  rebuildModel(model);renderPanel();scheduleAutosave();toast('Geometry Nodes applied');
+  History.push(function(){part.baseGeo=prevBase;ud.geoNodes.enabled=prevEnabled;rebuildModel(model);renderPanel();},
+               function(){part.baseGeo=newGeo;ud.geoNodes.enabled=false;rebuildModel(model);renderPanel();});}
 
 function setActiveModel(id){state.activeId=id;var holder=viewerScene.userData.modelHolder;while(holder.children.length)holder.remove(holder.children[0]);
   var m=getModel(id);if(m){holder.add(m);frameObject(m,viewState.viewer);}invalidate();
@@ -1330,7 +1374,12 @@ function buildProjectData(skipMaps){return {v:2,scene:{env:sceneScene.userData.e
   parts:m.userData.parts.map(function(p){var g=p.baseGeo;return {pos:Array.from(g.attributes.position.array),uv:g.attributes.uv?Array.from(g.attributes.uv.array):null,index:g.index?Array.from(g.index.array):null,
     properUV:!!p._hasProperUVs,baseAtlas:!!p._baseIsAtlas,vgroups:p._vgroups||null,
     color:'#'+p.mat.color.getHexString(),rough:p.mat.roughness,metal:p.mat.metalness,map:skipMaps?null:texToDataURL(p.mat.map),
-    emissive:'#'+p.mat.emissive.getHexString(),emInt:p.mat.emissiveIntensity,opacity:p.mat.opacity,transmission:p.mat.transmission||0,clearcoat:p.mat.clearcoat||0};}),mods:m.userData.mods};})};}
+    emissive:'#'+p.mat.emissive.getHexString(),emInt:p.mat.emissiveIntensity,opacity:p.mat.opacity,transmission:p.mat.transmission||0,clearcoat:p.mat.clearcoat||0};}),mods:m.userData.mods,
+  // Wave G3a: geoNodes is additive — a Graph is already a plain {nodes,links,_seq}
+  // object (numbers/strings only, no THREE instances), so it round-trips through
+  // JSON.stringify/parse with zero extra encoding. Old saves simply lack this key,
+  // loadProject below leaves m.userData.geoNodes at makeModel's default (null).
+  geoNodes:m.userData.geoNodes?{graph:m.userData.geoNodes.graph,enabled:!!m.userData.geoNodes.enabled,part:m.userData.geoNodes.part||0}:null};})};}
 function saveProject(){var data=buildProjectData(false);
   download(new Blob([JSON.stringify(data)],{type:'application/json'}),'project.json');toast('Saved project.json');}
 
@@ -1366,7 +1415,9 @@ function loadProject(data){state.models.length=0;
   mat.transparent=(mat.opacity<1)||(mat.transmission>0);
   if(pp.map){var im=new Image();im.onload=function(){var tx=new THREE.Texture(im);tx.encoding=THREE.sRGBEncoding;tx.needsUpdate=true;mat.map=tx;mat.color.setHex(0xffffff);mat.needsUpdate=true;invalidate();};im.src=pp.map;}
   return {geo:g,mat:mat,_hasProperUVs:!!pp.properUV,_baseIsAtlas:!!pp.baseAtlas,_vgroups:pp.vgroups||null};});
-  var m=makeModel(md.name,parts);if(md.id)m.userData.id=md.id;m.userData.mods=md.mods||[];rebuildModel(m);addModel(m);});
+  var m=makeModel(md.name,parts);if(md.id)m.userData.id=md.id;m.userData.mods=md.mods||[];
+  if(md.geoNodes)m.userData.geoNodes={graph:md.geoNodes.graph||NodeGraph.make(),enabled:!!md.geoNodes.enabled,part:md.geoNodes.part||0};
+  rebuildModel(m);addModel(m);});
   var sc=data.scene||{};
   if(sc.env)applyEnv(sceneScene,sc.env);
   if(sc.bg)sceneScene.background=new THREE.Color(sc.bg);
@@ -4300,7 +4351,24 @@ function bindNodeEditorPointers(ed){
   cv.addEventListener('pointerup',endPtr);cv.addEventListener('pointercancel',endPtr);}
 
 var NodeUI=makeNodeEditor($('#nodesCanvas'));
-NodeUI.setGraph(NodeGraph.make(),NODE_SHADER);
+// Wave G3a: the Nodes tab now hosts EITHER registry on this ONE editor instance (a
+// registry/mode toggle, per GAP_ANALYSIS §6.3's integration note) — nodeUIMode picks
+// which. The G1 shader graph stays a single session-scoped working graph exactly like
+// before (shaderGraphState just names what used to be an anonymous NodeGraph.make()
+// inlined here); the geometry graph is per-MODEL persisted data (model.userData.
+// geoNodes.graph — see makeModel/buildProjectData/loadProject), so switching to
+// Geometry mode loads/creates THAT model's own graph instead.
+var shaderGraphState=NodeGraph.make();
+var nodeUIMode='shader';
+NodeUI.setGraph(shaderGraphState,NODE_SHADER);
+function switchNodeUIMode(mode){
+  nodeUIMode=mode;
+  if(mode==='geo'){
+    var m=getModel(state.activeId),gn=m?ensureModelGeoGraph(m):null;
+    NodeUI.setGraph(gn?gn.graph:NodeGraph.make(),NODE_GEO);
+  }else{
+    NodeUI.setGraph(shaderGraphState,NODE_SHADER);
+  }}
 
 /* Wave G1 integration: the Nodes tab bakes into the active model's active part.
    "Bake to material" finds the first PrincipledOutput node in the graph and
@@ -4336,16 +4404,57 @@ function renderNodeBakePanel(b,ed){
     else toast('Nothing wired into Material Output — connect a channel first');}}));
   b.appendChild(el('hr',{class:'sep'}));}
 
+/* Wave G3a integration: the Nodes tab (Geometry mode) hosts the ACTIVE model's own
+   geoNodes graph non-destructively — rebuildModel already re-evaluates it live on every
+   graph/param edit (same live-preview feel as a MODDB deform modifier's slider), so this
+   panel only needs an Enabled toggle, a target-part picker (multi-part models), and
+   Apply (bakes the current evaluation into that part's baseGeo — see
+   applyGeoNodesModifier above). */
+function renderGeoNodesPanel(b,ed){
+  var m=getModel(state.activeId);
+  b.appendChild(el('div',{class:'section-title',text:'Geometry Nodes target'}));
+  if(!m||!m.userData.parts.length){
+    b.appendChild(el('p',{class:'small muted',text:'No models yet — build one first (Build tab), then come back here.'}));
+    b.appendChild(el('hr',{class:'sep'}));
+    return;}
+  var gn=ensureModelGeoGraph(m);
+  b.appendChild(el('p',{class:'small muted',text:'Model: '+m.userData.name}));
+  if(m.userData.parts.length>1){
+    var pSel=el('select',{onchange:function(e){gn.part=+e.target.value;rebuildModel(m);renderPanel();}});
+    m.userData.parts.forEach(function(p,i){pSel.appendChild(el('option',{value:i,text:'Part '+(i+1)}));});
+    pSel.value=Math.min(gn.part,m.userData.parts.length-1);
+    b.appendChild(el('label',{class:'fld',text:'Target part'}));
+    b.appendChild(pSel);
+  }
+  var row=el('div',{class:'grid2'});
+  row.appendChild(el('button',{class:'chip'+(gn.enabled?' on':''),text:gn.enabled?'Enabled':'Disabled',onclick:function(){gn.enabled=!gn.enabled;rebuildModel(m);renderPanel();scheduleAutosave();}}));
+  row.appendChild(el('button',{class:'pri',text:'Apply',onclick:function(){applyGeoNodesModifier(m);}}));
+  b.appendChild(row);
+  b.appendChild(el('hr',{class:'sep'}));}
+
 function panelNodes(b){
   var ed=NodeUI;
   b.appendChild(el('h2',{text:'Nodes'}));
-  b.appendChild(el('p',{class:'sub',text:'Shader nodes — baked-map path (Wave G1). Build a graph ending in Material Output, then Bake to material.'}));
+  var modeRow=el('div',{class:'grid2'});
+  modeRow.appendChild(el('button',{class:'chip'+(nodeUIMode==='shader'?' on':''),text:'Shader',onclick:function(){switchNodeUIMode('shader');renderPanel();}}));
+  modeRow.appendChild(el('button',{class:'chip'+(nodeUIMode==='geo'?' on':''),text:'Geometry',onclick:function(){switchNodeUIMode('geo');renderPanel();}}));
+  b.appendChild(modeRow);
+  if(nodeUIMode==='geo'){
+    // The active model may have changed since this graph was last loaded (switched via
+    // Assets/Viewer) — resync ed.graph to whatever model is active now (cheap reference
+    // check, same pattern switchNodeUIMode itself uses on an explicit toggle).
+    var gm=getModel(state.activeId),ggn=gm?ensureModelGeoGraph(gm):null;
+    if(ggn&&ed.graph!==ggn.graph)ed.setGraph(ggn.graph,NODE_GEO);
+    b.appendChild(el('p',{class:'sub',text:'Geometry nodes — interpreter (Wave G3a). Build a graph ending in Group Output; the model preview updates live, Apply bakes it in.'}));
+  }else{
+    b.appendChild(el('p',{class:'sub',text:'Shader nodes — baked-map path (Wave G1). Build a graph ending in Material Output, then Bake to material.'}));}
   if(ed.catalogOpen){renderNodeCatalog(b,ed);return;}
   var sel=ed.selectedNode?NodeGraph.findNode(ed.graph,ed.selectedNode):null;
   if(sel){renderNodeInspector(b,ed,sel);return;}
   b.appendChild(el('button',{class:'pri',style:'width:100%',text:'+ Add node',onclick:function(){ed.catalogOpen=true;ed._catalogQuery='';renderPanel();openSheet(true);}}));
   b.appendChild(el('hr',{class:'sep'}));
   if(ed.registry===NODE_SHADER)renderNodeBakePanel(b,ed);
+  else if(ed.registry===NODE_GEO)renderGeoNodesPanel(b,ed);
   b.appendChild(el('p',{class:'small muted',text:ed.graph.nodes.length+' node'+(ed.graph.nodes.length===1?'':'s')+' · '+ed.graph.links.length+' link'+(ed.graph.links.length===1?'':'s')}));
   b.appendChild(el('p',{class:'small muted',text:'Tap a socket, then tap a compatible socket to connect. Tap a node to select & edit its params here. Drag a node body to move it. Pinch to zoom, two-finger drag to pan.'}));
   b.appendChild(el('button',{style:'width:100%;margin-top:8px',text:'Clear graph',onclick:function(){ed.graph=NodeGraph.make();ed.selectedNode=null;ed.draw();renderPanel();}}));}

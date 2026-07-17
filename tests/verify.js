@@ -2255,6 +2255,68 @@ const server = http.createServer((req, res) => {
       if (Math.abs(res.geometry.V[i].y - (hostVF.V[i].y + 1)) > 1e-6) throw new Error('vertex ' + i + ' Y not translated by the Group Input host geometry\'s own values +1');
     }
   }));
+  await step('NODE_GEO: Geometry Nodes modifier on a model bakes on Apply (part geometry changes)', () => page.evaluate(() => {
+    var R = __R, NG = R.NodeGraph, REG = R.NODE_GEO;
+    var m = R.makeModel('GeoNodesApplyTest', [{ geo: new THREE.BoxGeometry(1, 1, 1), mat: R.makeMaterial({}) }]);
+    R.addModel(m); R.setActiveModel(m.userData.id);
+    var gn = R.ensureModelGeoGraph(m);
+    var gi = NG.addNode(gn.graph, 'GroupInput', 0, 0);
+    var vec = NG.addNode(gn.graph, 'GeoVector', 0, 150, { x: 0, y: 5, z: 0 });
+    var xf = NG.addNode(gn.graph, 'GeoTransform', 200, 0);
+    var out = NG.addNode(gn.graph, 'GeoOutput', 400, 0);
+    NG.connect(gn.graph, REG, [gi.id, 'geometry'], [xf.id, 'geometry']);
+    NG.connect(gn.graph, REG, [vec.id, 'vector'], [xf.id, 'translate']);
+    NG.connect(gn.graph, REG, [xf.id, 'geometry'], [out.id, 'geometry']);
+    gn.enabled = true;
+    R.rebuildModel(m);
+    var part = m.userData.parts[0];
+    var beforeBox = new THREE.Box3().setFromBufferAttribute(part.baseGeo.attributes.position);
+    var previewBox = new THREE.Box3().setFromBufferAttribute(part.mesh.geometry.attributes.position);
+    if (Math.abs((previewBox.min.y - beforeBox.min.y) - 5) > 1e-4) throw new Error('live (non-applied) preview did not reflect the +5 Y translate: delta=' + (previewBox.min.y - beforeBox.min.y));
+    R.applyGeoNodesModifier(m);
+    var afterBox = new THREE.Box3().setFromBufferAttribute(part.baseGeo.attributes.position);
+    if (Math.abs((afterBox.min.y - beforeBox.min.y) - 5) > 1e-4) throw new Error('Apply did not bake the +5 Y translate into baseGeo: delta=' + (afterBox.min.y - beforeBox.min.y));
+    if (gn.enabled) throw new Error('Apply should disable the modifier slot after baking');
+  }));
+
+  await step('NODE_GEO: Nodes tab mode toggle switches the SAME editor between NODE_SHADER and NODE_GEO', () => page.evaluate(() => {
+    var R = __R;
+    R.setView('nodes');
+    var startMode = R.getNodeUIMode();
+    if (startMode !== 'shader') throw new Error('expected the Nodes tab to default to shader mode, got ' + startMode);
+    if (R.NodeUI.registry !== R.NODE_SHADER) throw new Error('default registry should be NODE_SHADER');
+    R.switchNodeUIMode('geo');
+    if (R.getNodeUIMode() !== 'geo') throw new Error('mode did not switch to geo');
+    if (R.NodeUI.registry !== R.NODE_GEO) throw new Error('registry did not switch to NODE_GEO');
+    R.switchNodeUIMode('shader');
+    if (R.NodeUI.registry !== R.NODE_SHADER) throw new Error('registry did not switch back to NODE_SHADER');
+  }));
+
+  await step('NODE_GEO: a geometry graph survives saveProject/loadProject (JSON round-trip)', () => page.evaluate(() => {
+    var R = __R, NG = R.NodeGraph, REG = R.NODE_GEO;
+    R.state.models.length = 0;
+    var m = R.makeModel('GeoNodesSaveTest', [{ geo: new THREE.BoxGeometry(1, 1, 1), mat: R.makeMaterial({}) }]);
+    R.addModel(m); R.setActiveModel(m.userData.id);
+    var gn = R.ensureModelGeoGraph(m);
+    var cube = NG.addNode(gn.graph, 'GeoCube', 0, 0, { size: 2 });
+    var out = NG.addNode(gn.graph, 'GeoOutput', 200, 0);
+    NG.connect(gn.graph, REG, [cube.id, 'geometry'], [out.id, 'geometry']);
+    gn.enabled = false; // disabled so the part's own baseGeo isn't disturbed by this test
+    var savedId = m.userData.id;
+    var data = JSON.parse(JSON.stringify(R.buildProjectData(false)));
+    var savedEntry = data.models.filter(function (md) { return md.id === savedId; })[0];
+    if (!savedEntry || !savedEntry.geoNodes) throw new Error('buildProjectData did not serialize geoNodes for this model');
+    if (savedEntry.geoNodes.graph.nodes.length !== 2 || savedEntry.geoNodes.graph.links.length !== 1) throw new Error('serialized graph node/link counts are wrong');
+    R.loadProject(data);
+    var loaded = R.getModel(savedId);
+    if (!loaded) throw new Error('model did not survive loadProject');
+    if (!loaded.userData.geoNodes || !loaded.userData.geoNodes.graph) throw new Error('geoNodes did not survive loadProject');
+    if (loaded.userData.geoNodes.graph.nodes.length !== 2 || loaded.userData.geoNodes.graph.links.length !== 1) throw new Error('loaded graph node/link counts are wrong');
+    var loadedOutId = R.geoGraphOutputId(loaded.userData.geoNodes.graph);
+    var res = R.evalGeoGraph(loaded.userData.geoNodes.graph, REG, loadedOutId, null);
+    if (!res || res.geometry.V.length !== 8) throw new Error('loaded graph does not evaluate the same way (expected 8-vert cube)');
+  }));
+
   await page.evaluate(() => __R.setView('edit'));
   await page.waitForTimeout(400);
   await page.screenshot({ path: path.join(SP, 'mobile-edit.png') });
