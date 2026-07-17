@@ -112,7 +112,7 @@ Wave definitions live in `docs/GAP_ANALYSIS.md` §4 — this table only tracks s
 | G0 | Shared touch node-graph editor widget + registry/eval core | DONE | d93b2f1+4811314 | modeling suite now 106 (+18 node checks); `NodeGraph` eval core + `NodeUI`/`makeNodeEditor` canvas editor + `NODE_DEMO` registry. **Registry contract for G1/G3a/G4: read the G0 code — each node type = {title,inputs,outputs,params,eval}; socket `kind` equality gates connections.** Nodes tab added |
 | G1 | Shader nodes: baked-map path (texture/utility nodes, Principled output) | DONE | a229568+66c69f3+13b24ff | modeling suite now 118; `NODE_SHADER` 24 node types on the G0 contract; `bakeShaderMaterial` walks a UV grid → per-channel maps; Fresnel/LayerWeight are bake-time constants (G2 does real GLSL); NodeUI defaults to NODE_SHADER |
 | G2 | Shader nodes: true GLSL compile (onBeforeCompile) + bake-for-export | TODO | | |
-| G3a | Geometry nodes: interpreter + inputs/primitives/mesh-op nodes | TODO | | |
+| G3a | Geometry nodes: interpreter + inputs/primitives/mesh-op nodes | DONE | 67e6bde+3c86225+fc22e5b+ba2ca41 | modeling suite now 131; `NODE_GEO` 24 types, geometry socket = `{V,F,UV}` struct, `evalGeoGraph` interpreter, `model.userData.geoNodes` modifier slot + Apply-bake, Shader/Geometry mode toggle in Nodes tab; Position/Normal/Index are per-pass snapshots (true per-vertex fields = G3b); Extrude has no face-selection yet |
 | G3b | Geometry nodes: instancing/scatter + attribute fields | TODO | | |
 | G3c | Geometry nodes: curve + boolean nodes | TODO | | after A8+A9 |
 | G4 | Compositor nodes (stills + video export hook) | TODO | | land before/with E1 |
