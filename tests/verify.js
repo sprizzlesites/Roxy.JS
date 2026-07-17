@@ -1807,6 +1807,119 @@ const server = http.createServer((req, res) => {
     if (g.links.length !== 0) throw new Error('removeNode must cascade-delete links touching the removed node');
   }));
 
+  await step('view:nodes', () => page.evaluate(() => __R.setView('nodes')));
+  await page.waitForTimeout(150);
+
+  await step('NodeEditor: pan/zoom world<->screen round-trips a point', () => page.evaluate(() => {
+    var ed = __R.NodeUI;
+    ed.tx = 37; ed.ty = -15; ed.zoom = 1.8;
+    var w = { x: 12, y: -40 };
+    var s = ed.worldToScreen(w.x, w.y);
+    var w2 = ed.screenToWorld(s.x, s.y);
+    if (Math.abs(w2.x - w.x) > 1e-6 || Math.abs(w2.y - w.y) > 1e-6)
+      throw new Error('round trip mismatch: ' + JSON.stringify(w) + ' -> ' + JSON.stringify(w2));
+    ed.tx = 60; ed.ty = 50; ed.zoom = 1; // restore defaults for later steps
+  }));
+
+  await step('NodeEditor: addNode/deleteNode/moveNode mutate ed.graph (editor-level wrapper over NodeGraph)', () => page.evaluate(() => {
+    var ed = __R.NodeUI;
+    ed.setGraph(__R.NodeGraph.make(), __R.NODE_DEMO);
+    var n = ed.addNode('Value', 10, 10, { value: 3 });
+    if (ed.graph.nodes.length !== 1) throw new Error('addNode did not mutate ed.graph.nodes');
+    if (ed.selectedNode !== n.id) throw new Error('addNode did not select the new node');
+    ed.moveNode(n.id, 99, 88);
+    var found = __R.NodeGraph.findNode(ed.graph, n.id);
+    if (found.x !== 99 || found.y !== 88) throw new Error('moveNode did not update the node in ed.graph');
+    ed.deleteNode(n.id);
+    if (ed.graph.nodes.length !== 0) throw new Error('deleteNode did not remove the node from ed.graph');
+  }));
+
+  await step('NodeEditor: connectSockets forms a link in the editor state (driven directly with two socket refs)', () => page.evaluate(() => {
+    var ed = __R.NodeUI;
+    ed.setGraph(__R.NodeGraph.make(), __R.NODE_DEMO);
+    var v = ed.addNode('Value', 0, 0, { value: 1 });
+    var m = ed.addNode('Math', 220, 0, { op: 'add' });
+    var refOut = { nodeId: v.id, socket: 'out', dir: 'out' };
+    var refIn = { nodeId: m.id, socket: 'a', dir: 'in' };
+    var ok = ed.connectSockets(refOut, refIn);
+    if (!ok) throw new Error('connectSockets returned false for a valid float->float pair');
+    var found = ed.graph.links.some(function (l) { return l.from[0] === v.id && l.to[0] === m.id && l.to[1] === 'a'; });
+    if (!found) throw new Error('link missing from ed.graph.links after connectSockets');
+  }));
+
+  await step('NodeEditor: tapSocket two-step flow connects on the second compatible tap', () => page.evaluate(() => {
+    var ed = __R.NodeUI;
+    ed.setGraph(__R.NodeGraph.make(), __R.NODE_DEMO);
+    var v = ed.addNode('Value', 0, 0, { value: 1 });
+    var m = ed.addNode('Math', 220, 0, { op: 'add' });
+    ed.tapSocket(v.id, 'out', 'out');           // first tap arms pendingSocket
+    if (!ed.pendingSocket) throw new Error('first tap did not arm pendingSocket');
+    ed.tapSocket(m.id, 'a', 'in');               // second, compatible tap resolves it
+    if (ed.pendingSocket) throw new Error('pendingSocket should be cleared after resolving');
+    var found = ed.graph.links.some(function (l) { return l.from[0] === v.id && l.to[0] === m.id && l.to[1] === 'a'; });
+    if (!found) throw new Error('tap-tap flow did not form the link');
+  }));
+
+  await step('NodeEditor: tap-tap kind mismatch toasts and cancels without mutating the graph', () => page.evaluate(() => {
+    var ed = __R.NodeUI;
+    ed.setGraph(__R.NodeGraph.make(), __R.NODE_DEMO);
+    var v = ed.addNode('Value', 0, 0, { value: 1 });        // float out
+    var o = ed.addNode('Output', 220, 0);                    // color in
+    document.getElementById('toast').textContent = '';
+    ed.tapSocket(v.id, 'out', 'out');
+    ed.tapSocket(o.id, 'color', 'in');
+    if (ed.graph.links.length !== 0) throw new Error('mismatched tap-tap must not create a link');
+    var msg = document.getElementById('toast').textContent;
+    if (!/[Ii]ncompatible/.test(msg)) throw new Error('expected an incompatible-sockets toast, got: "' + msg + '"');
+  }));
+
+  await step('NodeEditor: hitTest resolves a socket tap and a node-body tap from screen coordinates', () => page.evaluate(() => {
+    var ed = __R.NodeUI;
+    ed.setGraph(__R.NodeGraph.make(), __R.NODE_DEMO);
+    ed.tx = 60; ed.ty = 50; ed.zoom = 1;
+    var v = ed.addNode('Value', 0, 0, { value: 1 });
+    var outPos = ed.socketScreenPos(v, 'out', 'out');
+    var hitSock = ed.hitTest(outPos.x, outPos.y);
+    if (!hitSock || hitSock.kind !== 'socket' || hitSock.nodeId !== v.id || hitSock.dir !== 'out')
+      throw new Error('hitTest did not resolve the output socket: ' + JSON.stringify(hitSock));
+    var bodyScreen = ed.worldToScreen(v.x + 40, v.y + 15); // inside the card, away from any socket
+    var hitBody = ed.hitTest(bodyScreen.x, bodyScreen.y);
+    if (!hitBody || hitBody.kind !== 'node' || hitBody.nodeId !== v.id)
+      throw new Error('hitTest did not resolve the node body: ' + JSON.stringify(hitBody));
+    var hitEmpty = ed.hitTest(-500, -500);
+    if (hitEmpty !== null) throw new Error('hitTest over empty canvas should return null');
+  }));
+
+  await step('Nodes panel: add-node catalog lists registry types and Add inserts one', () => page.evaluate(() => {
+    var ed = __R.NodeUI;
+    ed.setGraph(__R.NodeGraph.make(), __R.NODE_DEMO);
+    ed.catalogOpen = true; ed._catalogQuery = '';
+    __R.setView('nodes'); // sets active.view='nodes' AND renders the panel (catalog open)
+    var rows = Array.from(document.querySelectorAll('#panelBody .modrow .nm')).map(function (n) { return n.textContent; });
+    if (rows.indexOf('Math') < 0) throw new Error('catalog did not list the Math node type: ' + JSON.stringify(rows));
+    var addBtns = Array.from(document.querySelectorAll('#panelBody .modrow'));
+    var mathRow = addBtns.filter(function (row) { return row.querySelector('.nm').textContent === 'Math'; })[0];
+    var before = __R.NodeUI.graph.nodes.length;
+    mathRow.querySelector('button').click();
+    var after = __R.NodeUI.graph.nodes.length;
+    if (after !== before + 1) throw new Error('tapping Add in the catalog did not insert a node: ' + before + ' -> ' + after);
+    if (__R.NodeUI.catalogOpen) throw new Error('catalog should close after adding a node');
+  }));
+
+  await step('Nodes panel: inspector renders the selected node\'s params and Delete removes it', () => page.evaluate(() => {
+    var ed = __R.NodeUI;
+    ed.setGraph(__R.NodeGraph.make(), __R.NODE_DEMO);
+    var m = ed.addNode('Math', 0, 0, { op: 'mul' });
+    ed.selectNode(m.id); // inspector only renders for the selected node
+    __R.setView('nodes'); // sets active.view='nodes' AND renders the inspector
+    var chips = Array.from(document.querySelectorAll('#panelBody .chip')).map(function (c) { return c.textContent; });
+    if (chips.indexOf('mul') < 0) throw new Error('inspector did not render the op enum param with "mul" selected: ' + JSON.stringify(chips));
+    var delBtn = Array.from(document.querySelectorAll('#panelBody button')).filter(function (b) { return b.textContent === 'Delete'; })[0];
+    if (!delBtn) throw new Error('inspector Delete button missing');
+    delBtn.click();
+    if (ed.graph.nodes.length !== 0) throw new Error('inspector Delete did not remove the node');
+  }));
+
   await page.evaluate(() => __R.setView('edit'));
   await page.waitForTimeout(400);
   await page.screenshot({ path: path.join(SP, 'mobile-edit.png') });

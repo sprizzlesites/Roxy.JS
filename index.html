@@ -72,6 +72,11 @@ canvas{display:block;touch-action:none}
 .paint2d canvas{max-width:96%;max-height:96%;border:1px solid var(--line);border-radius:8px;background:#fff;box-shadow:0 10px 40px rgba(0,0,0,.5)}
 .paint-prev{position:relative;border-left:1px solid var(--line)}
 
+/* Wave G0: node-graph editor view — one full-bleed 2D canvas, no gl-slot (it never
+   touches the THREE renderer; curSlot()/resizeActive() skip it by design). */
+.view[data-view=nodes]{background:#12141a}
+#nodesCanvas{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none}
+
 #panel{grid-area:panel;border-left:1px solid var(--line);background:var(--panel);overflow:auto;padding:14px}
 #panel h2{font:600 13px/1.1 "Space Grotesk";margin:0 0 2px}
 #panel .sub{font-size:11.5px;color:var(--muted);margin:0 0 12px}
@@ -282,6 +287,7 @@ canvas{display:block;touch-action:none}
     <section class="view" data-view="scene"><div class="gl-slot" id="slot-scene"></div><button class="fab" id="fabScene" title="Add a model to the scene" aria-label="Add a model to the scene">+</button></section>
     <section class="view" data-view="assets"><div class="assets-body" id="assetsBody"></div></section>
     <section class="view" data-view="edit"><div class="gl-slot" id="slot-edit"></div><div id="editHud"></div></section>
+    <section class="view" data-view="nodes"><canvas id="nodesCanvas"></canvas></section>
     <canvas id="rotBall" width="80" height="80" role="img" aria-label="Orbit gizmo — drag to rotate the view"></canvas>
     <div id="zoomKnob">
       <button class="zk-btn" id="zkIn" title="Zoom in">+</button>
@@ -336,9 +342,10 @@ var ICONS={
  build:'<path d="M12 2l9 5-9 5-9-5 9-5z"/><path d="M3 12l9 5 9-5"/><path d="M3 17l9 5 9-5"/>',
  scene:'<rect x="2.5" y="6" width="13" height="9" rx="1.5"/><path d="M15.5 9l5-2.5v9L15.5 12"/>',
  assets:'<path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 7v10l9 4 9-4V7"/><path d="M12 11v10"/>',
- edit:'<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>'
+ edit:'<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>',
+ nodes:'<circle cx="5" cy="6" r="2.3"/><circle cx="5" cy="18" r="2.3"/><circle cx="19" cy="12" r="2.3"/><path d="M7.1 6.9L16.9 11"/><path d="M7.1 17.1L16.9 13"/>'
 };
-var VIEWS=[['viewer','Viewer'],['paint','Paint'],['build','Build'],['scene','Scene'],['assets','Assets'],['edit','Edit']];
+var VIEWS=[['viewer','Viewer'],['paint','Paint'],['build','Build'],['scene','Scene'],['assets','Assets'],['edit','Edit'],['nodes','Nodes']];
 
 /* ---------------- renderer ---------------- */
 var renderer=new THREE.WebGLRenderer({antialias:true,alpha:true,preserveDrawingBuffer:true});
@@ -548,7 +555,9 @@ function updateCam(){var vs=active.vs,c=vs.cam,sp=Math.sin(vs.ph);
 var VIEW_SNAPS={front:{th:Math.PI/2,ph:1.5},back:{th:-Math.PI/2,ph:1.5},right:{th:0,ph:1.5},left:{th:Math.PI,ph:1.5},top:{ph:.1}};
 function snapView(name){var s=VIEW_SNAPS[name];if(!s)return;var vs=active.vs;
   if(s.th!=null)vs.th=s.th;vs.ph=s.ph;updateCam();invalidate();}
-function resizeActive(){var slot=curSlot();if(!slot)return;var r=slot.getBoundingClientRect();if(r.width<2||r.height<2)return;
+function resizeActive(){
+  if(active.view==='nodes'){if(typeof NodeUI!=='undefined'&&NodeUI)NodeUI.resize();return;}
+  var slot=curSlot();if(!slot)return;var r=slot.getBoundingClientRect();if(r.width<2||r.height<2)return;
   renderer.setSize(r.width,r.height);active.vs.cam.aspect=r.width/r.height;active.vs.cam.updateProjectionMatrix();}
 function curSlot(){var v=active.view;if(v==='paint')return $('#slot-paint');return $('#slot-'+v);}
 function loop(){requestAnimationFrame(loop);updateCam();if(Gizmo.group)Gizmo.update();
@@ -1020,7 +1029,7 @@ function slider(label,min,max,val,step,on){var out=el('span',{class:'muted small
   return el('div',{},[el('label',{class:'fld'},[label+'  ',out]),r]);}
 
 function renderPanel(){var b=$('#panelBody');b.innerHTML='';var v=active.view;
-  if(v==='viewer')panelViewer(b);else if(v==='paint')panelPaint(b);else if(v==='build')panelBuild(b);else if(v==='scene')panelScene(b);else if(v==='edit')panelEdit(b);else panelAssets(b);
+  if(v==='viewer')panelViewer(b);else if(v==='paint')panelPaint(b);else if(v==='build')panelBuild(b);else if(v==='scene')panelScene(b);else if(v==='edit')panelEdit(b);else if(v==='nodes')panelNodes(b);else panelAssets(b);
   makeCollapsible(b,v);
   $('#sheetLbl').textContent=$('#vtitle').textContent+' Tools';
   if(v==='build')Gizmo.attach(state.selBuild);else if(v==='scene')Gizmo.attach(state.selScene);else Gizmo.attach(null);
@@ -3421,6 +3430,268 @@ var NODE_DEMO={
     params:[],
     eval:function(inputs){return {result:inputs.color};}}
 };
+
+/* ================================================================================
+   Wave G0 — node-graph editor widget: canvas-2D rendering + touch interaction.
+   makeNodeEditor(canvas) returns an editor object bound to one <canvas>. Redraws
+   happen on state change/interaction only (no rAF loop) so hundreds of nodes stay
+   cheap on mobile, per GAP_ANALYSIS §6.1.
+
+   EDITOR OBJECT API (what G1/G3a/G4 hosts and tests drive):
+     ed.setGraph(graph, registry)         — mount a Graph + its type registry
+     ed.worldToScreen(x,y) / ed.screenToWorld(x,y) — pure transform, canvas-local px
+     ed.hitTest(localX,localY)            — {kind:'socket',nodeId,socket,dir} | {kind:'node',nodeId} | null
+     ed.selectNode(id|null)               — selection state (drives the inspector panel)
+     ed.addNode(type,x,y,params) / ed.deleteNode(id) / ed.deleteSelected() / ed.duplicateSelected()
+     ed.moveNode(id,x,y)                  — all of the above mutate ed.graph via NodeGraph and redraw
+     ed.tapSocket(nodeId,socket,dir)      — stateful tap-then-tap flow (first tap arms ed.pendingSocket,
+                                             second tap resolves via connectSockets, mismatched taps toast+cancel)
+     ed.connectSockets(refA,refB)         — the actual connect primitive; refs are {nodeId,socket,dir}
+                                             in either order (one must be 'out', the other 'in'); does the
+                                             kind/cycle-checked NodeGraph.connect + toast on failure. This is
+                                             what "tap a socket then tap a compatible socket" resolves to, and
+                                             what tests drive directly to prove the tap-tap flow end to end.
+     ed.resize() / ed.draw()              — layout + redraw
+   ================================================================================ */
+var NODE_W=150,NODE_TITLE_H=26,NODE_ROW_H=22,NODE_PAD=10,NODE_SOCK_HIT=20;
+function nodeLayout(def){var rows=Math.max(((def&&def.inputs)||[]).length,((def&&def.outputs)||[]).length,1);
+  return {w:NODE_W,h:NODE_TITLE_H+rows*NODE_ROW_H+NODE_PAD};}
+function nodeKindColor(kind){var p={float:'#6cc6ff',color:'#ff8fb1',vec:'#9be0a3',geometry:'#ffd76c',shader:'#c9a6ff'};return p[kind]||'#9aa1ab';}
+function roundRectPath(ctx,x,y,w,h,r,topOnly){
+  r=Math.max(0,Math.min(r,w/2,h/2));
+  ctx.moveTo(x+r,y);ctx.lineTo(x+w-r,y);ctx.arcTo(x+w,y,x+w,y+r,r);
+  if(topOnly){ctx.lineTo(x+w,y+h);ctx.lineTo(x,y+h);}
+  else{ctx.lineTo(x+w,y+h-r);ctx.arcTo(x+w,y+h,x+w-r,y+h,r);ctx.lineTo(x+r,y+h);ctx.arcTo(x,y+h,x,y+h-r,r);}
+  ctx.lineTo(x,y+r);ctx.arcTo(x,y,x+r,y,r);ctx.closePath();}
+
+function makeNodeEditor(canvas){
+  var ed={
+    canvas:canvas,ctx:canvas?canvas.getContext('2d'):null,
+    graph:NodeGraph.make(),registry:{},
+    tx:60,ty:50,zoom:1,_dpr:1,
+    selectedNode:null,pendingSocket:null,
+    catalogOpen:false,_catalogQuery:'',
+    ptrs:new Map(),_dragNode:null,_dragMoved:false,_clickStart:null,_lastDist:0,_lastMid:null,
+
+    setGraph:function(graph,registry){this.graph=graph||NodeGraph.make();if(registry)this.registry=registry;
+      this.selectedNode=null;this.pendingSocket=null;this.catalogOpen=false;this.draw();},
+    setRegistry:function(registry){this.registry=registry||{};},
+
+    worldToScreen:function(x,y){return {x:x*this.zoom+this.tx,y:y*this.zoom+this.ty};},
+    screenToWorld:function(x,y){return {x:(x-this.tx)/this.zoom,y:(y-this.ty)/this.zoom};},
+
+    socketWorldPos:function(node,socketName,dir){
+      var def=this.registry[node.type];if(!def)return null;
+      var list=dir==='in'?(def.inputs||[]):(def.outputs||[]);
+      var idx=-1;for(var i=0;i<list.length;i++)if(list[i].name===socketName){idx=i;break;}
+      if(idx<0)return null;
+      var layout=nodeLayout(def);
+      return {x:node.x+(dir==='in'?0:layout.w),y:node.y+NODE_TITLE_H+idx*NODE_ROW_H+NODE_ROW_H/2};},
+    socketScreenPos:function(node,socketName,dir){var wp=this.socketWorldPos(node,socketName,dir);return wp?this.worldToScreen(wp.x,wp.y):null;},
+
+    // Hit-test in canvas-local (CSS pixel) screen coordinates — sockets use a fixed
+    // ≥40px-diameter hit radius regardless of zoom (fat-finger-proof, §3 of GAP_ANALYSIS).
+    hitTest:function(lx,ly){
+      for(var i=this.graph.nodes.length-1;i>=0;i--){
+        var n=this.graph.nodes[i],def=this.registry[n.type];if(!def)continue;
+        var inputs=def.inputs||[],outputs=def.outputs||[];
+        for(var a=0;a<inputs.length;a++){var p=this.socketScreenPos(n,inputs[a].name,'in');
+          if(p&&Math.hypot(p.x-lx,p.y-ly)<=NODE_SOCK_HIT)return {kind:'socket',nodeId:n.id,socket:inputs[a].name,dir:'in'};}
+        for(var b=0;b<outputs.length;b++){var p2=this.socketScreenPos(n,outputs[b].name,'out');
+          if(p2&&Math.hypot(p2.x-lx,p2.y-ly)<=NODE_SOCK_HIT)return {kind:'socket',nodeId:n.id,socket:outputs[b].name,dir:'out'};}
+        var layout=nodeLayout(def),p0=this.worldToScreen(n.x,n.y),wpx=layout.w*this.zoom,hpx=layout.h*this.zoom;
+        if(lx>=p0.x&&lx<=p0.x+wpx&&ly>=p0.y&&ly<=p0.y+hpx)return {kind:'node',nodeId:n.id};}
+      return null;},
+
+    selectNode:function(id){this.selectedNode=id;this.pendingSocket=null;this.draw();},
+    addNode:function(type,x,y,params){var n=NodeGraph.addNode(this.graph,type,x,y,params);this.selectNode(n.id);return n;},
+    deleteNode:function(id){NodeGraph.removeNode(this.graph,id);if(this.selectedNode===id)this.selectedNode=null;this.draw();},
+    deleteSelected:function(){if(this.selectedNode)this.deleteNode(this.selectedNode);},
+    duplicateSelected:function(){
+      var n=NodeGraph.findNode(this.graph,this.selectedNode);if(!n)return null;
+      var params={};for(var k in n.params)params[k]=n.params[k];
+      return this.addNode(n.type,n.x+30,n.y+24,params);},
+    moveNode:function(id,x,y){NodeGraph.moveNode(this.graph,id,x,y);this.draw();},
+
+    // The tap-tap primary flow (§6.1): first tap arms a pending socket, second tap
+    // resolves the connection (or re-tapping the same socket cancels the pending state).
+    tapSocket:function(nodeId,socket,dir){
+      if(!this.pendingSocket){this.pendingSocket={nodeId:nodeId,socket:socket,dir:dir};this.draw();return;}
+      var a=this.pendingSocket,b={nodeId:nodeId,socket:socket,dir:dir};
+      this.pendingSocket=null;
+      if(a.nodeId===b.nodeId&&a.socket===b.socket&&a.dir===b.dir){this.draw();return;}
+      this.connectSockets(a,b);},
+    // Order-independent: exactly one of refA/refB must be an 'out' socket and the
+    // other an 'in' socket. Kind mismatch or a would-be cycle -> toast + no mutation.
+    connectSockets:function(refA,refB){
+      var out=refA.dir==='out'?refA:(refB.dir==='out'?refB:null);
+      var inp=refA.dir==='in'?refA:(refB.dir==='in'?refB:null);
+      if(!out||!inp||out===inp){toast('Pick one output and one input socket');this.draw();return false;}
+      var ok=NodeGraph.connect(this.graph,this.registry,[out.nodeId,out.socket],[inp.nodeId,inp.socket]);
+      if(!ok)toast('Incompatible sockets');
+      this.draw();return ok;},
+
+    resize:function(){
+      if(!this.canvas||!this.canvas.parentElement)return;
+      var r=this.canvas.parentElement.getBoundingClientRect();if(r.width<2||r.height<2)return;
+      var dpr=Math.min(window.devicePixelRatio||1,2);this._dpr=dpr;
+      this.canvas.width=Math.max(1,Math.round(r.width*dpr));this.canvas.height=Math.max(1,Math.round(r.height*dpr));
+      this.canvas.style.width=r.width+'px';this.canvas.style.height=r.height+'px';
+      this.draw();},
+
+    _drawLink:function(a,b,color){
+      var ctx=this.ctx,dx=Math.max(40,Math.abs(b.x-a.x)*.5);
+      ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.bezierCurveTo(a.x+dx,a.y,b.x-dx,b.y,b.x,b.y);
+      ctx.strokeStyle=color||'#9aa1ab';ctx.lineWidth=Math.max(1.5,2*this.zoom);ctx.stroke();},
+    _drawSocket:function(pos,kind,side,label){
+      if(!pos)return;var ctx=this.ctx;
+      ctx.beginPath();ctx.arc(pos.x,pos.y,5*this.zoom,0,Math.PI*2);
+      ctx.fillStyle=nodeKindColor(kind);ctx.fill();ctx.lineWidth=1;ctx.strokeStyle='rgba(0,0,0,.4)';ctx.stroke();
+      ctx.fillStyle='rgba(255,255,255,.78)';ctx.font=Math.max(8,10*this.zoom)+'px sans-serif';ctx.textBaseline='middle';
+      if(side==='left'){ctx.textAlign='left';ctx.fillText(label,pos.x+9*this.zoom,pos.y);}
+      else{ctx.textAlign='right';ctx.fillText(label,pos.x-9*this.zoom,pos.y);}},
+    _drawNode:function(n){
+      var ctx=this.ctx,def=this.registry[n.type]||{title:n.type,inputs:[],outputs:[],params:[]};
+      var layout=nodeLayout(def),p0=this.worldToScreen(n.x,n.y),wpx=layout.w*this.zoom,hpx=layout.h*this.zoom,r=8*this.zoom;
+      ctx.save();
+      ctx.beginPath();roundRectPath(ctx,p0.x,p0.y,wpx,hpx,r);
+      ctx.fillStyle='rgba(28,31,38,.95)';ctx.fill();
+      ctx.lineWidth=(n.id===this.selectedNode)?2.5:1;ctx.strokeStyle=(n.id===this.selectedNode)?'#ff8fb1':'rgba(255,255,255,.18)';ctx.stroke();
+      var titleH=NODE_TITLE_H*this.zoom;
+      ctx.save();ctx.beginPath();roundRectPath(ctx,p0.x,p0.y,wpx,titleH,r,true);ctx.clip();
+      ctx.fillStyle=def.color||'#3a3f4a';ctx.globalAlpha=.85;ctx.fillRect(p0.x,p0.y,wpx,titleH);ctx.restore();
+      ctx.fillStyle='#fff';ctx.font=Math.max(9,12*this.zoom)+'px sans-serif';ctx.textBaseline='middle';ctx.textAlign='left';
+      ctx.fillText(def.title||n.type,p0.x+8*this.zoom,p0.y+titleH/2);
+      var self=this;
+      (def.inputs||[]).forEach(function(inp){self._drawSocket(self.socketScreenPos(n,inp.name,'in'),inp.kind,'left',inp.label||inp.name);});
+      (def.outputs||[]).forEach(function(o){self._drawSocket(self.socketScreenPos(n,o.name,'out'),o.kind,'right',o.label||o.name);});
+      ctx.restore();},
+    draw:function(){
+      if(!this.canvas||!this.ctx)return;
+      var ctx=this.ctx,w=this.canvas.clientWidth||0,h=this.canvas.clientHeight||0;
+      ctx.save();ctx.setTransform(this._dpr||1,0,0,this._dpr||1,0,0);
+      ctx.clearRect(0,0,w,h);ctx.fillStyle='#12141a';ctx.fillRect(0,0,w,h);
+      var self=this;
+      this.graph.links.forEach(function(l){
+        var fn=NodeGraph.findNode(self.graph,l.from[0]),tn=NodeGraph.findNode(self.graph,l.to[0]);
+        if(!fn||!tn)return;
+        var a=self.socketScreenPos(fn,l.from[1],'out'),b=self.socketScreenPos(tn,l.to[1],'in');
+        if(!a||!b)return;
+        var kind=NodeGraph.socketDef(self.registry,fn.type,l.from[1],'out');
+        self._drawLink(a,b,nodeKindColor(kind&&kind.kind));});
+      this.graph.nodes.forEach(function(n){self._drawNode(n);});
+      if(this.pendingSocket){
+        var pn=NodeGraph.findNode(this.graph,this.pendingSocket.nodeId);
+        if(pn){var p=this.socketScreenPos(pn,this.pendingSocket.socket,this.pendingSocket.dir);
+          if(p){ctx.beginPath();ctx.arc(p.x,p.y,10,0,Math.PI*2);ctx.strokeStyle='#ff8fb1';ctx.lineWidth=2;ctx.stroke();}}}
+      ctx.restore();}
+  };
+  bindNodeEditorPointers(ed);
+  return ed;}
+
+// Pointer handling mirrors the main viewport's `ptrs` Map two-pointer pinch/pan
+// pattern (§6.1: "reuse the viewport ptrs Map pattern"): one pointer drags a node
+// body (or, starting on empty canvas, does nothing — pan needs two fingers, same
+// as the main viewport reserving single-finger drag for orbit/selection); two
+// pointers pinch-zoom + pan the graph. A plain tap (no drag) resolves via hitTest
+// into tapSocket/selectNode.
+function bindNodeEditorPointers(ed){
+  var cv=ed.canvas;if(!cv)return;
+  cv.addEventListener('pointerdown',function(e){
+    cv.setPointerCapture(e.pointerId);
+    var r=cv.getBoundingClientRect(),lx=e.clientX-r.left,ly=e.clientY-r.top;
+    ed.ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY});
+    ed._clickStart={x:e.clientX,y:e.clientY,t:Date.now(),id:e.pointerId,moved:false};
+    if(ed.ptrs.size===1){
+      var hit=ed.hitTest(lx,ly);
+      if(hit&&hit.kind==='node'){ed._dragNode=hit.nodeId;ed._dragMoved=false;}}
+    else{ed._dragNode=null;}});
+  cv.addEventListener('pointermove',function(e){
+    var p=ed.ptrs.get(e.pointerId);if(!p)return;
+    var dx=e.clientX-p.x,dy=e.clientY-p.y;p.x=e.clientX;p.y=e.clientY;
+    if(ed._clickStart&&ed._clickStart.id===e.pointerId&&Math.hypot(e.clientX-ed._clickStart.x,e.clientY-ed._clickStart.y)>6)ed._clickStart.moved=true;
+    if(ed.ptrs.size===1){
+      if(ed._dragNode){
+        var n=NodeGraph.findNode(ed.graph,ed._dragNode);
+        if(n){n.x+=dx/ed.zoom;n.y+=dy/ed.zoom;ed._dragMoved=true;ed.draw();}}}
+    else if(ed.ptrs.size===2){
+      var v=Array.from(ed.ptrs.values());
+      var d=Math.hypot(v[0].x-v[1].x,v[0].y-v[1].y);
+      var mid={x:(v[0].x+v[1].x)/2,y:(v[0].y+v[1].y)/2};
+      if(ed._lastDist)ed.zoom=clamp(ed.zoom*(d/ed._lastDist),.2,4);
+      ed._lastDist=d;
+      if(ed._lastMid){ed.tx+=mid.x-ed._lastMid.x;ed.ty+=mid.y-ed._lastMid.y;}
+      ed._lastMid=mid;ed._dragNode=null;ed._clickStart=null;
+      ed.draw();}});
+  function endPtr(e){
+    ed.ptrs.delete(e.pointerId);ed._lastDist=0;ed._lastMid=null;
+    var wasDrag=ed._dragNode,moved=ed._dragMoved;
+    ed._dragNode=null;ed._dragMoved=false;
+    if(wasDrag){ed.selectNode(wasDrag);if(active.view==='nodes')renderPanel();}
+    else if(ed._clickStart&&ed._clickStart.id===e.pointerId&&!ed._clickStart.moved&&!moved&&Date.now()-ed._clickStart.t<400){
+      var r=cv.getBoundingClientRect(),hit=ed.hitTest(e.clientX-r.left,e.clientY-r.top);
+      if(hit&&hit.kind==='socket')ed.tapSocket(hit.nodeId,hit.socket,hit.dir);
+      else if(hit&&hit.kind==='node')ed.selectNode(hit.nodeId);
+      else{ed.selectedNode=null;ed.pendingSocket=null;ed.draw();}
+      if(active.view==='nodes')renderPanel();}
+    ed._clickStart=null;ed.draw();}
+  cv.addEventListener('pointerup',endPtr);cv.addEventListener('pointercancel',endPtr);}
+
+var NodeUI=makeNodeEditor($('#nodesCanvas'));
+NodeUI.setGraph(NodeGraph.make(),NODE_DEMO);
+
+function panelNodes(b){
+  var ed=NodeUI;
+  b.appendChild(el('h2',{text:'Nodes'}));
+  b.appendChild(el('p',{class:'sub',text:'Wave G0 demo — shared node-graph editor framework.'}));
+  if(ed.catalogOpen){renderNodeCatalog(b,ed);return;}
+  var sel=ed.selectedNode?NodeGraph.findNode(ed.graph,ed.selectedNode):null;
+  if(sel){renderNodeInspector(b,ed,sel);return;}
+  b.appendChild(el('button',{class:'pri',style:'width:100%',text:'+ Add node',onclick:function(){ed.catalogOpen=true;ed._catalogQuery='';renderPanel();openSheet(true);}}));
+  b.appendChild(el('hr',{class:'sep'}));
+  b.appendChild(el('p',{class:'small muted',text:ed.graph.nodes.length+' node'+(ed.graph.nodes.length===1?'':'s')+' · '+ed.graph.links.length+' link'+(ed.graph.links.length===1?'':'s')}));
+  b.appendChild(el('p',{class:'small muted',text:'Tap a socket, then tap a compatible socket to connect. Tap a node to select & edit its params here. Drag a node body to move it. Pinch to zoom, two-finger drag to pan.'}));
+  b.appendChild(el('button',{style:'width:100%;margin-top:8px',text:'Clear graph',onclick:function(){ed.graph=NodeGraph.make();ed.selectedNode=null;ed.draw();renderPanel();}}));}
+function renderNodeCatalog(b,ed){
+  b.appendChild(el('div',{class:'section-title',text:'Add node'}));
+  b.appendChild(el('input',{type:'text',placeholder:'Search node types…',value:ed._catalogQuery||'',
+    oninput:function(e){ed._catalogQuery=e.target.value;renderPanel();}}));
+  var q=(ed._catalogQuery||'').trim().toLowerCase();
+  var list=el('div',{class:'modlist',style:'margin-top:8px'});
+  Object.keys(ed.registry).forEach(function(type){
+    var def=ed.registry[type];
+    if(q&&type.toLowerCase().indexOf(q)<0&&(def.title||'').toLowerCase().indexOf(q)<0)return;
+    var row=el('div',{class:'modrow'});
+    var top=el('div',{class:'top'});
+    top.appendChild(el('span',{class:'nm',text:def.title||type}));
+    top.appendChild(el('button',{class:'chip',text:'Add',onclick:function(){
+      var c=ed.screenToWorld((ed.canvas.clientWidth||300)/2,(ed.canvas.clientHeight||200)/2);
+      var n=ed.addNode(type,Math.round(c.x-NODE_W/2),Math.round(c.y-30));
+      ed.catalogOpen=false;ed._catalogQuery='';ed.selectNode(n.id);renderPanel();}}));
+    row.appendChild(top);list.appendChild(row);});
+  if(!list.children.length)list.appendChild(el('p',{class:'small muted',text:'No node types match "'+ed._catalogQuery+'"'}));
+  b.appendChild(list);
+  b.appendChild(el('button',{style:'width:100%;margin-top:10px',text:'Cancel',onclick:function(){ed.catalogOpen=false;renderPanel();}}));}
+function renderNodeInspector(b,ed,node){
+  var def=ed.registry[node.type]||{};
+  b.appendChild(el('div',{class:'section-title',text:(def.title||node.type)+'  ·  '+node.id}));
+  (def.params||[]).forEach(function(p){
+    var cur=(node.params&&node.params[p.name]!==undefined)?node.params[p.name]:p.default;
+    if(p.type==='enum'){
+      b.appendChild(el('label',{class:'fld',text:p.name}));
+      var row=el('div',{class:'chiprow',style:'margin-bottom:10px'});
+      (p.options||[]).forEach(function(opt){row.appendChild(el('button',{class:'chip'+(cur===opt?' on':''),text:opt,
+        onclick:function(){node.params[p.name]=opt;ed.draw();renderPanel();}}));});
+      b.appendChild(row);
+    }else{
+      b.appendChild(slider(p.name,p.min!=null?p.min:-10,p.max!=null?p.max:10,cur,.01,function(v){node.params[p.name]=v;ed.draw();}));}});
+  if(!(def.params||[]).length)b.appendChild(el('p',{class:'small muted',text:'No parameters.'}));
+  b.appendChild(el('hr',{class:'sep'}));
+  b.appendChild(el('div',{class:'grid2'},[
+    el('button',{text:'Duplicate',onclick:function(){ed.duplicateSelected();renderPanel();}}),
+    el('button',{text:'Delete',onclick:function(){ed.deleteSelected();renderPanel();}})]));
+  b.appendChild(el('button',{style:'width:100%;margin-top:8px',text:'Deselect',onclick:function(){ed.selectNode(null);renderPanel();}}));}
+
 function renderEditHud(){
   var hud=$('#editHud');if(!hud)return;
   hud.innerHTML='';
