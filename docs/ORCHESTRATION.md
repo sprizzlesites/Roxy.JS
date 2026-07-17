@@ -118,7 +118,7 @@ Wave definitions live in `docs/GAP_ANALYSIS.md` §4 — this table only tracks s
 | G4 | Compositor nodes (stills + video export hook) | TODO | | land before/with E1 |
 | G5 | Keyframeable node params (Track/Registry bridge) | TODO | | |
 | E1 | Video export (WebM guaranteed, MP4 progressive) | DONE | e0a11cf+7045605 | animate suite now 76; `exportVideo(opts)` fixed-timestep sampler→MediaRecorder/WebM (vp9 in headless), real non-empty Blob verified; PNG-zip fallback; `VideoExport.active` stands down the main loop; autosave v6. G4 compositor still to be wired into this same render loop |
-| E2 | Standalone Three.js code export | TODO | | |
+| E2 | Standalone Three.js code export | DONE | 4964ff2+a71d2bb+50d87b5 | animate suite now 85; `exportStandaloneJS({mode})` snippet or full-HTML; embeds the SAME sampler funcs `Anim.sample` calls (anti-duplication verified); E2E test runs the generated artifact in a fresh page + asserts playback. Deferred: env/PMREM IBL, compositor, live constraint/IK re-solve (replays keyed poses) |
 | F1-F7 | Polish & stretch (see GAP_ANALYSIS §4 Phase F) | TODO | | |
 
 ## 7. End-state acceptance (what "done" means)
