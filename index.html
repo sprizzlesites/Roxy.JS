@@ -3955,6 +3955,144 @@ function setPositionVF(M,offset){
           F:M.F.map(function(f){return f.slice();}),
           UV:M.UV?M.UV.map(function(u){return u.slice();}):null};}
 
+var NODE_GEO={
+  // ---------------- Input ----------------
+  GroupInput:{title:'Group Input',color:'#ffd76c',
+    inputs:[],outputs:[{name:'geometry',kind:'geometry'}],params:[],
+    eval:function(){return {geometry:cloneGeoVF(GeoBake.inputGeometry)};}},
+  GeoValue:{title:'Value',color:'#6cc6ff',
+    inputs:[],outputs:[{name:'value',kind:'float'}],
+    params:[{name:'value',type:'float',default:0,min:-1000,max:1000}],
+    eval:function(inputs,params){return {value:params.value};}},
+  GeoVector:{title:'Vector',color:'#9be0a3',
+    inputs:[],outputs:[{name:'vector',kind:'vec'}],
+    params:[{name:'x',type:'float',default:0,min:-100,max:100},{name:'y',type:'float',default:0,min:-100,max:100},{name:'z',type:'float',default:0,min:-100,max:100}],
+    eval:function(inputs,params){return {vector:{x:params.x,y:params.y,z:params.z}};}},
+  GeoPosition:{title:'Position',color:'#9be0a3',approx:true, // reads the shared per-pass GeoField snapshot — see FIELDS SIMPLIFICATION note above
+    inputs:[],outputs:[{name:'vector',kind:'vec'}],params:[],
+    eval:function(){return {vector:{x:GeoField.x,y:GeoField.y,z:GeoField.z}};}},
+  GeoNormal:{title:'Normal',color:'#9be0a3',approx:true,
+    inputs:[],outputs:[{name:'vector',kind:'vec'}],params:[],
+    eval:function(){return {vector:{x:GeoField.nx,y:GeoField.ny,z:GeoField.nz}};}},
+  GeoIndex:{title:'Index',color:'#6cc6ff',approx:true,
+    inputs:[],outputs:[{name:'index',kind:'float'}],params:[],
+    eval:function(){return {index:GeoField.index};}},
+  GeoRandom:{title:'Random Value',color:'#6cc6ff',
+    inputs:[],outputs:[{name:'value',kind:'float'}],
+    params:[{name:'seed',type:'float',default:0,min:0,max:1000},{name:'min',type:'float',default:0,min:-100,max:100},{name:'max',type:'float',default:1,min:-100,max:100}],
+    eval:function(inputs,params){var h=hash3(params.seed,17.7,31.3);return {value:params.min+(params.max-params.min)*h};}},
+
+  // ---------------- Primitives (wrap THREE's builders + the existing geoToVF welder — see the
+  // topology helpers section far above; PRIMS itself uses the same THREE builders for Build-tab
+  // primitives, so this is the same reuse, routed through the weld step PRIMS doesn't need) ----
+  GeoCube:{title:'Cube',color:'#ff8fb1',
+    inputs:[],outputs:[{name:'geometry',kind:'geometry'}],
+    params:[{name:'size',type:'float',default:1,min:.01,max:20}],
+    eval:function(inputs,params){return {geometry:geoToVF(new THREE.BoxGeometry(params.size,params.size,params.size))};}},
+  GeoUVSphere:{title:'UV Sphere',color:'#ff8fb1',
+    inputs:[],outputs:[{name:'geometry',kind:'geometry'}],
+    params:[{name:'radius',type:'float',default:.6,min:.01,max:20},{name:'segments',type:'float',default:16,min:3,max:64},{name:'rings',type:'float',default:12,min:2,max:64}],
+    eval:function(inputs,params){return {geometry:geoToVF(new THREE.SphereGeometry(params.radius,Math.round(params.segments),Math.round(params.rings)))};}},
+  GeoCylinder:{title:'Cylinder',color:'#ff8fb1',
+    inputs:[],outputs:[{name:'geometry',kind:'geometry'}],
+    params:[{name:'radius',type:'float',default:.5,min:.01,max:20},{name:'height',type:'float',default:1,min:.01,max:20},{name:'segments',type:'float',default:16,min:3,max:64}],
+    eval:function(inputs,params){return {geometry:geoToVF(new THREE.CylinderGeometry(params.radius,params.radius,params.height,Math.round(params.segments)))};}},
+  GeoCone:{title:'Cone',color:'#ff8fb1',
+    inputs:[],outputs:[{name:'geometry',kind:'geometry'}],
+    params:[{name:'radius',type:'float',default:.5,min:.01,max:20},{name:'height',type:'float',default:1,min:.01,max:20},{name:'segments',type:'float',default:16,min:3,max:64}],
+    eval:function(inputs,params){return {geometry:geoToVF(new THREE.ConeGeometry(params.radius,params.height,Math.round(params.segments)))};}},
+  GeoGrid:{title:'Grid',color:'#ff8fb1',
+    inputs:[],outputs:[{name:'geometry',kind:'geometry'}],
+    params:[{name:'sizeX',type:'float',default:1,min:.01,max:20},{name:'sizeY',type:'float',default:1,min:.01,max:20},{name:'subX',type:'float',default:1,min:1,max:64},{name:'subY',type:'float',default:1,min:1,max:64}],
+    eval:function(inputs,params){var g=new THREE.PlaneGeometry(params.sizeX,params.sizeY,Math.round(params.subX),Math.round(params.subY));g.rotateX(-Math.PI/2);return {geometry:geoToVF(g)};}},
+  GeoIcoSphere:{title:'Ico Sphere',color:'#ff8fb1',
+    inputs:[],outputs:[{name:'geometry',kind:'geometry'}],
+    params:[{name:'radius',type:'float',default:.6,min:.01,max:20},{name:'subdivisions',type:'float',default:1,min:0,max:5}],
+    eval:function(inputs,params){return {geometry:geoToVF(new THREE.IcosahedronGeometry(params.radius,Math.round(params.subdivisions)))};}},
+
+  // ---------------- Mesh ops (wrap the reused cores above + subdivStep/solidifyVF from the
+  // topology helpers section — the "big reuse win" per GAP_ANALYSIS §6.3) ----
+  GeoTransform:{title:'Transform',color:'#c9a6ff',
+    inputs:[{name:'geometry',kind:'geometry',default:null},{name:'translate',kind:'vec',default:{x:0,y:0,z:0}},{name:'rotate',kind:'vec',default:{x:0,y:0,z:0}},{name:'scale',kind:'vec',default:{x:1,y:1,z:1}}],
+    outputs:[{name:'geometry',kind:'geometry'}],params:[],
+    eval:function(inputs){return {geometry:transformVF(inputs.geometry||emptyGeoVF(),inputs.translate,inputs.rotate,inputs.scale)};}},
+  GeoJoin:{title:'Join Geometry',color:'#c9a6ff',
+    inputs:[{name:'geometryA',kind:'geometry',default:null},{name:'geometryB',kind:'geometry',default:null}],
+    outputs:[{name:'geometry',kind:'geometry'}],params:[],
+    eval:function(inputs){return {geometry:joinVF(inputs.geometryA||emptyGeoVF(),inputs.geometryB||emptyGeoVF())};}},
+  GeoExtrude:{title:'Extrude Mesh',color:'#c9a6ff',
+    inputs:[{name:'geometry',kind:'geometry',default:null}],
+    outputs:[{name:'geometry',kind:'geometry'}],
+    params:[{name:'distance',type:'float',default:.3,min:-10,max:10}],
+    eval:function(inputs,params){return {geometry:extrudeMeshVF(inputs.geometry||emptyGeoVF(),params.distance)};}},
+  GeoSubdivide:{title:'Subdivide',color:'#c9a6ff',
+    inputs:[{name:'geometry',kind:'geometry',default:null}],
+    outputs:[{name:'geometry',kind:'geometry'}],
+    params:[{name:'levels',type:'float',default:1,min:0,max:4}],
+    eval:function(inputs,params){
+      var M=cloneGeoVF(inputs.geometry||emptyGeoVF()),lv=Math.round(params.levels);
+      for(var i=0;i<lv;i++){if(M.F.length>150000)break;M=subdivStep(M);}
+      return {geometry:M};}},
+  GeoTriangulate:{title:'Triangulate',color:'#c9a6ff',
+    inputs:[{name:'geometry',kind:'geometry',default:null}],
+    outputs:[{name:'geometry',kind:'geometry'}],params:[],
+    eval:function(inputs){return {geometry:triangulateVF(inputs.geometry||emptyGeoVF())};}},
+  GeoFlipNormals:{title:'Flip Normals',color:'#c9a6ff',
+    inputs:[{name:'geometry',kind:'geometry',default:null}],
+    outputs:[{name:'geometry',kind:'geometry'}],params:[],
+    eval:function(inputs){var M=inputs.geometry||emptyGeoVF();
+      return {geometry:{V:M.V.map(function(v){return v.clone();}),F:M.F.map(function(f){return f.slice().reverse();}),UV:M.UV?M.UV.map(function(u){return u.slice();}):null}};}},
+  GeoRecalcNormals:{title:'Recalculate Normals',color:'#c9a6ff',
+    inputs:[{name:'geometry',kind:'geometry',default:null}],
+    outputs:[{name:'geometry',kind:'geometry'}],params:[],
+    eval:function(inputs){return {geometry:recalcNormalsVF(inputs.geometry||emptyGeoVF())};}},
+  GeoMergeByDistance:{title:'Merge by Distance',color:'#c9a6ff',
+    inputs:[{name:'geometry',kind:'geometry',default:null}],
+    outputs:[{name:'geometry',kind:'geometry'}],
+    params:[{name:'threshold',type:'float',default:.001,min:0,max:1}],
+    eval:function(inputs,params){return {geometry:weldGeoVF(inputs.geometry||emptyGeoVF(),params.threshold)};}},
+  GeoSolidify:{title:'Solidify',color:'#c9a6ff',
+    inputs:[{name:'geometry',kind:'geometry',default:null}],
+    outputs:[{name:'geometry',kind:'geometry'}],
+    params:[{name:'thickness',type:'float',default:.08,min:.001,max:2}],
+    eval:function(inputs,params){var M=inputs.geometry||emptyGeoVF();
+      return {geometry:triangulateVF(solidifyVF({V:M.V,UV:M.UV,F:M.F},params.thickness))};}}, // triangulateVF also launders solidifyVF's partial Vector3 reuse back to full independence — see IMMUTABILITY note
+  GeoSetPosition:{title:'Set Position',color:'#c9a6ff',
+    inputs:[{name:'geometry',kind:'geometry',default:null},{name:'offset',kind:'vec',default:{x:0,y:0,z:0}}],
+    outputs:[{name:'geometry',kind:'geometry'}],params:[],
+    eval:function(inputs){return {geometry:setPositionVF(inputs.geometry||emptyGeoVF(),inputs.offset)};}},
+
+  // ---------------- Output ----------------
+  GeoOutput:{title:'Group Output',color:'#ffd76c',
+    inputs:[{name:'geometry',kind:'geometry',default:null}],
+    outputs:[{name:'geometry',kind:'geometry'}],params:[],
+    eval:function(inputs){return {geometry:inputs.geometry||emptyGeoVF()};}}
+};
+
+// geoGraphOutputId(graph) -> the id of the graph's Group Output node (first match), or
+// null if there isn't one yet — same "find the terminal node" pattern renderNodeBakePanel
+// uses to find the shader graph's PrincipledOutput.
+function geoGraphOutputId(graph){
+  if(!graph)return null;
+  for(var i=0;i<graph.nodes.length;i++)if(graph.nodes[i].type==='GeoOutput')return graph.nodes[i].id;
+  return null;}
+
+// evalGeoGraph(graph,registry,outputNodeId,hostGeoVF) — the G3a interpreter entry point.
+// hostGeoVF (a geometry VALUE, not a BufferGeometry) is what Group Input reads back via
+// the GeoBake context, primed here before the single NodeGraph.evalGraph pass — the exact
+// same "prime a shared context, then call the generic evalGraph" pattern G1's
+// bakeShaderMaterial uses per-texel for TexCoord/Geometry (NodeBake). Returns
+// {geometry:...} (never null geometry — empty if the graph produced nothing), or null on
+// a graph error (missing/cyclic node — NodeGraph.evalGraph itself returns false then) or
+// a missing outputNodeId.
+function evalGeoGraph(graph,registry,outputNodeId,hostGeoVF){
+  if(!graph||!outputNodeId)return null;
+  GeoBake.inputGeometry=hostGeoVF||emptyGeoVF();
+  GeoField.x=GeoField.y=GeoField.z=0;GeoField.nx=GeoField.ny=0;GeoField.nz=1;GeoField.index=0;
+  var out=NodeGraph.evalGraph(graph,registry,outputNodeId);
+  if(!out)return null;
+  return {geometry:out.geometry||emptyGeoVF()};}
+
 /* ================================================================================
    Wave G0 — node-graph editor widget: canvas-2D rendering + touch interaction.
    makeNodeEditor(canvas) returns an editor object bound to one <canvas>. Redraws

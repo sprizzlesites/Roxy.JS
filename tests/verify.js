@@ -9,7 +9,7 @@ const SP = __dirname;
 
 // Debug handles injected inside the app IIFE (test copy only — repo file untouched)
 const INJECT = `
-window.__R={setView:setView,EM:EM,editState:editState,Sculpt:Sculpt,WeightPaint:WeightPaint,Knife:Knife,getModel:getModel,state:state,paint:paint,paintInit:paintInit,applyPaintTex:applyPaintTex,ensureAtlasUVs:ensureAtlasUVs,do3dPaint:do3dPaint,exportOBJ:exportOBJ,parseOBJ:parseOBJ,History:History,addModel:addModel,buildDonut:buildDonut,doAutosave:doAutosave,clearAutosave:clearAutosave,AUTOSAVE_KEY:AUTOSAVE_KEY,active:active,addPrim:addPrim,renameModel:renameModel,duplicateModel:duplicateModel,deleteModel:deleteModel,renderAssets:renderAssets,filterAssetGrid:filterAssetGrid,setAssetQuery:function(q){assetSearchQuery=q;filterAssetGrid();},applyEditSnap:applyEditSnap,addPlacement:addPlacement,sceneScene:sceneScene,disposeModelResources:disposeModelResources,resetHintsSeen:function(){try{localStorage.removeItem('roxyHints');}catch(e){}},syncPaintHud:syncPaintHud,snapView:snapView,pickColorAt2D:pickColorAt2D,pickColorAt3D:pickColorAt3D,setPaintColor:setPaintColor,setActiveModel:setActiveModel,resizeActive:resizeActive,renderEditHud:renderEditHud,makeModel:makeModel,makeMaterial:makeMaterial,rebuildModel:rebuildModel,tex:tex,addLight:addLight,frameObject:frameObject,viewState:viewState,invalidate:invalidate,buildProjectData:buildProjectData,loadProject:loadProject,saveProject:saveProject,NodeGraph:NodeGraph,NODE_DEMO:NODE_DEMO,NodeUI:(typeof NodeUI!=='undefined'?NodeUI:null),makeNodeEditor:(typeof makeNodeEditor!=='undefined'?makeNodeEditor:null),toast:toast,NODE_SHADER:(typeof NODE_SHADER!=='undefined'?NODE_SHADER:null),NodeBake:(typeof NodeBake!=='undefined'?NodeBake:null),bakeShaderMaterial:(typeof bakeShaderMaterial!=='undefined'?bakeShaderMaterial:null),nodeBakeState:(typeof nodeBakeState!=='undefined'?nodeBakeState:null)};
+window.__R={setView:setView,EM:EM,editState:editState,Sculpt:Sculpt,WeightPaint:WeightPaint,Knife:Knife,getModel:getModel,state:state,paint:paint,paintInit:paintInit,applyPaintTex:applyPaintTex,ensureAtlasUVs:ensureAtlasUVs,do3dPaint:do3dPaint,exportOBJ:exportOBJ,parseOBJ:parseOBJ,History:History,addModel:addModel,buildDonut:buildDonut,doAutosave:doAutosave,clearAutosave:clearAutosave,AUTOSAVE_KEY:AUTOSAVE_KEY,active:active,addPrim:addPrim,renameModel:renameModel,duplicateModel:duplicateModel,deleteModel:deleteModel,renderAssets:renderAssets,filterAssetGrid:filterAssetGrid,setAssetQuery:function(q){assetSearchQuery=q;filterAssetGrid();},applyEditSnap:applyEditSnap,addPlacement:addPlacement,sceneScene:sceneScene,disposeModelResources:disposeModelResources,resetHintsSeen:function(){try{localStorage.removeItem('roxyHints');}catch(e){}},syncPaintHud:syncPaintHud,snapView:snapView,pickColorAt2D:pickColorAt2D,pickColorAt3D:pickColorAt3D,setPaintColor:setPaintColor,setActiveModel:setActiveModel,resizeActive:resizeActive,renderEditHud:renderEditHud,makeModel:makeModel,makeMaterial:makeMaterial,rebuildModel:rebuildModel,tex:tex,addLight:addLight,frameObject:frameObject,viewState:viewState,invalidate:invalidate,buildProjectData:buildProjectData,loadProject:loadProject,saveProject:saveProject,NodeGraph:NodeGraph,NODE_DEMO:NODE_DEMO,NodeUI:(typeof NodeUI!=='undefined'?NodeUI:null),makeNodeEditor:(typeof makeNodeEditor!=='undefined'?makeNodeEditor:null),toast:toast,NODE_SHADER:(typeof NODE_SHADER!=='undefined'?NODE_SHADER:null),NodeBake:(typeof NodeBake!=='undefined'?NodeBake:null),bakeShaderMaterial:(typeof bakeShaderMaterial!=='undefined'?bakeShaderMaterial:null),nodeBakeState:(typeof nodeBakeState!=='undefined'?nodeBakeState:null),NODE_GEO:(typeof NODE_GEO!=='undefined'?NODE_GEO:null),evalGeoGraph:(typeof evalGeoGraph!=='undefined'?evalGeoGraph:null),geoGraphOutputId:(typeof geoGraphOutputId!=='undefined'?geoGraphOutputId:null),geoToVF:(typeof geoToVF!=='undefined'?geoToVF:null),vfToGeo:(typeof vfToGeo!=='undefined'?vfToGeo:null),cloneGeoVF:(typeof cloneGeoVF!=='undefined'?cloneGeoVF:null),emptyGeoVF:(typeof emptyGeoVF!=='undefined'?emptyGeoVF:null),applyGeoNodesModifier:(typeof applyGeoNodesModifier!=='undefined'?applyGeoNodesModifier:null),ensureModelGeoGraph:(typeof ensureModelGeoGraph!=='undefined'?ensureModelGeoGraph:null),switchNodeUIMode:(typeof switchNodeUIMode!=='undefined'?switchNodeUIMode:null),getNodeUIMode:function(){return (typeof nodeUIMode!=='undefined')?nodeUIMode:null;}};
 window.__setDownload=function(fn){download=fn;};
 `;
 
@@ -2113,6 +2113,148 @@ const server = http.createServer((req, res) => {
     if (!result || !result.baseColor) throw new Error('evalGraph over the editor-built graph did not yield a baseColor: ' + JSON.stringify(result));
   }));
 
+  // ---------------- Wave G3a: geometry nodes (interpreter + inputs/primitives/mesh-op nodes) ----------------
+  await step('NODE_GEO: Cube primitive evaluates to 8 verts / 12 triangular faces', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_GEO;
+    var g = NG.make();
+    var cube = NG.addNode(g, 'GeoCube', 0, 0, { size: 2 });
+    var out = NG.addNode(g, 'GeoOutput', 200, 0);
+    NG.connect(g, REG, [cube.id, 'geometry'], [out.id, 'geometry']);
+    var res = __R.evalGeoGraph(g, REG, out.id, null);
+    if (!res || !res.geometry) throw new Error('no geometry result');
+    if (res.geometry.V.length !== 8) throw new Error('expected 8 verts, got ' + res.geometry.V.length);
+    if (res.geometry.F.length !== 12) throw new Error('expected 12 triangular faces, got ' + res.geometry.F.length);
+    res.geometry.F.forEach(function (f) { if (f.length !== 3) throw new Error('non-triangular face: ' + JSON.stringify(f)); });
+  }));
+
+  await step('NODE_GEO: Transform translate moves every vertex by the vector', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_GEO;
+    var g = NG.make();
+    var cube = NG.addNode(g, 'GeoCube', 0, 0, { size: 1 });
+    var vec = NG.addNode(g, 'GeoVector', 0, 150, { x: 1, y: 2, z: 3 });
+    var xf = NG.addNode(g, 'GeoTransform', 200, 0);
+    var out = NG.addNode(g, 'GeoOutput', 400, 0);
+    NG.connect(g, REG, [cube.id, 'geometry'], [xf.id, 'geometry']);
+    NG.connect(g, REG, [vec.id, 'vector'], [xf.id, 'translate']);
+    NG.connect(g, REG, [xf.id, 'geometry'], [out.id, 'geometry']);
+    var before = __R.evalGeoGraph(g, REG, cube.id, null).geometry;
+    var after = __R.evalGeoGraph(g, REG, out.id, null).geometry;
+    if (before.V.length !== after.V.length) throw new Error('vertex count changed across Transform');
+    for (var i = 0; i < before.V.length; i++) {
+      var dx = after.V[i].x - before.V[i].x, dy = after.V[i].y - before.V[i].y, dz = after.V[i].z - before.V[i].z;
+      if (Math.abs(dx - 1) > 1e-6 || Math.abs(dy - 2) > 1e-6 || Math.abs(dz - 3) > 1e-6)
+        throw new Error('vertex ' + i + ' not translated by (1,2,3): got delta (' + dx + ',' + dy + ',' + dz + ')');
+    }
+  }));
+
+  await step('NODE_GEO: Join Geometry merges vert/face counts of two inputs', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_GEO;
+    var g = NG.make();
+    var a = NG.addNode(g, 'GeoCube', 0, 0, { size: 1 });
+    var b = NG.addNode(g, 'GeoUVSphere', 0, 150, { radius: .5, segments: 8, rings: 6 });
+    var join = NG.addNode(g, 'GeoJoin', 200, 75);
+    var out = NG.addNode(g, 'GeoOutput', 400, 75);
+    NG.connect(g, REG, [a.id, 'geometry'], [join.id, 'geometryA']);
+    NG.connect(g, REG, [b.id, 'geometry'], [join.id, 'geometryB']);
+    NG.connect(g, REG, [join.id, 'geometry'], [out.id, 'geometry']);
+    var vA = __R.evalGeoGraph(g, REG, a.id, null).geometry, vB = __R.evalGeoGraph(g, REG, b.id, null).geometry;
+    var joined = __R.evalGeoGraph(g, REG, out.id, null).geometry;
+    if (joined.V.length !== vA.V.length + vB.V.length) throw new Error('joined vert count mismatch: ' + joined.V.length + ' vs ' + (vA.V.length + vB.V.length));
+    if (joined.F.length !== vA.F.length + vB.F.length) throw new Error('joined face count mismatch: ' + joined.F.length + ' vs ' + (vA.F.length + vB.F.length));
+  }));
+
+  await step('NODE_GEO: Subdivide raises the face count', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_GEO;
+    var g = NG.make();
+    var cube = NG.addNode(g, 'GeoCube', 0, 0, { size: 1 });
+    var sub = NG.addNode(g, 'GeoSubdivide', 200, 0, { levels: 1 });
+    var out = NG.addNode(g, 'GeoOutput', 400, 0);
+    NG.connect(g, REG, [cube.id, 'geometry'], [sub.id, 'geometry']);
+    NG.connect(g, REG, [sub.id, 'geometry'], [out.id, 'geometry']);
+    var before = __R.evalGeoGraph(g, REG, cube.id, null).geometry;
+    var after = __R.evalGeoGraph(g, REG, out.id, null).geometry;
+    if (after.F.length <= before.F.length) throw new Error('subdivide did not raise face count: ' + before.F.length + ' -> ' + after.F.length);
+    if (after.F.length !== before.F.length * 4) throw new Error('expected exactly 4x face count (each tri -> 4), got ' + before.F.length + ' -> ' + after.F.length);
+  }));
+
+  await step('NODE_GEO: Solidify adds a shell (vert count grows, result is closed/manifold)', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_GEO;
+    var g = NG.make();
+    var grid = NG.addNode(g, 'GeoGrid', 0, 0, { sizeX: 1, sizeY: 1, subX: 1, subY: 1 });
+    var sol = NG.addNode(g, 'GeoSolidify', 200, 0, { thickness: .1 });
+    var out = NG.addNode(g, 'GeoOutput', 400, 0);
+    NG.connect(g, REG, [grid.id, 'geometry'], [sol.id, 'geometry']);
+    NG.connect(g, REG, [sol.id, 'geometry'], [out.id, 'geometry']);
+    var before = __R.evalGeoGraph(g, REG, grid.id, null).geometry;
+    var after = __R.evalGeoGraph(g, REG, out.id, null).geometry;
+    if (after.V.length !== before.V.length * 2) throw new Error('expected solidify to double the vert count (front+back shell), got ' + before.V.length + ' -> ' + after.V.length);
+    // "closed": every edge of the resulting triangle mesh must be shared by exactly 2 faces.
+    var ec = {};
+    after.F.forEach(function (f) {
+      for (var i = 0; i < 3; i++) {
+        var aI = f[i], bI = f[(i + 1) % 3], k = Math.min(aI, bI) + '_' + Math.max(aI, bI);
+        ec[k] = (ec[k] || 0) + 1;
+      }
+    });
+    var open = Object.keys(ec).filter(function (k) { return ec[k] !== 2; });
+    if (open.length) throw new Error('solidified shell is not closed/manifold: ' + open.length + ' edges not shared by exactly 2 faces');
+  }));
+
+  await step('NODE_GEO: Merge by Distance welds coincident verts', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_GEO;
+    var g = NG.make();
+    var a = NG.addNode(g, 'GeoCube', 0, 0, { size: 1 });
+    var b = NG.addNode(g, 'GeoCube', 0, 150, { size: 1 });
+    var join = NG.addNode(g, 'GeoJoin', 200, 75);
+    var merge = NG.addNode(g, 'GeoMergeByDistance', 400, 75, { threshold: .001 });
+    var out = NG.addNode(g, 'GeoOutput', 600, 75);
+    NG.connect(g, REG, [a.id, 'geometry'], [join.id, 'geometryA']);
+    NG.connect(g, REG, [b.id, 'geometry'], [join.id, 'geometryB']);
+    NG.connect(g, REG, [join.id, 'geometry'], [merge.id, 'geometry']);
+    NG.connect(g, REG, [merge.id, 'geometry'], [out.id, 'geometry']);
+    var joined = __R.evalGeoGraph(g, REG, join.id, null).geometry;
+    var welded = __R.evalGeoGraph(g, REG, out.id, null).geometry;
+    if (joined.V.length !== 16) throw new Error('sanity check failed: expected 16 verts pre-weld, got ' + joined.V.length);
+    if (welded.V.length !== 8) throw new Error('two identically-positioned cubes should weld down to 8 verts, got ' + welded.V.length);
+  }));
+
+  await step('NODE_GEO: Set Position with a constant vector offsets all verts', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_GEO;
+    var g = NG.make();
+    var cube = NG.addNode(g, 'GeoCube', 0, 0, { size: 1 });
+    var vec = NG.addNode(g, 'GeoVector', 0, 150, { x: .5, y: -.5, z: 2 });
+    var setPos = NG.addNode(g, 'GeoSetPosition', 200, 0);
+    var out = NG.addNode(g, 'GeoOutput', 400, 0);
+    NG.connect(g, REG, [cube.id, 'geometry'], [setPos.id, 'geometry']);
+    NG.connect(g, REG, [vec.id, 'vector'], [setPos.id, 'offset']);
+    NG.connect(g, REG, [setPos.id, 'geometry'], [out.id, 'geometry']);
+    var before = __R.evalGeoGraph(g, REG, cube.id, null).geometry;
+    var after = __R.evalGeoGraph(g, REG, out.id, null).geometry;
+    for (var i = 0; i < before.V.length; i++) {
+      var dx = after.V[i].x - before.V[i].x, dy = after.V[i].y - before.V[i].y, dz = after.V[i].z - before.V[i].z;
+      if (Math.abs(dx - .5) > 1e-6 || Math.abs(dy + .5) > 1e-6 || Math.abs(dz - 2) > 1e-6)
+        throw new Error('vertex ' + i + ' not offset by (.5,-.5,2): got delta (' + dx + ',' + dy + ',' + dz + ')');
+    }
+  }));
+
+  await step('NODE_GEO: Group Input -> Transform -> Output round-trips the host geometry transformed', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_GEO;
+    var g = NG.make();
+    var gi = NG.addNode(g, 'GroupInput', 0, 0);
+    var vec = NG.addNode(g, 'GeoVector', 0, 150, { x: 0, y: 1, z: 0 });
+    var xf = NG.addNode(g, 'GeoTransform', 200, 0);
+    var out = NG.addNode(g, 'GeoOutput', 400, 0);
+    NG.connect(g, REG, [gi.id, 'geometry'], [xf.id, 'geometry']);
+    NG.connect(g, REG, [vec.id, 'vector'], [xf.id, 'translate']);
+    NG.connect(g, REG, [xf.id, 'geometry'], [out.id, 'geometry']);
+    var hostThree = new THREE.BoxGeometry(1, 1, 1);
+    var hostVF = __R.geoToVF(hostThree);
+    var res = __R.evalGeoGraph(g, REG, out.id, hostVF);
+    if (res.geometry.V.length !== hostVF.V.length) throw new Error('Group Input did not round-trip vertex count');
+    for (var i = 0; i < hostVF.V.length; i++) {
+      if (Math.abs(res.geometry.V[i].y - (hostVF.V[i].y + 1)) > 1e-6) throw new Error('vertex ' + i + ' Y not translated by the Group Input host geometry\'s own values +1');
+    }
+  }));
   await page.evaluate(() => __R.setView('edit'));
   await page.waitForTimeout(400);
   await page.screenshot({ path: path.join(SP, 'mobile-edit.png') });
