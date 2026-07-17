@@ -9,7 +9,7 @@ const SP = __dirname;
 
 // Debug handles injected inside the app IIFE (test copy only — repo file untouched)
 const INJECT = `
-window.__R={setView:setView,EM:EM,editState:editState,Sculpt:Sculpt,WeightPaint:WeightPaint,Knife:Knife,getModel:getModel,state:state,paint:paint,paintInit:paintInit,applyPaintTex:applyPaintTex,ensureAtlasUVs:ensureAtlasUVs,do3dPaint:do3dPaint,exportOBJ:exportOBJ,parseOBJ:parseOBJ,History:History,addModel:addModel,buildDonut:buildDonut,doAutosave:doAutosave,clearAutosave:clearAutosave,AUTOSAVE_KEY:AUTOSAVE_KEY,active:active,addPrim:addPrim,renameModel:renameModel,duplicateModel:duplicateModel,deleteModel:deleteModel,renderAssets:renderAssets,filterAssetGrid:filterAssetGrid,setAssetQuery:function(q){assetSearchQuery=q;filterAssetGrid();},applyEditSnap:applyEditSnap,addPlacement:addPlacement,sceneScene:sceneScene,disposeModelResources:disposeModelResources,resetHintsSeen:function(){try{localStorage.removeItem('roxyHints');}catch(e){}},syncPaintHud:syncPaintHud,snapView:snapView,pickColorAt2D:pickColorAt2D,pickColorAt3D:pickColorAt3D,setPaintColor:setPaintColor,setActiveModel:setActiveModel,resizeActive:resizeActive,renderEditHud:renderEditHud,makeModel:makeModel,makeMaterial:makeMaterial,rebuildModel:rebuildModel,tex:tex,addLight:addLight,frameObject:frameObject,viewState:viewState,invalidate:invalidate,buildProjectData:buildProjectData,loadProject:loadProject,saveProject:saveProject,NodeGraph:NodeGraph,NODE_DEMO:NODE_DEMO,NodeUI:(typeof NodeUI!=='undefined'?NodeUI:null),makeNodeEditor:(typeof makeNodeEditor!=='undefined'?makeNodeEditor:null),toast:toast};
+window.__R={setView:setView,EM:EM,editState:editState,Sculpt:Sculpt,WeightPaint:WeightPaint,Knife:Knife,getModel:getModel,state:state,paint:paint,paintInit:paintInit,applyPaintTex:applyPaintTex,ensureAtlasUVs:ensureAtlasUVs,do3dPaint:do3dPaint,exportOBJ:exportOBJ,parseOBJ:parseOBJ,History:History,addModel:addModel,buildDonut:buildDonut,doAutosave:doAutosave,clearAutosave:clearAutosave,AUTOSAVE_KEY:AUTOSAVE_KEY,active:active,addPrim:addPrim,renameModel:renameModel,duplicateModel:duplicateModel,deleteModel:deleteModel,renderAssets:renderAssets,filterAssetGrid:filterAssetGrid,setAssetQuery:function(q){assetSearchQuery=q;filterAssetGrid();},applyEditSnap:applyEditSnap,addPlacement:addPlacement,sceneScene:sceneScene,disposeModelResources:disposeModelResources,resetHintsSeen:function(){try{localStorage.removeItem('roxyHints');}catch(e){}},syncPaintHud:syncPaintHud,snapView:snapView,pickColorAt2D:pickColorAt2D,pickColorAt3D:pickColorAt3D,setPaintColor:setPaintColor,setActiveModel:setActiveModel,resizeActive:resizeActive,renderEditHud:renderEditHud,makeModel:makeModel,makeMaterial:makeMaterial,rebuildModel:rebuildModel,tex:tex,addLight:addLight,frameObject:frameObject,viewState:viewState,invalidate:invalidate,buildProjectData:buildProjectData,loadProject:loadProject,saveProject:saveProject,NodeGraph:NodeGraph,NODE_DEMO:NODE_DEMO,NodeUI:(typeof NodeUI!=='undefined'?NodeUI:null),makeNodeEditor:(typeof makeNodeEditor!=='undefined'?makeNodeEditor:null),toast:toast,NODE_SHADER:(typeof NODE_SHADER!=='undefined'?NODE_SHADER:null),NodeBake:(typeof NodeBake!=='undefined'?NodeBake:null),bakeShaderMaterial:(typeof bakeShaderMaterial!=='undefined'?bakeShaderMaterial:null),nodeBakeState:(typeof nodeBakeState!=='undefined'?nodeBakeState:null)};
 window.__setDownload=function(fn){download=fn;};
 `;
 
@@ -1918,6 +1918,199 @@ const server = http.createServer((req, res) => {
     if (!delBtn) throw new Error('inspector Delete button missing');
     delBtn.click();
     if (ed.graph.nodes.length !== 0) throw new Error('inspector Delete did not remove the node');
+  }));
+
+  // ---------------- Wave G1: shader nodes (baked-map path) ----------------
+  await step('NODE_SHADER: Checker texture alternates 0/1 across UV at a fixed scale', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_SHADER, NB = __R.NodeBake;
+    var g = NG.make();
+    var tc = NG.addNode(g, 'TexCoord', 0, 0);
+    var chk = NG.addNode(g, 'CheckerTex', 200, 0, { scale: 8 });
+    NG.connect(g, REG, [tc.id, 'uv'], [chk.id, 'uv']);
+    var results = [];
+    for (var i = 0; i < 4; i++) {
+      NB.u = (i + 0.5) / 8; NB.v = 0.01;
+      results.push(NG.evalGraph(g, REG, chk.id).fac);
+    }
+    var expected = [0, 1, 0, 1];
+    for (var j = 0; j < 4; j++) if (results[j] !== expected[j]) throw new Error('checker not alternating: ' + JSON.stringify(results));
+  }));
+
+  await step('NODE_SHADER: Gradient texture fac is monotonic (and exact) along U for type=linear', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_SHADER, NB = __R.NodeBake;
+    var g = NG.make();
+    var tc = NG.addNode(g, 'TexCoord', 0, 0);
+    var gr = NG.addNode(g, 'GradientTex', 200, 0, { type: 'linear' });
+    NG.connect(g, REG, [tc.id, 'uv'], [gr.id, 'uv']);
+    var prev = -1;
+    for (var i = 0; i <= 4; i++) {
+      NB.u = i / 4; NB.v = 0.5;
+      var fac = NG.evalGraph(g, REG, gr.id).fac;
+      if (fac < prev - 1e-9) throw new Error('gradient not monotonic at step ' + i + ': ' + fac + ' < ' + prev);
+      if (Math.abs(fac - i / 4) > 1e-9) throw new Error('linear gradient fac should equal u exactly: got ' + fac + ' expected ' + i / 4);
+      prev = fac;
+    }
+  }));
+
+  await step('NODE_SHADER: Math node ops are exact (div/min/max/pow/sin)', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_SHADER;
+    function runOp(op, a, b) {
+      var g = NG.make();
+      var va = NG.addNode(g, 'Value', 0, 0, { value: a });
+      var vb = NG.addNode(g, 'Value', 0, 60, { value: b });
+      var m = NG.addNode(g, 'Math', 200, 0, { op: op });
+      NG.connect(g, REG, [va.id, 'out'], [m.id, 'a']);
+      NG.connect(g, REG, [vb.id, 'out'], [m.id, 'b']);
+      return NG.evalGraph(g, REG, m.id).out;
+    }
+    var cases = [['div', 9, 3, 3], ['min', 4, 9, 4], ['max', 4, 9, 9], ['pow', 2, 5, 32], ['sin', Math.PI / 2, 0, 1]];
+    cases.forEach(function (c) {
+      var got = runOp(c[0], c[1], c[2]);
+      if (Math.abs(got - c[3]) > 1e-6) throw new Error('Math ' + c[0] + ' expected ' + c[3] + ' got ' + got);
+    });
+  }));
+
+  await step('NODE_SHADER: MapRange remaps exactly, honoring clamp on/off', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_SHADER;
+    var g = NG.make();
+    var v = NG.addNode(g, 'Value', 0, 0, { value: .5 });
+    var mr = NG.addNode(g, 'MapRange', 200, 0, { fromMin: 0, fromMax: 1, toMin: 0, toMax: 10 });
+    NG.connect(g, REG, [v.id, 'out'], [mr.id, 'value']);
+    var out1 = NG.evalGraph(g, REG, mr.id).result;
+    if (Math.abs(out1 - 5) > 1e-9) throw new Error('MapRange expected 5, got ' + out1);
+    v.params.value = 2;
+    var out2 = NG.evalGraph(g, REG, mr.id).result;
+    if (Math.abs(out2 - 10) > 1e-9) throw new Error('MapRange clamp=on expected 10, got ' + out2);
+    mr.params.clampMode = 'off';
+    var out3 = NG.evalGraph(g, REG, mr.id).result;
+    if (Math.abs(out3 - 20) > 1e-9) throw new Error('MapRange clamp=off expected 20, got ' + out3);
+  }));
+
+  await step('NODE_SHADER: Clamp node clamps exactly to [min,max]', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_SHADER;
+    var g = NG.make();
+    var v = NG.addNode(g, 'Value', 0, 0, { value: 1.5 });
+    var c = NG.addNode(g, 'Clamp', 200, 0, { min: 0, max: 1 });
+    NG.connect(g, REG, [v.id, 'out'], [c.id, 'value']);
+    if (NG.evalGraph(g, REG, c.id).result !== 1) throw new Error('Clamp expected 1');
+    v.params.value = -0.5;
+    if (NG.evalGraph(g, REG, c.id).result !== 0) throw new Error('Clamp expected 0');
+  }));
+
+  await step('NODE_SHADER: ColorRamp interpolates exactly between editable stops', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_SHADER;
+    var g = NG.make();
+    var v = NG.addNode(g, 'Value', 0, 0, { value: .25 });
+    var cr = NG.addNode(g, 'ColorRamp', 200, 0, { pos0: 0, r0: 0, g0: 0, b0: 0, pos1: 1, r1: 1, g1: 1, b1: 1, pos2: 1, r2: 1, g2: 1, b2: 1 });
+    NG.connect(g, REG, [v.id, 'out'], [cr.id, 'fac']);
+    var c = NG.evalGraph(g, REG, cr.id).color;
+    if (Math.abs(c.r - .25) > 1e-9 || Math.abs(c.g - .25) > 1e-9 || Math.abs(c.b - .25) > 1e-9)
+      throw new Error('ColorRamp expected {.25,.25,.25}, got ' + JSON.stringify(c));
+  }));
+
+  await step('NODE_SHADER: MixColor (mix mode) lerps color1->color2 by fac exactly', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_SHADER;
+    var g = NG.make();
+    var f = NG.addNode(g, 'Value', 0, 0, { value: .3 });
+    var c1 = NG.addNode(g, 'RGB', 0, 60, { r: 0, g: 0, b: 0 });
+    var c2 = NG.addNode(g, 'RGB', 0, 120, { r: 1, g: 1, b: 1 });
+    var mix = NG.addNode(g, 'MixColor', 200, 0, { mode: 'mix' });
+    NG.connect(g, REG, [f.id, 'out'], [mix.id, 'fac']);
+    NG.connect(g, REG, [c1.id, 'color'], [mix.id, 'color1']);
+    NG.connect(g, REG, [c2.id, 'color'], [mix.id, 'color2']);
+    var c = NG.evalGraph(g, REG, mix.id).color;
+    if (Math.abs(c.r - .3) > 1e-9 || Math.abs(c.g - .3) > 1e-9 || Math.abs(c.b - .3) > 1e-9)
+      throw new Error('MixColor expected {.3,.3,.3}, got ' + JSON.stringify(c));
+  }));
+
+  await step('NODE_SHADER: CombineRGB -> SeparateRGB round-trips r/g/b exactly', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_SHADER;
+    var g = NG.make();
+    var vr = NG.addNode(g, 'Value', 0, 0, { value: .2 });
+    var vg = NG.addNode(g, 'Value', 0, 40, { value: .5 });
+    var vb = NG.addNode(g, 'Value', 0, 80, { value: .9 });
+    var comb = NG.addNode(g, 'CombineRGB', 200, 0);
+    NG.connect(g, REG, [vr.id, 'out'], [comb.id, 'r']);
+    NG.connect(g, REG, [vg.id, 'out'], [comb.id, 'g']);
+    NG.connect(g, REG, [vb.id, 'out'], [comb.id, 'b']);
+    var sep = NG.addNode(g, 'SeparateRGB', 400, 0);
+    NG.connect(g, REG, [comb.id, 'color'], [sep.id, 'color']);
+    var out = NG.evalGraph(g, REG, sep.id);
+    if (Math.abs(out.r - .2) > 1e-9 || Math.abs(out.g - .5) > 1e-9 || Math.abs(out.b - .9) > 1e-9)
+      throw new Error('CombineRGB->SeparateRGB round-trip mismatch: ' + JSON.stringify(out));
+  }));
+
+  await step('NODE_SHADER bake: Checker -> Base Color produces a texture with >1 distinct color', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_SHADER;
+    var m = __R.makeModel('BakeTestA', [{ geo: new THREE.BoxGeometry(1, 1, 1), mat: __R.makeMaterial({}) }]);
+    __R.addModel(m); __R.setActiveModel(m.userData.id);
+    var g = NG.make();
+    var tc = NG.addNode(g, 'TexCoord', 0, 0);
+    var chk = NG.addNode(g, 'CheckerTex', 200, 0, { scale: 4 });
+    var out = NG.addNode(g, 'PrincipledOutput', 400, 0);
+    NG.connect(g, REG, [tc.id, 'uv'], [chk.id, 'uv']);
+    NG.connect(g, REG, [chk.id, 'color'], [out.id, 'baseColor']);
+    var res = __R.bakeShaderMaterial(g, REG, out.id, 32, m, 0);
+    if (res.baked.indexOf('map') < 0) throw new Error('baseColor channel not reported baked: ' + JSON.stringify(res));
+    var part = m.userData.parts[0];
+    var canvas = part.mat.map.image;
+    var ctx = canvas.getContext('2d');
+    var data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    var seen = {};
+    for (var i = 0; i < data.length; i += 4) seen[data[i] + ',' + data[i + 1] + ',' + data[i + 2]] = true;
+    if (Object.keys(seen).length < 2) throw new Error('expected >1 distinct color in baked checker map, got ' + Object.keys(seen).length);
+  }));
+
+  await step('NODE_SHADER bake: assigns the map onto the part material and flags needsUpdate', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_SHADER;
+    var m = __R.makeModel('BakeTestB', [{ geo: new THREE.BoxGeometry(1, 1, 1), mat: __R.makeMaterial({}) }]);
+    __R.addModel(m); __R.setActiveModel(m.userData.id);
+    var part = m.userData.parts[0];
+    var prevVersion = part.mat.version;
+    var g = NG.make();
+    var rgb = NG.addNode(g, 'RGB', 0, 0, { r: .9, g: .1, b: .2 });
+    var out = NG.addNode(g, 'PrincipledOutput', 200, 0);
+    NG.connect(g, REG, [rgb.id, 'color'], [out.id, 'baseColor']);
+    __R.bakeShaderMaterial(g, REG, out.id, 16, m, 0);
+    if (!part.mat.map) throw new Error('material.map was not assigned by bake');
+    if (part.mat.map.image.width !== 16) throw new Error('baked map resolution mismatch: ' + part.mat.map.image.width);
+    // three.js Material.needsUpdate is a write-only accessor (setter bumps .version, no getter) --
+    // .version increasing is the observable proof that needsUpdate=true actually ran after the bake.
+    if (!(part.mat.version > prevVersion)) throw new Error('material.version did not increase -- needsUpdate=true was not flagged after bake');
+  }));
+
+  await step('NODE_SHADER bake: roughness channel bakes to roughnessMap independently of baseColor', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_SHADER;
+    var m = __R.makeModel('BakeTestC', [{ geo: new THREE.BoxGeometry(1, 1, 1), mat: __R.makeMaterial({}) }]);
+    __R.addModel(m); __R.setActiveModel(m.userData.id);
+    var part = m.userData.parts[0];
+    var g = NG.make();
+    var v = NG.addNode(g, 'Value', 0, 0, { value: .8 });
+    var out = NG.addNode(g, 'PrincipledOutput', 200, 0);
+    NG.connect(g, REG, [v.id, 'out'], [out.id, 'roughness']);
+    var res = __R.bakeShaderMaterial(g, REG, out.id, 8, m, 0);
+    if (res.baked.indexOf('roughnessMap') < 0) throw new Error('roughness channel not reported baked: ' + JSON.stringify(res));
+    if (!part.mat.roughnessMap) throw new Error('material.roughnessMap not set');
+    if (part.mat.map) throw new Error('baseColor was unconnected, material.map should stay unset');
+    var ctx = part.mat.roughnessMap.image.getContext('2d');
+    var d = ctx.getImageData(0, 0, 8, 8).data;
+    var expected = Math.round(.8 * 255);
+    if (Math.abs(d[0] - expected) > 2) throw new Error('roughness texel value mismatch: got ' + d[0] + ' expected ~' + expected);
+  }));
+
+  await step('NODE_SHADER: graph round-trips through the shared editor (add/connect via NodeUI, then evalGraph)', () => page.evaluate(() => {
+    var ed = __R.NodeUI, NG = __R.NodeGraph, REG = __R.NODE_SHADER;
+    ed.setGraph(NG.make(), REG);
+    var tc = ed.addNode('TexCoord', 0, 0);
+    var chk = ed.addNode('CheckerTex', 220, 0, { scale: 4 });
+    var out = ed.addNode('PrincipledOutput', 440, 0);
+    var ok1 = ed.connectSockets({ nodeId: tc.id, socket: 'uv', dir: 'out' }, { nodeId: chk.id, socket: 'uv', dir: 'in' });
+    var ok2 = ed.connectSockets({ nodeId: chk.id, socket: 'color', dir: 'out' }, { nodeId: out.id, socket: 'baseColor', dir: 'in' });
+    if (!ok1 || !ok2) throw new Error('editor-level connect failed: ' + ok1 + ',' + ok2);
+    if (ed.graph.links.length !== 2) throw new Error('expected 2 links in editor graph, got ' + ed.graph.links.length);
+    __R.NodeBake.u = 0.01; __R.NodeBake.v = 0.01;
+    var result = NG.evalGraph(ed.graph, ed.registry, out.id);
+    if (!result || !result.baseColor) throw new Error('evalGraph over the editor-built graph did not yield a baseColor: ' + JSON.stringify(result));
   }));
 
   await page.evaluate(() => __R.setView('edit'));
