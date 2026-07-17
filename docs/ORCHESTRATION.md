@@ -99,7 +99,7 @@ Wave definitions live in `docs/GAP_ANALYSIS.md` §4 — this table only tracks s
 | B3 | Shape keys / morph targets | TODO | | |
 | B4 | Vertex colors | TODO | | |
 | C1 | animate.html: armatures/bones/parenting/pose mode | DONE | a561a08 | animate suite now 28; slerp in Anim.sample; bone Registry ids `rig/bone:Name`; anim autosave format v2 |
-| C2 | Skinning bind + auto weights | TODO | | |
+| C2 | Skinning bind + auto weights | DONE | 3572a51 | animate suite now 67; `bindMeshToRig` SkinnedMesh, vgroups-named-after-bones or inverse-dist-to-bone-segment auto weights; autosave v5 stores bind intent; GLB skin export deferred |
 | C3 | Per-axis FK, CCD IK + pole targets, per-bone rotation limits | DONE | 58dc09c | animate suite now 36; `solveIK(chainBEs,target,iters,{maxStep,tolerance,pole})`; `clampBoneRotation` is the C4 Limit-constraint entry point; autosave v3 (additive) |
 | C4 | Constraints (copyLoc/copyRot/trackTo/limitRot, influence keyable) | DONE | 52007de | animate suite now 45; influence track ids use stable `con:<id>` not index; object-level constraints runtime-only (not serialized) |
 | D1 | Keyframe core (Track model + sampler) | TODO | | load-bearing for D/E |
@@ -109,7 +109,7 @@ Wave definitions live in `docs/GAP_ANALYSIS.md` §4 — this table only tracks s
 | D5 | Camera animation + path-follow | TODO | | |
 | D6 | Action clips (NLA-lite) | TODO | | |
 | D7 | Onion skinning | TODO | | |
-| G0 | Shared touch node-graph editor widget + registry/eval core | TODO | | blocks all other G waves |
+| G0 | Shared touch node-graph editor widget + registry/eval core | DONE | d93b2f1+4811314 | modeling suite now 106 (+18 node checks); `NodeGraph` eval core + `NodeUI`/`makeNodeEditor` canvas editor + `NODE_DEMO` registry. **Registry contract for G1/G3a/G4: read the G0 code — each node type = {title,inputs,outputs,params,eval}; socket `kind` equality gates connections.** Nodes tab added |
 | G1 | Shader nodes: baked-map path (texture/utility nodes, Principled output) | TODO | | |
 | G2 | Shader nodes: true GLSL compile (onBeforeCompile) + bake-for-export | TODO | | |
 | G3a | Geometry nodes: interpreter + inputs/primitives/mesh-op nodes | TODO | | |
