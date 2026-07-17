@@ -39,7 +39,11 @@ window.__A={Anim:Anim,Registry:Registry,resolvePath:resolvePath,setView:setView,
   bindMeshToRig:bindMeshToRig,unbindMesh:unbindMesh,bindModelToRig:bindModelToRig,unbindModel:unbindModel,
   recomputeAutoWeightsForModel:recomputeAutoWeightsForModel,activeModelGroup:activeModelGroup,
   SkinBinds:SkinBinds,serializeSkinBinds:serializeSkinBinds,applyPendingSkinBinds:applyPendingSkinBinds,
-  computeAutoWeightsForMesh:computeAutoWeightsForMesh,computeGroupWeightsForMesh:computeGroupWeightsForMesh};
+  computeAutoWeightsForMesh:computeAutoWeightsForMesh,computeGroupWeightsForMesh:computeGroupWeightsForMesh,
+  dom:dom,VideoExport:VideoExport,canRecordVideo:canRecordVideo,pickWebmMimeType:pickWebmMimeType,
+  pickMp4MimeType:pickMp4MimeType,pickMimeType:pickMimeType,computeExportFrameTimes:computeExportFrameTimes,
+  exportVideo:exportVideo,cancelVideoExport:cancelVideoExport,makeZip:makeZip,dataURLToBytes:dataURLToBytes,
+  panelExport:panelExport};
 `;
 
 const server = http.createServer((req, res) => {
@@ -1431,6 +1435,103 @@ function syntheticProject() {
     if (!post.isSkinned) throw new Error('demo.torso should be a SkinnedMesh again after reload, got ' + JSON.stringify(post));
     if (post.rigId !== pre.rigId) throw new Error('rebound rig id mismatch: expected ' + pre.rigId + ' got ' + post.rigId);
     if (post.source !== pre.source) throw new Error('rebound weight source mismatch: expected ' + pre.source + ' got ' + post.source);
+  });
+
+  // ---- Wave E1: video export (fixed-timestep render-through-sampler + MediaRecorder/WebM,
+  //      progressive-enhancement MP4, PNG-sequence .zip fallback) ----
+
+  await step('E1 frame grid: computeExportFrameTimes is deterministic and matches round((end-start)/1)+1', () => page.evaluate(() => {
+    const A = window.__A;
+    const frames = A.computeExportFrameTimes(10, 15);
+    const expectedCount = Math.round((15 - 10) / 1) + 1;
+    if (frames.length !== expectedCount) throw new Error('expected ' + expectedCount + ' frames, got ' + frames.length);
+    if (frames[0] !== 10 || frames[frames.length - 1] !== 15) throw new Error('frame range wrong: ' + JSON.stringify(frames));
+    for (let i = 1; i < frames.length; i++) if (frames[i] - frames[i - 1] !== 1) throw new Error('non-unit step at index ' + i);
+    const frames2 = A.computeExportFrameTimes(10, 15);
+    if (JSON.stringify(frames) !== JSON.stringify(frames2)) throw new Error('computeExportFrameTimes is not pure/deterministic');
+    const single = A.computeExportFrameTimes(7, 7);
+    if (single.length !== 1 || single[0] !== 7) throw new Error('single-frame range should yield exactly [7], got ' + JSON.stringify(single));
+  }));
+
+  await step('E1 fixed-timestep loop calls Anim.sample at exactly the expected frame times', async () => {
+    const res = await page.evaluate(async () => {
+      const A = window.__A;
+      const targetId = A.state.selTarget || Object.keys(A.Registry)[0];
+      const savedTracks = JSON.stringify(A.Anim.tracks);
+      A.Anim.tracks = [];
+      A.Anim.insertKey(targetId, 'position.x', 0);
+      A.resolveTarget(targetId).position.x = 2;
+      A.Anim.insertKey(targetId, 'position.x', 5);
+      const times = [];
+      const result = await A.exportVideo({ start: 0, end: 5, fps: 8, width: 64, height: 64, onFrame: t => times.push(t) });
+      A.Anim.tracks = JSON.parse(savedTracks);
+      return { times, frameCount: result.frameCount, mode: result.mode };
+    });
+    const expected = [0, 1, 2, 3, 4, 5];
+    if (JSON.stringify(res.times) !== JSON.stringify(expected)) throw new Error('frame times mismatch: ' + JSON.stringify(res.times));
+    if (res.frameCount !== 6) throw new Error('frameCount should be 6 (round((5-0)/1)+1), got ' + res.frameCount);
+  });
+
+  await step('E1 encoder: mimeType selection picks a supported WebM type (the guaranteed path)', () => page.evaluate(() => {
+    const A = window.__A;
+    const m = A.pickWebmMimeType();
+    if (!m) throw new Error('no supported WebM mimeType found (canRecordVideo=' + A.canRecordVideo() + ')');
+    if (m.indexOf('video/webm') !== 0) throw new Error('unexpected mimeType: ' + m);
+    if (typeof MediaRecorder === 'undefined' || !MediaRecorder.isTypeSupported(m)) throw new Error('picked mimeType is not actually reported supported by MediaRecorder');
+    const readout = A.pickMimeType(false);
+    if (readout !== m) throw new Error('format readout (webm requested) should match pickWebmMimeType, got ' + readout);
+    // MP4 is progressive enhancement only — never assume it; just check the picker never lies about support.
+    const mp4 = A.pickMp4MimeType();
+    if (mp4 && (typeof MediaRecorder === 'undefined' || !MediaRecorder.isTypeSupported(mp4))) throw new Error('pickMp4MimeType returned an unsupported type: ' + mp4);
+  }));
+
+  await step('E1 encoder: renderer.domElement.captureStream produces a stream with a live video track', () => page.evaluate(() => {
+    const A = window.__A;
+    if (!A.canRecordVideo()) throw new Error('captureStream/MediaRecorder unavailable in this environment (would use the PNG-zip fallback)');
+    const stream = A.dom.captureStream(24);
+    const tracks = stream.getVideoTracks();
+    if (!tracks.length) throw new Error('captureStream produced no video track');
+    if (tracks[0].readyState !== 'live') throw new Error('video track not live: ' + tracks[0].readyState);
+  }));
+
+  await step('E1 export: a short export (a few frames of a 2-key position animation) produces a non-empty Blob', async () => {
+    const res = await page.evaluate(async () => {
+      const A = window.__A;
+      const targetId = A.state.selTarget || Object.keys(A.Registry)[0];
+      const savedTracks = JSON.stringify(A.Anim.tracks);
+      A.Anim.tracks = [];
+      A.Anim.insertKey(targetId, 'position.y', 0);
+      A.resolveTarget(targetId).position.y = 1;
+      A.Anim.insertKey(targetId, 'position.y', 3);
+      const result = await A.exportVideo({ start: 0, end: 3, fps: 12, width: 48, height: 48 });
+      A.Anim.tracks = JSON.parse(savedTracks);
+      return { blobSize: result.blob.size, mimeType: result.mimeType, mode: result.mode, frameCount: result.frameCount };
+    });
+    if (res.frameCount !== 4) throw new Error('expected 4 frames (0..3), got ' + res.frameCount);
+    if (res.mode !== 'video') throw new Error('expected the MediaRecorder path in this environment, got ' + res.mode + ' (fallback engaged unexpectedly)');
+    // Headless-Chromium note: this environment's MediaRecorder does successfully flush a non-empty
+    // Blob for a captureStream+requestFrame-driven recording (verified manually before writing this
+    // check) — so we assert the real thing rather than just "the pipeline ran".
+    if (!res.blobSize || res.blobSize <= 0) throw new Error('exported Blob is empty (size=' + res.blobSize + ')');
+    if (!res.mimeType || res.mimeType.indexOf('video/webm') !== 0) throw new Error('expected a webm mimeType by default, got ' + res.mimeType);
+  });
+
+  await step('E1 determinism: identical keys produce the identical sampled frame-time sequence across two export runs', async () => {
+    const res = await page.evaluate(async () => {
+      const A = window.__A;
+      const targetId = A.state.selTarget || Object.keys(A.Registry)[0];
+      const savedTracks = JSON.stringify(A.Anim.tracks);
+      A.Anim.tracks = [];
+      A.Anim.insertKey(targetId, 'position.z', 0);
+      A.resolveTarget(targetId).position.z = 1;
+      A.Anim.insertKey(targetId, 'position.z', 4);
+      const t1 = [], t2 = [];
+      await A.exportVideo({ start: 0, end: 4, fps: 10, width: 48, height: 48, onFrame: t => t1.push(t) });
+      await A.exportVideo({ start: 0, end: 4, fps: 10, width: 48, height: 48, onFrame: t => t2.push(t) });
+      A.Anim.tracks = JSON.parse(savedTracks);
+      return { t1, t2 };
+    });
+    if (JSON.stringify(res.t1) !== JSON.stringify(res.t2)) throw new Error('frame-time sequences differ across identical runs: ' + JSON.stringify(res.t1) + ' vs ' + JSON.stringify(res.t2));
   });
 
   await browser.close();

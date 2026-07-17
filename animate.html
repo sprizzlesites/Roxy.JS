@@ -200,6 +200,7 @@ function el(t,a,kids){var n=document.createElement(t);a=a||{};for(var k in a){if
   else n.setAttribute(k,a[k]);}(kids||[]).forEach(function(c){if(c==null)return;n.appendChild(typeof c==='string'?document.createTextNode(c):c);});return n;}
 var toastT;function toast(m){var t=$('#toast');t.textContent=m;t.classList.add('show');clearTimeout(toastT);toastT=setTimeout(function(){t.classList.remove('show');},1800);}
 function clamp(x,a,b){return Math.max(a,Math.min(b,x));}
+function downloadURL(url,name){var a=el('a',{href:url,download:name});document.body.appendChild(a);a.click();a.remove();} // same pattern as index.html
 function icon(p){return '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">'+p+'</svg>';}
 var ICONS={
  pose:'<circle cx="12" cy="5" r="2"/><path d="M12 7v6M12 13l-4 6M12 13l4 6M8 10h8"/>',
@@ -322,7 +323,8 @@ function frameCurrent(){frameObject(poseScene.userData.modelHolder,vs);syncZoomK
 function updateCam(){var sp=Math.sin(vs.ph);
   vs.cam.position.set(vs.tx+vs.rad*sp*Math.cos(vs.th),vs.ty+vs.rad*Math.cos(vs.ph),vs.tz+vs.rad*sp*Math.sin(vs.th));vs.cam.lookAt(vs.tx,vs.ty,vs.tz);}
 function curSlot(){if(active.view==='export')return null;return $('#slot-'+active.view);}
-function resizeActive(){var slot=curSlot();if(!slot)return;var r=slot.getBoundingClientRect();if(r.width<2||r.height<2)return;
+function resizeActive(){if(VideoExport.active)return; // Wave E1: exportVideo owns renderer size/aspect while it's running
+  var slot=curSlot();if(!slot)return;var r=slot.getBoundingClientRect();if(r.width<2||r.height<2)return;
   renderer.setSize(r.width,r.height);vs.cam.aspect=r.width/r.height;vs.cam.updateProjectionMatrix();}
 
 /* ---------------- RotBall orbit gizmo (same math as index.html, scoped to the single `vs`) ---------------- */
@@ -2297,6 +2299,216 @@ function panelTimeline(b){
       pushKeyUndo();Anim.tracks=[];Dope.clearSel();scheduleAnimAutosave();toast('Cleared (undo available on the sheet)');renderPanel();}}));
   }}
 
+/* ═══════════════════════════════════════════════════════
+   VIDEO EXPORT (Wave E1) — render the animation to a downloadable video.
+
+   exportVideo(opts) is a FIXED-TIMESTEP render-through-sampler: it steps
+   Anim.time across [start,end] one native frame at a time (the same
+   integer grid Anim.tracks/keys already live on — NOT wall-clock time),
+   calling Anim.sample(t) -> applyAllConstraints() -> renderer.render(
+   poseScene, vs.cam) at every step, exactly the sequence loop() runs
+   every live frame (see the Wave C4 comment there). Because sampling is
+   driven by this explicit loop instead of requestAnimationFrame deltas,
+   a slow device just takes longer to export — it never drops or smears
+   frames the way a real-time capture would. This is the same render-step
+   shape E2 (code export) and G4 (compositor, once it lands) are meant to
+   hook: sample -> pose -> render is the one true frame-production path.
+
+   Encoder: renderer.domElement.captureStream(fps) + MediaRecorder. WebM
+   is the GUARANTEED path — pickWebmMimeType() walks vp9/vp8/plain-webm
+   through MediaRecorder.isTypeSupported and always returns something in
+   any browser that has MediaRecorder at all. MP4 is only ever used when
+   isTypeSupported explicitly reports a codec string supported (progressive
+   enhancement, never assumed — see pickMp4MimeType). Frame-locking: each
+   render step calls the captured track's requestFrame() when the browser
+   exposes it (Media Capture spec, widely supported in Chromium), pushing
+   exactly one encoded frame per sampled Anim frame instead of relying on
+   captureStream's real-time auto-capture timer — this is what keeps the
+   encoded video's timing tied to the deterministic loop above rather than
+   to how fast setTimeout ticks actually landed. Browsers without
+   requestFrame() fall back to captureStream's own fps-paced automatic
+   capture, which is why the frame loop paces itself at ~1000/fps ms in
+   that case (so the automatic capture timer actually sees distinct
+   frames) but runs flat-out (no artificial delay) when requestFrame is
+   available.
+
+   Fallback: if MediaRecorder/captureStream isn't available at all, or no
+   candidate mimeType is supported, exportVideo degrades to a PNG-sequence
+   .zip (makeZip below — a ~60-line store-only/uncompressed ZIP writer, no
+   external library) built from the exact same fixed-timestep frame loop,
+   so a render is still produced rather than just failing. Toasts explain
+   the downgrade; nothing throws.
+
+   opts: {start,end (default Anim.start/end), fps (default Anim.fps),
+     width,height (default current canvas size), format:'webm'|'mp4'
+     (default 'webm'), onFrame(t,i,total) — test/inspection hook, called
+     right after each frame is sampled+rendered, before the encoder grabs
+     it, onProgress(framesDone,total)}.
+   Returns a Promise resolving {blob,mimeType,frameCount,frameTimes,
+     width,height,fps,mode} — mode is 'video' or 'png-zip'. Rejects with
+     Error({cancelled:true}) if cancelVideoExport() was called mid-run.
+   ═══════════════════════════════════════════════════════ */
+var VideoExport={active:false,cancelled:false,frame:0,total:0,mimeType:'',mode:''};
+var WEBM_MIME_CANDIDATES=['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'];
+var MP4_MIME_CANDIDATES=['video/mp4;codecs=avc1.42E01E','video/mp4;codecs=avc1','video/mp4'];
+function canRecordVideo(){return typeof dom.captureStream==='function'&&typeof window.MediaRecorder!=='undefined';}
+function pickWebmMimeType(){
+  if(typeof MediaRecorder==='undefined')return '';
+  for(var i=0;i<WEBM_MIME_CANDIDATES.length;i++)if(MediaRecorder.isTypeSupported(WEBM_MIME_CANDIDATES[i]))return WEBM_MIME_CANDIDATES[i];
+  return '';}
+function pickMp4MimeType(){
+  if(typeof MediaRecorder==='undefined')return '';
+  for(var i=0;i<MP4_MIME_CANDIDATES.length;i++)if(MediaRecorder.isTypeSupported(MP4_MIME_CANDIDATES[i]))return MP4_MIME_CANDIDATES[i];
+  return '';}
+// The Export panel's "Format" readout: WebM unless the caller explicitly asked for MP4
+// AND a codec string for it actually reports supported — pure progressive enhancement.
+function pickMimeType(preferMp4){if(preferMp4){var m=pickMp4MimeType();if(m)return m;}return pickWebmMimeType();}
+
+// Deterministic frame grid for a [start,end] export range: one sample per whole Anim
+// frame (step=1, the unit Anim.time/keys already use — see the header above), inclusive
+// of both ends. frameCount === round((end-start)/1)+1 by construction.
+function computeExportFrameTimes(start,end){
+  var s=Math.round(start),e=Math.round(end);if(e<s){var tmp=s;s=e;e=tmp;}
+  var frames=[];for(var t=s;t<=e;t++)frames.push(t);
+  if(!frames.length)frames.push(s);
+  return frames;}
+
+function snapshotRenderSize(){return {w:dom.width,h:dom.height,aspect:vs.cam.aspect};}
+function applyExportRenderSize(w,h){renderer.setPixelRatio(1);renderer.setSize(w,h,false);vs.cam.aspect=w/h;vs.cam.updateProjectionMatrix();}
+function restoreRenderSizeAfterExport(){renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));resizeActive();}
+
+function cancelVideoExport(){if(VideoExport.active)VideoExport.cancelled=true;}
+
+// The shared fixed-timestep stepper both the MediaRecorder path and the PNG-zip fallback
+// drive through. `grabFrame` is the only encoder-specific bit (requestFrame() vs
+// toDataURL()); everything else — sample/pose/render/progress/cancel — is common.
+function runFixedTimestepFrames(frameTimes,stepOpts){
+  var i=0;
+  function next(){
+    if(VideoExport.cancelled){stepOpts.onDone(true);return;}
+    if(i>=frameTimes.length){stepOpts.onDone(false);return;}
+    var t=frameTimes[i];
+    Anim.sample(t);
+    applyAllConstraints();
+    renderer.render(poseScene,vs.cam);
+    if(stepOpts.onFrame)stepOpts.onFrame(t,i,frameTimes.length);
+    if(stepOpts.grabFrame)stepOpts.grabFrame(t,i,frameTimes.length);
+    VideoExport.frame=i+1;
+    if(stepOpts.onProgress)stepOpts.onProgress(i+1,frameTimes.length);
+    i++;
+    setTimeout(next,stepOpts.paceMs||0);}
+  next();}
+
+function exportResDimsFromOpts(opts){
+  var w=Math.max(2,Math.round(opts.width||dom.clientWidth||1280));
+  var h=Math.max(2,Math.round(opts.height||dom.clientHeight||720));
+  return {w:w,h:h};}
+
+function exportVideo(opts){
+  opts=opts||{};
+  if(VideoExport.active)return Promise.reject(new Error('An export is already running'));
+  var start=opts.start!=null?opts.start:Anim.start,end=opts.end!=null?opts.end:Anim.end;
+  var fps=Math.max(1,Math.round(opts.fps||Anim.fps||24));
+  var dims=exportResDimsFromOpts(opts);
+  var frameTimes=computeExportFrameTimes(start,end);
+  var savedTime=Anim.time;
+  VideoExport.active=true;VideoExport.cancelled=false;VideoExport.frame=0;VideoExport.total=frameTimes.length;
+
+  function finishRestore(){VideoExport.active=false;Anim.sample(savedTime);syncScrubUI();restoreRenderSizeAfterExport();invalidate();}
+
+  if(!canRecordVideo()){
+    VideoExport.mode='png-zip';VideoExport.mimeType='application/zip';
+    toast('This browser can\'t record video — exporting a PNG-sequence .zip instead');
+    return exportPngSequenceZip(frameTimes,dims,opts,finishRestore);}
+
+  var wantMp4=opts.format==='mp4';
+  var mimeType=wantMp4?pickMp4MimeType():'';
+  if(wantMp4&&!mimeType)toast('MP4 not supported in this browser — exporting WebM instead');
+  if(!mimeType)mimeType=pickWebmMimeType();
+  if(!mimeType){ // no MediaRecorder mimeType at all — degrade to the zip fallback rather than fail
+    VideoExport.mode='png-zip';VideoExport.mimeType='application/zip';
+    toast('No supported video format here — exporting a PNG-sequence .zip instead');
+    return exportPngSequenceZip(frameTimes,dims,opts,finishRestore);}
+  VideoExport.mode='video';VideoExport.mimeType=mimeType;
+
+  applyExportRenderSize(dims.w,dims.h);updateCam();
+  var stream=dom.captureStream(fps);
+  var track=stream.getVideoTracks()[0];
+  var canRequestFrame=!!(track&&typeof track.requestFrame==='function');
+  var rec;
+  try{rec=new MediaRecorder(stream,{mimeType:mimeType});}
+  catch(e){finishRestore();return Promise.reject(e);}
+  var chunks=[];
+  rec.ondataavailable=function(e){if(e.data&&e.data.size>0)chunks.push(e.data);};
+
+  return new Promise(function(resolve,reject){
+    var settled=false;
+    rec.onerror=function(ev){if(settled)return;settled=true;finishRestore();reject((ev&&ev.error)||new Error('MediaRecorder error'));};
+    rec.onstop=function(){if(settled)return;settled=true;var cancelled=VideoExport.cancelled;finishRestore();
+      if(cancelled){reject(Object.assign(new Error('Export cancelled'),{cancelled:true}));return;}
+      resolve({blob:new Blob(chunks,{type:mimeType}),mimeType:mimeType,frameCount:frameTimes.length,
+        frameTimes:frameTimes,width:dims.w,height:dims.h,fps:fps,mode:'video'});};
+    rec.start();
+    runFixedTimestepFrames(frameTimes,{
+      onFrame:opts.onFrame,
+      grabFrame:function(){if(canRequestFrame)track.requestFrame();},
+      onProgress:opts.onProgress,
+      paceMs:canRequestFrame?0:Math.max(1,Math.round(1000/fps)),
+      onDone:function(){ // reached the end, or was cancelled — either way flush + stop; onstop settles the promise
+        try{rec.requestData();}catch(e){}
+        setTimeout(function(){try{rec.stop();}catch(e){if(!settled){settled=true;finishRestore();reject(e);}}},30);}});
+  });}
+
+/* ---------------- PNG-sequence .zip fallback (no MediaRecorder/captureStream) ---------------- */
+function exportPngSequenceZip(frameTimes,dims,opts,finishRestore){
+  applyExportRenderSize(dims.w,dims.h);updateCam();
+  var files=[];
+  return new Promise(function(resolve,reject){
+    runFixedTimestepFrames(frameTimes,{
+      onFrame:opts.onFrame,
+      grabFrame:function(t,i){var url=dom.toDataURL('image/png');files.push({name:'frame_'+pad4(i)+'.png',bytes:dataURLToBytes(url)});},
+      onProgress:opts.onProgress,
+      paceMs:0,
+      onDone:function(cancelled){
+        finishRestore();
+        if(cancelled){reject(Object.assign(new Error('Export cancelled'),{cancelled:true}));return;}
+        resolve({blob:makeZip(files),mimeType:'application/zip',frameCount:frameTimes.length,frameTimes:frameTimes,
+          width:dims.w,height:dims.h,mode:'png-zip',fallback:'png-zip'});}});
+  });}
+function pad4(n){n=''+n;while(n.length<4)n='0'+n;return n;}
+function dataURLToBytes(durl){var b64=durl.split(',')[1],bin=atob(b64),arr=new Uint8Array(bin.length);
+  for(var i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);return arr;}
+
+/* ---------------- minimal store-only (uncompressed) ZIP writer ----------------
+   ~60 lines, no external library: enough to bundle a PNG-per-frame fallback export
+   into one downloadable file. STORE method only (no deflate) — fine for PNGs, which
+   are already compressed. */
+var ZIP_CRC_TABLE=(function(){var t=new Uint32Array(256);for(var n=0;n<256;n++){var c=n;
+  for(var k=0;k<8;k++)c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);t[n]=c>>>0;}return t;})();
+function zipCrc32(bytes){var c=0xFFFFFFFF;for(var i=0;i<bytes.length;i++)c=ZIP_CRC_TABLE[(c^bytes[i])&0xFF]^(c>>>8);return (c^0xFFFFFFFF)>>>0;}
+function zipDosDateTime(){var d=new Date();
+  return {dt:((d.getFullYear()-1980)<<9)|((d.getMonth()+1)<<5)|d.getDate(),tm:(d.getHours()<<11)|(d.getMinutes()<<5)|(d.getSeconds()>>1)};}
+function makeZip(files){ // files: [{name,bytes:Uint8Array}] -> Blob (application/zip)
+  function u16(v){return [v&255,(v>>8)&255];}
+  function u32(v){return [v&255,(v>>8)&255,(v>>16)&255,(v>>>24)&255];}
+  var dtT=zipDosDateTime(),parts=[],central=[],offset=0;
+  files.forEach(function(f){
+    var nameBytes=new TextEncoder().encode(f.name),crc=zipCrc32(f.bytes),size=f.bytes.length;
+    var head=[0x50,0x4B,0x03,0x04].concat(u16(20),u16(0),u16(0),u16(dtT.tm),u16(dtT.dt),u32(crc),u32(size),u32(size),
+      u16(nameBytes.length),u16(0));
+    var rec=new Uint8Array(head.length+nameBytes.length+size);
+    rec.set(head,0);rec.set(nameBytes,head.length);rec.set(f.bytes,head.length+nameBytes.length);
+    parts.push(rec);central.push({nameBytes:nameBytes,crc:crc,size:size,offset:offset});offset+=rec.length;});
+  var centralStart=offset,centralParts=[];
+  central.forEach(function(c){
+    var head=[0x50,0x4B,0x01,0x02].concat(u16(20),u16(20),u16(0),u16(0),u16(dtT.tm),u16(dtT.dt),u32(c.crc),u32(c.size),u32(c.size),
+      u16(c.nameBytes.length),u16(0),u16(0),u16(0),u16(0),u32(0),u32(c.offset));
+    var rec=new Uint8Array(head.length+c.nameBytes.length);rec.set(head,0);rec.set(c.nameBytes,head.length);
+    centralParts.push(rec);offset+=rec.length;});
+  var centralSize=offset-centralStart;
+  var end=new Uint8Array([0x50,0x4B,0x05,0x06].concat(u16(0),u16(0),u16(central.length),u16(central.length),u32(centralSize),u32(centralStart),u16(0)));
+  return new Blob(parts.concat(centralParts).concat([end]),{type:'application/zip'});}
+
 function panelExport(b){
   b.appendChild(el('h2',{text:'Export'}));
   b.appendChild(el('p',{class:'sub',text:'Output tools are Phase E — they build on the Timeline\'s Track/sampler runtime above.'}));
@@ -2355,7 +2567,10 @@ window.addEventListener('resize',resizeActive);
 window.addEventListener('resize',function(){if(Dope.canvas&&Dope.canvas.isConnected)Dope.draw();});
 
 /* ---------------- main loop ---------------- */
-function loop(){requestAnimationFrame(loop);stepPlayback(performance.now());updateCam();
+function loop(){requestAnimationFrame(loop);
+  if(VideoExport.active){ // Wave E1: exportVideo drives its own sample/constrain/render steps on this
+    if(RotBall.el&&RotBall.el.style.display!=='none')RotBall.draw();return;} // same renderer+canvas — never race it
+  stepPlayback(performance.now());updateCam();
   var slot=curSlot();var act=ptrs.size>0;
   if((renderFrames>0||act)&&slot&&slot.contains(dom)){applyAllConstraints();renderer.render(poseScene,vs.cam);} // Wave C4: constraints settle right before render
   if(renderFrames>0&&!act)renderFrames--;
