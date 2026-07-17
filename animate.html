@@ -1546,8 +1546,12 @@ function scheduleAnimAutosave(){clearTimeout(animAutosaveTimer);animAutosaveTime
 // auto — see the Skinning section header above for why intent, not raw skin arrays, is what's
 // persisted). v2/v3/v4 saves load unchanged (missing field -> pendingSkinBinds stays null, no
 // binds reconstructed, exactly like a save from before skinning existed).
+// v6 (Wave E1): adds `video` (the Export tab's ExportState — resolution preset/fps/range/format).
+// Purely a UI-convenience field, read back into ExportState if present; older saves simply lack
+// it and ExportState keeps its just-initialized defaults (fps:Anim.fps etc) — no migration needed.
 function doAnimAutosave(){try{localStorage.setItem(ANIM_AUTOSAVE_KEY,JSON.stringify(
-  {v:5,fps:Anim.fps,start:Anim.start,end:Anim.end,loop:Anim.loop,tracks:Anim.tracks,rigs:serializeRigs(),skins:serializeSkinBinds()}));}catch(e){}}
+  {v:6,fps:Anim.fps,start:Anim.start,end:Anim.end,loop:Anim.loop,tracks:Anim.tracks,rigs:serializeRigs(),skins:serializeSkinBinds(),
+   video:typeof ExportState!=='undefined'?ExportState:undefined}));}catch(e){}}
 function tryRestoreAnimAutosave(){
   var raw;try{raw=localStorage.getItem(ANIM_AUTOSAVE_KEY);}catch(e){return false;}
   if(!raw)return false;
@@ -1557,6 +1561,10 @@ function tryRestoreAnimAutosave(){
   Anim.loop=data.loop!==false;Anim.tracks=data.tracks||[];
   var maxId=0;Anim.tracks.forEach(function(tr){var n=+(''+tr.id).replace(/\D/g,'');if(n>maxId)maxId=n;});trackIdc=maxId+1;
   pendingSkinBinds=(data.skins&&data.skins.length)?data.skins:null; // v5+; consumed by applyPendingSkinBinds() once the model is loaded
+  // v6+: merge saved Export-tab settings onto ExportState (already constructed by this point —
+  // this function only ever runs from the bottom init sequence, textually after ExportState's
+  // `var` assignment above). Guarded because it's also exercised standalone by the test harness.
+  if(data.video&&typeof ExportState!=='undefined')for(var k in data.video)if(k in ExportState)ExportState[k]=data.video[k];
   if(data.rigs&&data.rigs.length){data.rigs.forEach(rebuildRigFromSerialized);
     var rigIds=Object.keys(Rigs);if(rigIds.length&&!Arm.rigId)Arm.rigId=rigIds[0];} // v1 saves simply have no rigs to restore
   return true;}
@@ -2509,11 +2517,95 @@ function makeZip(files){ // files: [{name,bytes:Uint8Array}] -> Blob (applicatio
   var end=new Uint8Array([0x50,0x4B,0x05,0x06].concat(u16(0),u16(0),u16(central.length),u16(central.length),u32(centralSize),u32(centralStart),u16(0)));
   return new Blob(parts.concat(centralParts).concat([end]),{type:'application/zip'});}
 
+/* ---------------- Export tab UI state (resolution/fps/range/format — rides the anim
+   autosave as v6, additive; see doAnimAutosave/tryRestoreAnimAutosave below) ---------------- */
+var ExportState={resPreset:'720p',fps:Anim.fps,rangeMode:'all',rangeStart:Anim.start,rangeEnd:Anim.end,format:'webm'};
+function exportResDims(){
+  if(ExportState.resPreset==='720p')return {w:1280,h:720};
+  if(ExportState.resPreset==='1080p')return {w:1920,h:1080};
+  var w=Math.round(dom.clientWidth),h=Math.round(dom.clientHeight); // 'current': whatever the live canvas is showing right now
+  return {w:w>1?w:1280,h:h>1?h:720};}
+
+function runExportVideoUI(){
+  var dims=exportResDims();
+  var opts={
+    start:ExportState.rangeMode==='sub'?ExportState.rangeStart:Anim.start,
+    end:ExportState.rangeMode==='sub'?ExportState.rangeEnd:Anim.end,
+    fps:ExportState.fps,width:dims.w,height:dims.h,format:ExportState.format,
+    onProgress:function(f,total){ // surgical DOM update, not a full renderPanel() rebuild, so it stays smooth at export fps
+      var lbl=$('#exportProgressLbl'),bar=$('#exportProgressBar');var pct=total?Math.round(100*f/total):0;
+      if(lbl)lbl.textContent='Rendering frame '+f+' / '+total+' ('+pct+'%)';
+      if(bar)bar.style.width=pct+'%';}};
+  var p=exportVideo(opts); // VideoExport.active is set synchronously inside, before this returns
+  renderPanel();
+  p.then(function(res){
+    downloadURL(URL.createObjectURL(res.blob),exportFilename(res));
+    toast((res.fallback?'PNG sequence (.zip) ':'Video ')+'exported — '+res.frameCount+' frames');
+    renderPanel();})
+  .catch(function(e){
+    if(e&&e.cancelled)toast('Export cancelled');
+    else{toast('Export failed: '+((e&&e.message)||e));console.error(e);}
+    renderPanel();});}
+
+function exportFilename(res){
+  var ext=res.mode==='png-zip'?'zip':(res.mimeType&&res.mimeType.indexOf('mp4')>=0?'mp4':'webm');
+  return 'roxy_animation_'+Date.now()+'.'+ext;}
+
 function panelExport(b){
   b.appendChild(el('h2',{text:'Export'}));
-  b.appendChild(el('p',{class:'sub',text:'Output tools are Phase E — they build on the Timeline\'s Track/sampler runtime above.'}));
-  b.appendChild(el('div',{class:'section-title',text:'Video'}));
-  b.appendChild(el('button',{style:'width:100%',disabled:'disabled',text:'Render to MP4/WebM — coming in Wave E1'}));
+  b.appendChild(el('p',{class:'sub',text:'Render the animation to a downloadable video, driven by the same fixed-timestep sampler the Timeline uses to scrub.'}));
+  var busy=VideoExport.active;
+
+  b.appendChild(el('div',{class:'section-title',text:'Resolution'}));
+  var resRow=el('div',{style:'display:flex;gap:6px;flex-wrap:wrap'});
+  [['720p','720p'],['1080p','1080p'],['current','Current canvas']].forEach(function(r){
+    resRow.appendChild(el('button',{class:(ExportState.resPreset===r[0]?'on ':'')+'',style:'flex:1',disabled:busy?'disabled':null,text:r[1],
+      onclick:function(){ExportState.resPreset=r[0];renderPanel();}}));});
+  b.appendChild(resRow);
+  var dims=exportResDims();
+  b.appendChild(el('p',{class:'small muted',style:'margin-top:4px',text:dims.w+' × '+dims.h}));
+
+  b.appendChild(el('div',{class:'section-title',text:'Frame rate'}));
+  b.appendChild(numField('FPS',ExportState.fps,1,function(v){ExportState.fps=Math.max(1,Math.round(v));scheduleAnimAutosave();renderPanel();}));
+
+  b.appendChild(el('div',{class:'section-title',text:'Range'}));
+  var rangeRow=el('div',{style:'display:flex;gap:6px'});
+  [['all','Whole animation'],['sub','Sub-range']].forEach(function(r){
+    rangeRow.appendChild(el('button',{class:(ExportState.rangeMode===r[0]?'on':''),style:'flex:1',disabled:busy?'disabled':null,text:r[1],
+      onclick:function(){ExportState.rangeMode=r[0];
+        if(r[0]==='sub'){ExportState.rangeStart=Anim.start;ExportState.rangeEnd=Anim.end;}
+        scheduleAnimAutosave();renderPanel();}}));});
+  b.appendChild(rangeRow);
+  if(ExportState.rangeMode==='sub'){
+    b.appendChild(el('div',{class:'grid2',style:'margin-top:6px'},[
+      numField('Start frame',ExportState.rangeStart,1,function(v){ExportState.rangeStart=clamp(Math.round(v),Anim.start,Anim.end);scheduleAnimAutosave();renderPanel();}),
+      numField('End frame',ExportState.rangeEnd,1,function(v){ExportState.rangeEnd=clamp(Math.round(v),Anim.start,Anim.end);scheduleAnimAutosave();renderPanel();})]));}
+
+  b.appendChild(el('div',{class:'section-title',text:'Format'}));
+  var canRecord=canRecordVideo();
+  var mp4Type=canRecord?pickMp4MimeType():'';
+  var fmtRow=el('div',{style:'display:flex;gap:6px'});
+  fmtRow.appendChild(el('button',{class:ExportState.format==='webm'?'on':'',style:'flex:1',disabled:busy?'disabled':null,text:'WebM',
+    onclick:function(){ExportState.format='webm';scheduleAnimAutosave();renderPanel();}}));
+  fmtRow.appendChild(el('button',{class:ExportState.format==='mp4'?'on':'',style:'flex:1',disabled:(busy||!mp4Type)?'disabled':null,
+    text:'MP4'+(mp4Type?'':' (unsupported here)'),
+    onclick:function(){if(!mp4Type)return;ExportState.format='mp4';scheduleAnimAutosave();renderPanel();}}));
+  b.appendChild(fmtRow);
+  var chosenMime=canRecord?pickMimeType(ExportState.format==='mp4'):'';
+  b.appendChild(el('p',{class:'small muted',style:'margin-top:6px',
+    text:canRecord?('Format: '+(chosenMime||'none supported')):
+      'This browser can\'t record video (MediaRecorder/captureStream unavailable) — Export will produce a PNG-sequence .zip instead.'}));
+
+  b.appendChild(el('div',{class:'section-title',text:'Render'}));
+  if(busy){
+    var pct=VideoExport.total?Math.round(100*VideoExport.frame/VideoExport.total):0;
+    b.appendChild(el('p',{class:'small',id:'exportProgressLbl',text:'Rendering frame '+VideoExport.frame+' / '+VideoExport.total+' ('+pct+'%)'}));
+    b.appendChild(el('div',{style:'height:8px;border-radius:4px;background:var(--card);overflow:hidden;margin:4px 0 10px'},
+      [el('div',{id:'exportProgressBar',style:'height:100%;background:var(--pink);width:'+pct+'%'})]));
+    b.appendChild(el('button',{style:'width:100%',text:'Cancel export',onclick:function(){cancelVideoExport();}}));
+  }else{
+    b.appendChild(el('button',{class:'pri',id:'btnExportVideo',style:'width:100%',text:'Export Video',onclick:function(){runExportVideoUI();}}));}
+
   b.appendChild(el('div',{class:'section-title',text:'Code'}));
   b.appendChild(el('button',{style:'width:100%',disabled:'disabled',text:'Copy standalone Three.js code — coming in Wave E2'}));}
 

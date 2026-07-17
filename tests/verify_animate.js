@@ -43,7 +43,8 @@ window.__A={Anim:Anim,Registry:Registry,resolvePath:resolvePath,setView:setView,
   dom:dom,VideoExport:VideoExport,canRecordVideo:canRecordVideo,pickWebmMimeType:pickWebmMimeType,
   pickMp4MimeType:pickMp4MimeType,pickMimeType:pickMimeType,computeExportFrameTimes:computeExportFrameTimes,
   exportVideo:exportVideo,cancelVideoExport:cancelVideoExport,makeZip:makeZip,dataURLToBytes:dataURLToBytes,
-  panelExport:panelExport};
+  panelExport:panelExport,ExportState:ExportState,exportResDims:exportResDims,runExportVideoUI:runExportVideoUI,
+  exportFilename:exportFilename};
 `;
 
 const server = http.createServer((req, res) => {
@@ -666,7 +667,7 @@ function syntheticProject() {
     }, mkChain);
     const raw = await page.evaluate(() => localStorage.getItem(window.__A.ANIM_AUTOSAVE_KEY));
     const saved = JSON.parse(raw);
-    if (saved.v !== 5) throw new Error('autosave should be format v5 (bumped again by Wave C2 skins field), got ' + saved.v); // was v3 as of Wave C3, v4 as of C4
+    if (saved.v < 5) throw new Error('autosave should be format v5+ (bumped again by Wave C2 skins field, v6 by E1 video), got ' + saved.v); // was v3 as of Wave C3, v4 as of C4
     const savedRig = saved.rigs.find(r => r.name === 'LimitSaveRig');
     const savedBone = savedRig && savedRig.bones.find(b => b.limits);
     if (!savedBone || !savedBone.limits.z) throw new Error('limits did not serialize into the autosave payload');
@@ -817,7 +818,7 @@ function syntheticProject() {
     });
     const raw = await page.evaluate(() => localStorage.getItem(window.__A.ANIM_AUTOSAVE_KEY));
     const saved = JSON.parse(raw);
-    if (saved.v !== 5) throw new Error('autosave should be format v5, got ' + saved.v);
+    if (saved.v < 5) throw new Error('autosave should be format v5+, got ' + saved.v);
     const savedRig = saved.rigs.find(r => r.name === 'C4SaveRig');
     const savedSrc = savedRig && savedRig.bones.find(b => b.name === 'SaveSrc');
     if (!savedSrc || !savedSrc.constraints || savedSrc.constraints.length !== 2) throw new Error('constraints did not serialize: ' + JSON.stringify(savedSrc));
@@ -1224,7 +1225,7 @@ function syntheticProject() {
       localStorage.removeItem(A.ANIM_AUTOSAVE_KEY);
       return { v: saved.v, savedLoop: saved.loop, savedKeys, liveKeys, loopRestored, loopDefault };
     });
-    if (res.v !== 5) throw new Error('autosave format should be v5 (additive C2 bump), got ' + res.v);
+    if (res.v < 5) throw new Error('autosave format should be v5+ (additive C2/E1 bumps), got ' + res.v);
     if (res.savedLoop !== false) throw new Error('loop flag not persisted');
     if (res.savedKeys !== res.liveKeys) throw new Error('autosaved key times diverge from live tracks: ' + res.savedKeys + ' vs ' + res.liveKeys);
     if (res.loopRestored !== false) throw new Error('restore did not apply the saved loop flag');
@@ -1532,6 +1533,76 @@ function syntheticProject() {
       return { t1, t2 };
     });
     if (JSON.stringify(res.t1) !== JSON.stringify(res.t2)) throw new Error('frame-time sequences differ across identical runs: ' + JSON.stringify(res.t1) + ' vs ' + JSON.stringify(res.t2));
+  });
+
+  await step('E1 UI: Export tab renders resolution/fps/range/format controls; the Export button triggers the pipeline and disables controls while busy', async () => {
+    const res = await page.evaluate(async () => {
+      const A = window.__A;
+      A.setView('export');
+      A.ExportState.resPreset = 'current';
+      A.ExportState.rangeMode = 'sub';
+      A.ExportState.rangeStart = A.Anim.start;
+      A.ExportState.rangeEnd = Math.min(A.Anim.start + 2, A.Anim.end);
+      A.ExportState.fps = 12;
+      A.ExportState.format = 'webm';
+      A.renderPanel();
+      const findBtn = t => Array.from(document.querySelectorAll('#panelBody button')).find(b => b.textContent.trim() === t);
+      const before = findBtn('Export Video');
+      if (!before) return { err: 'no Export Video button in the Export panel' };
+      if (!findBtn('720p') || !findBtn('1080p') || !findBtn('Current canvas')) return { err: 'resolution preset buttons missing' };
+      if (!findBtn('WebM')) return { err: 'WebM format button missing' };
+      before.click(); // runExportVideoUI(): calls exportVideo() (sets VideoExport.active synchronously) then renderPanel()
+      const activeRightAfterClick = A.VideoExport.active;
+      const cancelBtn = findBtn('Cancel export');
+      const resButtonsDisabled = ['720p', '1080p', 'Current canvas'].every(t => { const b = findBtn(t); return b && b.disabled; });
+      const exportBtnGoneWhileBusy = !findBtn('Export Video');
+      let waited = 0;
+      while (A.VideoExport.active && waited < 8000) { await new Promise(r => setTimeout(r, 50)); waited += 50; }
+      return { activeRightAfterClick, hasCancelBtn: !!cancelBtn, resButtonsDisabled, exportBtnGoneWhileBusy, finishedInTime: !A.VideoExport.active };
+    });
+    if (res.err) throw new Error(res.err);
+    if (!res.activeRightAfterClick) throw new Error('VideoExport.active should be true synchronously right after clicking Export Video');
+    if (!res.hasCancelBtn) throw new Error('panel should show a Cancel export button while an export is running');
+    if (!res.resButtonsDisabled) throw new Error('resolution preset buttons should be disabled while an export is running');
+    if (!res.exportBtnGoneWhileBusy) throw new Error('the Export Video button should be replaced by the busy/progress UI while running');
+    if (!res.finishedInTime) throw new Error('export did not finish within 8s');
+  });
+
+  await step('E1 cancel: cancelVideoExport() stops a running export and it rejects with {cancelled:true}, leaving VideoExport.active false', async () => {
+    const res = await page.evaluate(async () => {
+      const A = window.__A;
+      const targetId = A.state.selTarget || Object.keys(A.Registry)[0];
+      const savedTracks = JSON.stringify(A.Anim.tracks);
+      A.Anim.tracks = [];
+      A.Anim.insertKey(targetId, 'position.x', 0);
+      A.resolveTarget(targetId).position.x = 1;
+      A.Anim.insertKey(targetId, 'position.x', 500);
+      const p = A.exportVideo({ start: 0, end: 500, fps: 30, width: 160, height: 120 });
+      setTimeout(() => A.cancelVideoExport(), 5);
+      let cancelled = false;
+      try { await p; } catch (e) { cancelled = !!(e && e.cancelled); }
+      const activeAfter = A.VideoExport.active;
+      const framesRendered = A.VideoExport.frame;
+      A.Anim.tracks = JSON.parse(savedTracks);
+      return { cancelled, activeAfter, framesRendered, total: 501 };
+    });
+    if (!res.cancelled) throw new Error('a cancelled export promise should reject with e.cancelled === true');
+    if (res.activeAfter) throw new Error('VideoExport.active should be false once a cancelled export settles');
+    if (res.framesRendered >= res.total) throw new Error('cancellation should have stopped the export before all ' + res.total + ' frames rendered (got ' + res.framesRendered + ')');
+  });
+
+  await step('E1 persistence: Export tab settings (resolution/fps/range/format) ride the anim autosave (v6, additive)', async () => {
+    const res = await page.evaluate(() => {
+      const A = window.__A;
+      A.ExportState.resPreset = '1080p';
+      A.ExportState.fps = 15;
+      A.ExportState.format = 'webm';
+      A.doAnimAutosave();
+      const raw = JSON.parse(localStorage.getItem(A.ANIM_AUTOSAVE_KEY));
+      return { v: raw.v, video: raw.video };
+    });
+    if (res.v < 6) throw new Error('doAnimAutosave should tag v>=6 now that it carries `video`, got v=' + res.v);
+    if (!res.video || res.video.resPreset !== '1080p' || res.video.fps !== 15) throw new Error('autosave payload missing/incorrect `video` (ExportState) field: ' + JSON.stringify(res.video));
   });
 
   await browser.close();
