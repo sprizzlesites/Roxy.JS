@@ -3816,6 +3816,146 @@ function bakeShaderMaterial(graph,registry,outputNodeId,res,model,partIndex){
 var nodeBakeState={part:0,res:256};
 
 /* ================================================================================
+   Wave G3a — geometry nodes: interpreter + inputs/primitives/mesh-op nodes.
+   Authored strictly against the G0 REGISTRY CONTRACT above — NodeUI/NodeGraph need
+   zero changes to host NODE_GEO, same as NODE_SHADER (G1).
+
+   GEOMETRY SOCKET VALUE — the canonical "geometry" kind is a plain struct, NOT a
+   THREE.BufferGeometry, so nodes can clone/mutate it cheaply with no GPU-side
+   objects in the loop:
+     { V:[THREE.Vector3,...], F:[[i0,i1,i2],...], UV:[[u,v],...]|null }
+   F is ALWAYS triangle-only (every builder/op below both consumes and produces
+   strictly-3-index faces) so the existing triangle-only cores this wave reuses
+   unchanged — subdivStep, solidifyVF (see the "topology helpers" section far above,
+   used today by MODDB.subsurf/solidify) — apply with no adaptation. geoToVF(geo)/
+   vfToGeo(M) (same section) are the canonical BufferGeometry<->geometry-value
+   converters; this registry introduces no new conversion code for that boundary.
+
+   IMMUTABILITY — every eval() below returns freshly-cloned V/F/UV (Vector3.clone()
+   per vertex, new arrays throughout), even when wrapping a reused core (solidifyVF's
+   own output reuses some input Vector3 references internally — triangulateVF's
+   always-clone pass, which every geometry-returning node routes its output through
+   at least once, launders that back to full independence). No node ever mutates an
+   upstream result in place.
+
+   FIELDS SIMPLIFICATION (documented per GAP_ANALYSIS §6.3's explicit allowance —
+   "simplified: per-vertex float attributes, not Blender's full field semantics"):
+   Position/Normal/Index read a single shared GeoField snapshot for the WHOLE graph
+   evaluation pass (same "bake-time input" mechanism NODE_SHADER's TexCoord/Geometry
+   nodes use via NodeBake) rather than truly varying per vertex through arbitrary
+   node chains — so `Set Position` offset wired from Position/Normal/Index acts as a
+   constant (not a real per-vertex displace) in this wave. True per-vertex field
+   propagation through arbitrary consumers is G3b's job (instancing/scatter +
+   attribute fields, per the wave split in GAP_ANALYSIS §6.6). Set Position DOES
+   correctly support the required case: a Value/Vector-driven CONSTANT offset moves
+   every vertex uniformly.
+   ================================================================================ */
+function emptyGeoVF(){return {V:[],F:[],UV:null};}
+function cloneGeoVF(M){
+  if(!M)return emptyGeoVF();
+  return {V:M.V.map(function(v){return v.clone();}),
+          F:M.F.map(function(f){return f.slice();}),
+          UV:M.UV?M.UV.map(function(u){return u.slice();}):null};}
+
+// Shared per-pass "bake" contexts — the same mechanism NODE_SHADER's NodeBake uses.
+var GeoBake={inputGeometry:null};
+var GeoField={x:0,y:0,z:0,nx:0,ny:0,nz:1,index:0};
+
+// Triangulate (fan) any non-3-index face. Defensive/idempotent for this registry
+// (every node here already emits triangle-only F) but also the one place every
+// geometry-producing node routes through to guarantee independent output (see
+// IMMUTABILITY note above) — it always rebuilds V/UV via .clone()/.slice().
+function triangulateVF(M){
+  var F=[];M.F.forEach(function(f){for(var t=1;t<f.length-1;t++)F.push([f[0],f[t],f[t+1]]);});
+  return {V:M.V.map(function(v){return v.clone();}),F:F,
+          UV:M.UV?M.UV.map(function(u){return u.slice();}):null};}
+
+// Merge by Distance — same weld algorithm as EM._weld (topology helpers section),
+// reimplemented standalone/pure since EM._weld mutates the live singleton editor
+// state and groups bookkeeping that has no meaning for a geometry-node value.
+function weldGeoVF(M,thresh){
+  thresh=thresh==null?1e-4:thresh;
+  var V=M.V,kept=[],R=new Array(V.length);
+  for(var i=0;i<V.length;i++){
+    var f=-1;for(var j=0;j<kept.length;j++){if(V[kept[j]].distanceTo(V[i])<thresh){f=j;break;}}
+    if(f<0){R[i]=kept.length;kept.push(i);}else R[i]=f;}
+  var newV=kept.map(function(i){return V[i].clone();});
+  var newUV=M.UV?kept.map(function(i){return M.UV[i].slice();}):null;
+  var F=[];
+  M.F.forEach(function(f){
+    var nf=f.map(function(vi){return R[vi];});
+    var dup=false;for(var a=0;a<nf.length;a++)for(var b=a+1;b<nf.length;b++)if(nf[a]===nf[b])dup=true;
+    if(!dup)F.push(nf);});
+  return {V:newV,F:F,UV:newUV};}
+
+// Recalculate Normals — same heuristic as EM.recalcNormals: flip any face whose
+// normal points toward the mesh centroid instead of away from it.
+function recalcNormalsVF(M){
+  var V=M.V,c=new THREE.Vector3();V.forEach(function(v){c.add(v);});c.divideScalar(V.length||1);
+  var F=M.F.map(function(f){
+    var v0=V[f[0]],v1=V[f[1]],v2=V[f[2]];
+    var n=new THREE.Vector3().crossVectors(v1.clone().sub(v0),v2.clone().sub(v0));
+    var fc=v0.clone().add(v1).add(v2).divideScalar(3);
+    return n.dot(fc.clone().sub(c))<0?[f[2],f[1],f[0]]:f.slice();});
+  return {V:V.map(function(v){return v.clone();}),F:F,
+          UV:M.UV?M.UV.map(function(u){return u.slice();}):null};}
+
+// Extrude Mesh — whole-mesh extrude along per-vertex averaged face normals.
+// SIMPLIFICATION (documented): this registry has no face-selection concept yet
+// (that lands with G3b's fields work), so Extrude Mesh always extrudes the ENTIRE
+// input, matching Blender's own degenerate case for a full-mesh selection: boundary
+// edges (present in exactly one face) get side walls, interior edges (shared by two
+// faces) don't — so a closed/manifold input (no boundary) produces no walls at all,
+// behaving like a plain move-along-normal, while an open input (Grid/Plane) walls
+// its rim and becomes closed, matching Blender's Grid->Extrude->offset workflow.
+function extrudeMeshVF(M,distance){
+  var V=M.V,F=M.F,N=V.map(function(){return new THREE.Vector3();});
+  F.forEach(function(f){
+    var n=new THREE.Vector3().crossVectors(V[f[1]].clone().sub(V[f[0]]),V[f[2]].clone().sub(V[f[0]]));
+    f.forEach(function(vi){N[vi].add(n);});});
+  N.forEach(function(n){if(n.lengthSq()>1e-12)n.normalize();});
+  var n2=V.length;
+  var V2=V.map(function(p,i){return p.clone().addScaledVector(N[i],distance);});
+  var allV=V.map(function(v){return v.clone();}).concat(V2);
+  var capF=F.map(function(f){return f.map(function(i){return i+n2;});});
+  var ec={};F.forEach(function(f){for(var i=0;i<f.length;i++){var a=f[i],b=f[(i+1)%f.length],k=Math.min(a,b)+'_'+Math.max(a,b);ec[k]=(ec[k]||0)+1;}});
+  var walls=[];
+  F.forEach(function(f){for(var i=0;i<f.length;i++){var a=f[i],b=f[(i+1)%f.length],k=Math.min(a,b)+'_'+Math.max(a,b);
+    if(ec[k]===1){walls.push([a,b,b+n2]);walls.push([a,b+n2,a+n2]);}}});
+  return {V:allV,F:capF.concat(walls),UV:null};}
+
+// Transform — translate (world units) + rotate (Euler degrees, XYZ order) + scale,
+// composed into one matrix and applied to every vertex.
+function transformVF(M,translate,rotateDeg,scale){
+  translate=translate||{x:0,y:0,z:0};rotateDeg=rotateDeg||{x:0,y:0,z:0};scale=scale||{x:1,y:1,z:1};
+  var m=new THREE.Matrix4();
+  var D2R=Math.PI/180;
+  var q=new THREE.Quaternion().setFromEuler(new THREE.Euler((rotateDeg.x||0)*D2R,(rotateDeg.y||0)*D2R,(rotateDeg.z||0)*D2R));
+  m.compose(new THREE.Vector3(translate.x||0,translate.y||0,translate.z||0),q,
+            new THREE.Vector3(scale.x!=null?scale.x:1,scale.y!=null?scale.y:1,scale.z!=null?scale.z:1));
+  return {V:M.V.map(function(v){return v.clone().applyMatrix4(m);}),
+          F:M.F.map(function(f){return f.slice();}),
+          UV:M.UV?M.UV.map(function(u){return u.slice();}):null};}
+
+// Join Geometry — concatenate two geometry values (B's face indices offset past A's).
+function joinVF(A,B){
+  var offset=A.V.length;
+  var V=A.V.map(function(v){return v.clone();}).concat(B.V.map(function(v){return v.clone();}));
+  var F=A.F.map(function(f){return f.slice();}).concat(B.F.map(function(f){return f.map(function(i){return i+offset;});}));
+  var UV=null;
+  if(A.UV&&B.UV)UV=A.UV.map(function(u){return u.slice();}).concat(B.UV.map(function(u){return u.slice();}));
+  return {V:V,F:F,UV:UV};}
+
+// Set Position — the Displace equivalent: offsets every vertex by a constant vector
+// (see FIELDS SIMPLIFICATION above for why the offset is constant-only this wave).
+function setPositionVF(M,offset){
+  offset=offset||{x:0,y:0,z:0};
+  var d=new THREE.Vector3(offset.x||0,offset.y||0,offset.z||0);
+  return {V:M.V.map(function(v){return v.clone().add(d);}),
+          F:M.F.map(function(f){return f.slice();}),
+          UV:M.UV?M.UV.map(function(u){return u.slice();}):null};}
+
+/* ================================================================================
    Wave G0 — node-graph editor widget: canvas-2D rendering + touch interaction.
    makeNodeEditor(canvas) returns an editor object bound to one <canvas>. Redraws
    happen on state change/interaction only (no rAF loop) so hundreds of nodes stay
