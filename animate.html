@@ -2536,6 +2536,162 @@ function makeZip(files){ // files: [{name,bytes:Uint8Array}] -> Blob (applicatio
   var end=new Uint8Array([0x50,0x4B,0x05,0x06].concat(u16(0),u16(0),u16(central.length),u16(central.length),u32(centralSize),u32(centralStart),u16(0)));
   return new Blob(parts.concat(centralParts).concat([end]),{type:'application/zip'});}
 
+/* ═══════════════════════════════════════════════════════
+   Wave E2 — STANDALONE THREE.JS CODE EXPORT
+
+   exportStandaloneJS(opts) turns the live poseScene + Anim.tracks into a
+   SELF-CONTAINED artifact (a `<script>` snippet, or a full minimal .html
+   document) that rebuilds the exact scene — geometry, materials incl.
+   baked maps, skeleton/skin, transforms, camera, lights — on any page and
+   replays the keyframe animation through a rAF loop, with no dependency
+   on Roxy.JS itself beyond a CDN-loaded Three.js build.
+
+   Two-stage pipeline, mirroring the video-export precedent (E1):
+     1. collectExportPayload() — COLLECTOR, runs HERE, reads the live
+        THREE objects (poseScene/state.models/Rigs/Anim) and produces one
+        plain JSON-safe object (typed arrays -> base64, see encodeAttr).
+     2. buildRuntimeSource() — emits the REBUILDER, a self-contained JS
+        program (string) that, given that JSON payload and a global THREE,
+        reconstructs the scene and plays it back.
+
+   Anti-duplication (GAP_ANALYSIS §2.10, the "don't reimplement a second
+   player" requirement): the rebuilder's sampler is NOT hand-written twice.
+   SAMPLER_RUNTIME_FUNCS below is the literal `.toString()` source of the
+   four pure functions defined earlier in this file (slerpQuatArr,
+   resolvePath, sampleTrackValue, applySampledValue, sampleAllTracks) —
+   the EXACT code Anim.sample calls every frame in this app — spliced
+   verbatim into the exported artifact. Only the scene-graph
+   rebuild/mount/render-loop glue is export-specific (it has no live
+   equivalent to share: this app builds its scene from the modeler's
+   project-JSON bridge, not from this export's own serialization format).
+
+   Fidelity scope (MUST replay, per the wave brief): geometry (positions/
+   normals/uvs/indices + skinIndex/skinWeight) · materials (Standard/
+   Physical params + baked maps as data-URLs, same embedding technique as
+   index.html's exportGLB/texToDataURL) · skeleton (bone hierarchy + bind
+   matrices) · object/camera/light transforms · keyframe tracks.
+   DEFERRED (documented deviations, out of the MUST list): environment/
+   PMREM reflections (scene.environment) — the export uses plain lights
+   only, no image-based lighting; G4 compositor/post-FX chain; bone/object
+   CONSTRAINTS (copyLoc/copyRot/trackTo/limitRot) — the export replays the
+   already-keyed pose values, it does not re-solve constraints or IK live;
+   vertex colors / multi-material-per-mesh (not yet buildable in the app
+   at all, nothing to lose).
+   ═══════════════════════════════════════════════════════ */
+var EXPORT_THREE_VERSION='r160'; // "current" per the wave brief — this app's OWN runtime stays pinned r128 (see the CDN <script> tag at the top of this file); the export targets a newer line since it ships to arbitrary third-party pages, not this app
+var EXPORT_THREE_CDN_URL='https://cdnjs.cloudflare.com/ajax/libs/three.js/r160/three.min.js';
+
+// Same embedding technique as index.html's exportGLB (see `texToDataURL`/`imgFromTexture`
+// there): draw a texture's image onto a canvas and read it back out as a PNG data-URL, so the
+// export never depends on the original image URL/blob staying reachable.
+function texToDataURL(t){
+  if(!t||!t.image)return null;
+  var img=t.image,cv;
+  if(img instanceof HTMLCanvasElement)cv=img;
+  else{cv=document.createElement('canvas');cv.width=img.width||512;cv.height=img.height||512;
+    try{cv.getContext('2d').drawImage(img,0,0);}catch(e){return null;}}
+  try{return cv.toDataURL('image/png');}catch(e){return null;}}
+
+// Encode a THREE.BufferAttribute's typed array as base64 + its constructor name (so the
+// rebuilder's decodeAttr knows whether to reconstruct a Float32Array/Uint16Array/Uint32Array) —
+// "compact JSON (typed-array -> base64)" per the wave brief, instead of one plain-JS-number per
+// component (which bloats badly at real vertex counts).
+function encodeTypedArray(ta){
+  var bytes=new Uint8Array(ta.buffer,ta.byteOffset,ta.byteLength),bin='';
+  for(var i=0;i<bytes.length;i++)bin+=String.fromCharCode(bytes[i]);
+  return btoa(bin);}
+function encodeAttr(attr){
+  if(!attr)return null;
+  return {type:attr.array.constructor.name,itemSize:attr.itemSize,data:encodeTypedArray(attr.array)};}
+
+function serializeGeometry(geo){
+  var g={count:geo.attributes.position.count};
+  g.position=encodeAttr(geo.attributes.position);
+  if(geo.attributes.normal)g.normal=encodeAttr(geo.attributes.normal);
+  if(geo.attributes.uv)g.uv=encodeAttr(geo.attributes.uv);
+  if(geo.index)g.index=encodeAttr(geo.index);
+  if(geo.attributes.skinIndex)g.skinIndex=encodeAttr(geo.attributes.skinIndex);
+  if(geo.attributes.skinWeight)g.skinWeight=encodeAttr(geo.attributes.skinWeight);
+  return g;}
+
+var EXPORT_MAP_SLOTS=['map','normalMap','roughnessMap','metalnessMap','emissiveMap','aoMap'];
+function serializeMaterial(mat){
+  var out={
+    color:mat.color?mat.color.getHex():0xffffff,
+    roughness:mat.roughness!=null?mat.roughness:.65,
+    metalness:mat.metalness!=null?mat.metalness:0,
+    emissive:mat.emissive?mat.emissive.getHex():0,
+    emissiveIntensity:mat.emissiveIntensity!=null?mat.emissiveIntensity:1,
+    opacity:mat.opacity!=null?mat.opacity:1,
+    transparent:!!mat.transparent,
+    flatShading:!!mat.flatShading};
+  if(mat.transmission)out.transmission=mat.transmission; // presence of any of these three -> rebuild as MeshPhysicalMaterial, see buildMaterial
+  if(mat.clearcoat)out.clearcoat=mat.clearcoat;
+  if(mat.clearcoatRoughness)out.clearcoatRoughness=mat.clearcoatRoughness;
+  if(mat.ior!=null&&mat.ior!==1.5)out.ior=mat.ior;
+  EXPORT_MAP_SLOTS.forEach(function(slot){
+    if(mat[slot]){var url=texToDataURL(mat[slot]);if(url)out[slot]=url;}});
+  return out;}
+
+function serializeCamera(){
+  updateCam();
+  return {position:[vs.cam.position.x,vs.cam.position.y,vs.cam.position.z],
+    target:[vs.tx,vs.ty,vs.tz],fov:vs.cam.fov,near:vs.cam.near,far:vs.cam.far};}
+
+// Walks poseScene's direct children for actual THREE.Light instances (this app always adds
+// studioLights() there — see the top of the file) and serializes each into a generic,
+// type-tagged record the rebuilder's buildLight() can switch on. Falls back to one ambient
+// light if somehow none are found, so an export never renders pitch black.
+function serializeLights(){
+  var out=[];
+  poseScene.children.forEach(function(o){
+    if(o.isDirectionalLight)out.push({type:'directional',color:o.color.getHex(),intensity:o.intensity,
+      position:[o.position.x,o.position.y,o.position.z],
+      target:o.target?[o.target.position.x,o.target.position.y,o.target.position.z]:[0,0,0]});
+    else if(o.isHemisphereLight)out.push({type:'hemisphere',color:o.color.getHex(),
+      groundColor:o.groundColor.getHex(),intensity:o.intensity});
+    else if(o.isPointLight)out.push({type:'point',color:o.color.getHex(),intensity:o.intensity,
+      position:[o.position.x,o.position.y,o.position.z],distance:o.distance,decay:o.decay});
+    else if(o.isSpotLight)out.push({type:'spot',color:o.color.getHex(),intensity:o.intensity,
+      position:[o.position.x,o.position.y,o.position.z],angle:o.angle,penumbra:o.penumbra,
+      target:o.target?[o.target.position.x,o.target.position.y,o.target.position.z]:[0,0,0]});});
+  if(!out.length)out.push({type:'ambient',color:0xffffff,intensity:.9});
+  return out;}
+
+// Flatten poseScene's model groups + every rig's bone hierarchy into one parent-indexed node
+// list. Explicitly scoped to `state.models` (the models array, not a blind walk of
+// modelHolder.children) and `Rigs[id].root` (not armatureHolder.children) so bone-visual meshes
+// (be.mesh/wire/headJoint/tailJoint — see buildBoneVisual) and the IK target/pole handle spheres
+// never leak into the export: when walking a Bone, only its Bone children are followed.
+function collectExportPayload(){
+  var out=[],objRefs=[],boneIndex=new Map();
+  function walkNode(obj,parentIdx){
+    var idx=out.length,isBone=!!obj.isBone;
+    var type=obj.isSkinnedMesh?'SkinnedMesh':(obj.isMesh?'Mesh':(isBone?'Bone':'Group'));
+    var nd={type:type,name:obj.name||'',parent:parentIdx==null?null:parentIdx,
+      targetId:(obj.userData&&obj.userData.targetId)||null,
+      position:obj.position.toArray(),quaternion:obj.quaternion.toArray(),scale:obj.scale.toArray()};
+    out.push(nd);objRefs.push(obj);
+    if(isBone)boneIndex.set(obj,idx);
+    if(type==='Mesh'||type==='SkinnedMesh'){nd.geometry=serializeGeometry(obj.geometry);nd.material=serializeMaterial(obj.material);}
+    obj.children.filter(function(c){return !isBone||c.isBone;}).forEach(function(c){walkNode(c,idx);});
+    return idx;}
+  var roots=[];
+  (state.models||[]).forEach(function(g){roots.push(g);});
+  Object.keys(Rigs).forEach(function(rid){roots.push(Rigs[rid].root);});
+  roots.forEach(function(r){walkNode(r,null);});
+  out.forEach(function(nd,i){ // second pass: skin binding needs every bone's export-index, only known once the whole tree is walked
+    if(nd.type!=='SkinnedMesh')return;
+    var mesh=objRefs[i],skel=mesh.skeleton;
+    nd.bindMatrix=mesh.bindMatrix.toArray();
+    nd.skeleton={boneIdx:skel.bones.map(function(b){var bi=boneIndex.get(b);return bi==null?-1:bi;}),
+      boneInverses:skel.boneInverses.map(function(m){return m.toArray();})};});
+  return {version:1,generatedAt:Date.now(),fps:Anim.fps,start:Anim.start,end:Anim.end,
+    camera:serializeCamera(),lights:serializeLights(),objects:out,
+    tracks:JSON.parse(JSON.stringify(Anim.tracks))};}
+
+function estimateExportSize(payload){return new TextEncoder().encode(JSON.stringify(payload)).length;}
+
 /* ---------------- Export tab UI state (resolution/fps/range/format — rides the anim
    autosave as v6, additive; see doAnimAutosave/tryRestoreAnimAutosave below) ---------------- */
 var ExportState={resPreset:'720p',fps:Anim.fps,rangeMode:'all',rangeStart:Anim.start,rangeEnd:Anim.end,format:'webm'};
