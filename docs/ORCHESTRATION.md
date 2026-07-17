@@ -110,14 +110,14 @@ Wave definitions live in `docs/GAP_ANALYSIS.md` §4 — this table only tracks s
 | D6 | Action clips (NLA-lite) | TODO | | |
 | D7 | Onion skinning | TODO | | |
 | G0 | Shared touch node-graph editor widget + registry/eval core | DONE | d93b2f1+4811314 | modeling suite now 106 (+18 node checks); `NodeGraph` eval core + `NodeUI`/`makeNodeEditor` canvas editor + `NODE_DEMO` registry. **Registry contract for G1/G3a/G4: read the G0 code — each node type = {title,inputs,outputs,params,eval}; socket `kind` equality gates connections.** Nodes tab added |
-| G1 | Shader nodes: baked-map path (texture/utility nodes, Principled output) | TODO | | |
+| G1 | Shader nodes: baked-map path (texture/utility nodes, Principled output) | DONE | a229568+66c69f3+13b24ff | modeling suite now 118; `NODE_SHADER` 24 node types on the G0 contract; `bakeShaderMaterial` walks a UV grid → per-channel maps; Fresnel/LayerWeight are bake-time constants (G2 does real GLSL); NodeUI defaults to NODE_SHADER |
 | G2 | Shader nodes: true GLSL compile (onBeforeCompile) + bake-for-export | TODO | | |
 | G3a | Geometry nodes: interpreter + inputs/primitives/mesh-op nodes | TODO | | |
 | G3b | Geometry nodes: instancing/scatter + attribute fields | TODO | | |
 | G3c | Geometry nodes: curve + boolean nodes | TODO | | after A8+A9 |
 | G4 | Compositor nodes (stills + video export hook) | TODO | | land before/with E1 |
 | G5 | Keyframeable node params (Track/Registry bridge) | TODO | | |
-| E1 | Video export (WebM guaranteed, MP4 progressive) | TODO | | |
+| E1 | Video export (WebM guaranteed, MP4 progressive) | DONE | e0a11cf+7045605 | animate suite now 76; `exportVideo(opts)` fixed-timestep sampler→MediaRecorder/WebM (vp9 in headless), real non-empty Blob verified; PNG-zip fallback; `VideoExport.active` stands down the main loop; autosave v6. G4 compositor still to be wired into this same render loop |
 | E2 | Standalone Three.js code export | TODO | | |
 | F1-F7 | Polish & stretch (see GAP_ANALYSIS §4 Phase F) | TODO | | |
 
