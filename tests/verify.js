@@ -2317,6 +2317,58 @@ const server = http.createServer((req, res) => {
     if (!res || res.geometry.V.length !== 8) throw new Error('loaded graph does not evaluate the same way (expected 8-vert cube)');
   }));
 
+  await step('NODE_GEO: Flip Normals reverses every face\'s winding order', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_GEO;
+    var g = NG.make();
+    var cube = NG.addNode(g, 'GeoCube', 0, 0, { size: 1 });
+    var flip = NG.addNode(g, 'GeoFlipNormals', 200, 0);
+    var out = NG.addNode(g, 'GeoOutput', 400, 0);
+    NG.connect(g, REG, [cube.id, 'geometry'], [flip.id, 'geometry']);
+    NG.connect(g, REG, [flip.id, 'geometry'], [out.id, 'geometry']);
+    var before = __R.evalGeoGraph(g, REG, cube.id, null).geometry;
+    var after = __R.evalGeoGraph(g, REG, out.id, null).geometry;
+    if (after.F.length !== before.F.length) throw new Error('flip changed face count');
+    for (var i = 0; i < before.F.length; i++) {
+      var bf = before.F[i], af = after.F[i];
+      if (!(af[0] === bf[2] && af[1] === bf[1] && af[2] === bf[0])) throw new Error('face ' + i + ' winding was not reversed: ' + JSON.stringify(bf) + ' -> ' + JSON.stringify(af));
+    }
+  }));
+
+  await step('NODE_GEO: remaining primitive/mesh-op node types evaluate without error and stay triangle-only', () => page.evaluate(() => {
+    var NG = __R.NodeGraph, REG = __R.NODE_GEO;
+    function chainCheck(primType, primParams, opType, opParams) {
+      var g = NG.make();
+      var p = NG.addNode(g, primType, 0, 0, primParams || {});
+      var op = NG.addNode(g, opType, 200, 0, opParams || {});
+      var out = NG.addNode(g, 'GeoOutput', 400, 0);
+      if (!NG.connect(g, REG, [p.id, 'geometry'], [op.id, 'geometry'])) throw new Error(primType + ' -> ' + opType + ' connect failed');
+      NG.connect(g, REG, [op.id, 'geometry'], [out.id, 'geometry']);
+      var res = __R.evalGeoGraph(g, REG, out.id, null);
+      if (!res || !res.geometry || !res.geometry.V.length) throw new Error(primType + ' -> ' + opType + ' produced no geometry');
+      res.geometry.F.forEach(function (f) { if (f.length !== 3) throw new Error(primType + ' -> ' + opType + ' produced a non-triangular face'); });
+      return res.geometry;
+    }
+    chainCheck('GeoCylinder', { radius: .4, height: 1, segments: 10 }, 'GeoRecalcNormals');
+    chainCheck('GeoCone', { radius: .5, height: 1, segments: 10 }, 'GeoTriangulate');
+    chainCheck('GeoIcoSphere', { radius: .5, subdivisions: 1 }, 'GeoMergeByDistance', { threshold: .001 });
+    var extruded = chainCheck('GeoGrid', { sizeX: 1, sizeY: 1, subX: 1, subY: 1 }, 'GeoExtrude', { distance: .3 });
+    if (extruded.V.length <= 4) throw new Error('Extrude Mesh on an open Grid should add wall vertices, got ' + extruded.V.length);
+
+    // Position/Normal/Index/Random: present in the registry, evaluate to a sane default
+    // shape (see the FIELDS SIMPLIFICATION doc comment on NODE_GEO — a shared per-pass
+    // snapshot this wave, not true per-vertex fields).
+    var g2 = NG.make();
+    var pos = NG.addNode(g2, 'GeoPosition', 0, 0), nrm = NG.addNode(g2, 'GeoNormal', 0, 100), idx = NG.addNode(g2, 'GeoIndex', 0, 200), rnd = NG.addNode(g2, 'GeoRandom', 0, 300, { seed: 3, min: 0, max: 10 });
+    // Position/Normal/Index/Random don't produce a `geometry` output, so drive
+    // NodeGraph.evalGraph directly (the same low-level call evalGeoGraph itself wraps)
+    // to read their scalar/vector outputs.
+    var posOut = NG.evalGraph(g2, REG, pos.id), nrmOut = NG.evalGraph(g2, REG, nrm.id), idxOut = NG.evalGraph(g2, REG, idx.id), rndOut = NG.evalGraph(g2, REG, rnd.id);
+    if (!posOut || typeof posOut.vector.x !== 'number') throw new Error('Position did not evaluate to a vector');
+    if (!nrmOut || nrmOut.vector.z !== 1) throw new Error('Normal default should be (0,0,1), got ' + JSON.stringify(nrmOut.vector));
+    if (!idxOut || typeof idxOut.index !== 'number') throw new Error('Index did not evaluate to a number');
+    if (!rndOut || rndOut.value < 0 || rndOut.value > 10) throw new Error('Random Value out of its [min,max] range: ' + rndOut.value);
+  }));
+
   await page.evaluate(() => __R.setView('edit'));
   await page.waitForTimeout(400);
   await page.screenshot({ path: path.join(SP, 'mobile-edit.png') });
