@@ -3708,6 +3708,113 @@ var NODE_SHADER={
       var o={};for(var k in inputs)o[k]=inputs[k];o.preview=inputs.baseColor;return o;}}
 };
 
+/* ---- Wave G1 bake pipeline ----
+   bakeShaderMaterial(graph,registry,outputNodeId,res,model,partIndex) walks the
+   UV grid at `res`×`res` texels. For each texel it sets NodeBake.u/v (and, only
+   if the graph actually contains a `Geometry` node, a real per-texel object-space
+   position/normal sample rasterized from the mesh's UV-mapped triangles — see
+   buildUVGeomSampler) then calls NodeGraph.evalGraph ONCE on the Material Output
+   node. Because PrincipledOutput.eval passes every resolved input through
+   verbatim, that single call yields baseColor/roughness/metalness/emission/
+   normal/displacement together — one DAG walk per texel bakes every connected
+   channel, not one walk per channel. Only channels with an actual incoming link
+   to the Output node are baked (an unconnected channel stays whatever the
+   material already had). Channel -> material map:
+     baseColor->map(srgb) roughness->roughnessMap metalness->metalnessMap
+     emission->emissiveMap normal->normalMap(pre-encoded 0..1, flat={.5,.5,1})
+     displacement->displacementMap (three.js's native MeshStandardMaterial
+     vertex-displacement path -- the "existing texture-displace path" for this
+     wave; the A6 procedural-displace modifier is a separate, still-TODO thing).
+   Floats bake to a grayscale RGB canvas (so it's correct regardless of which
+   channel three.js's shader happens to sample: g for roughness, b for
+   metalness). Baked maps are plain THREE.CanvasTexture via the existing tex()
+   helper, so they flow through GLB/OBJ export completely unchanged. */
+function graphUsesNodeType(graph,type){return graph.nodes.some(function(n){return n.type===type;});}
+function buildUVGeomSampler(geo){
+  if(!geo||!geo.attributes||!geo.attributes.position||!geo.attributes.uv)
+    return function(){return {px:0,py:0,pz:0,nx:0,ny:0,nz:1};};
+  geo.computeVertexNormals();
+  var pos=geo.attributes.position,uvA=geo.attributes.uv,nrm=geo.attributes.normal,idx=geo.index;
+  var triCount=idx?(idx.count/3):(pos.count/3);
+  var GRID=32,buckets={};
+  function bkey(cx,cy){return cx*GRID+cy;}
+  var tris=[];
+  for(var t=0;t<triCount;t++){
+    var i0,i1,i2;
+    if(idx){i0=idx.getX(t*3);i1=idx.getX(t*3+1);i2=idx.getX(t*3+2);}else{i0=t*3;i1=t*3+1;i2=t*3+2;}
+    var tri={i0:i0,i1:i1,i2:i2,u0:uvA.getX(i0),v0:uvA.getY(i0),u1:uvA.getX(i1),v1:uvA.getY(i1),u2:uvA.getX(i2),v2:uvA.getY(i2)};
+    tris.push(tri);
+    var minU=Math.min(tri.u0,tri.u1,tri.u2),maxU=Math.max(tri.u0,tri.u1,tri.u2);
+    var minV=Math.min(tri.v0,tri.v1,tri.v2),maxV=Math.max(tri.v0,tri.v1,tri.v2);
+    var cx0=Math.max(0,Math.floor(minU*GRID)),cx1=Math.min(GRID-1,Math.floor(maxU*GRID));
+    var cy0=Math.max(0,Math.floor(minV*GRID)),cy1=Math.min(GRID-1,Math.floor(maxV*GRID));
+    for(var cx=cx0;cx<=cx1;cx++)for(var cy=cy0;cy<=cy1;cy++){var k=bkey(cx,cy);(buckets[k]=buckets[k]||[]).push(tri);}}
+  function bary(tri,u,v){
+    var d00=tri.u1-tri.u0,d01=tri.v1-tri.v0,d10=tri.u2-tri.u0,d11=tri.v2-tri.v0;
+    var d20=u-tri.u0,d21=v-tri.v0,denom=d00*d11-d10*d01;
+    if(Math.abs(denom)<1e-9)return null;
+    var b1=(d20*d11-d10*d21)/denom,b2=(d00*d21-d20*d01)/denom,b0=1-b1-b2;
+    return {b0:b0,b1:b1,b2:b2};}
+  return function(u,v){
+    var cx=Math.max(0,Math.min(GRID-1,Math.floor(u*GRID))),cy=Math.max(0,Math.min(GRID-1,Math.floor(v*GRID)));
+    var list=buckets[bkey(cx,cy)]||[];
+    for(var i=0;i<list.length;i++){
+      var bc=bary(list[i],u,v);
+      if(bc&&bc.b0>=-.001&&bc.b1>=-.001&&bc.b2>=-.001){
+        var tri=list[i];
+        return {
+          px:pos.getX(tri.i0)*bc.b0+pos.getX(tri.i1)*bc.b1+pos.getX(tri.i2)*bc.b2,
+          py:pos.getY(tri.i0)*bc.b0+pos.getY(tri.i1)*bc.b1+pos.getY(tri.i2)*bc.b2,
+          pz:pos.getZ(tri.i0)*bc.b0+pos.getZ(tri.i1)*bc.b1+pos.getZ(tri.i2)*bc.b2,
+          nx:nrm.getX(tri.i0)*bc.b0+nrm.getX(tri.i1)*bc.b1+nrm.getX(tri.i2)*bc.b2,
+          ny:nrm.getY(tri.i0)*bc.b0+nrm.getY(tri.i1)*bc.b1+nrm.getY(tri.i2)*bc.b2,
+          nz:nrm.getZ(tri.i0)*bc.b0+nrm.getZ(tri.i1)*bc.b1+nrm.getZ(tri.i2)*bc.b2};}}
+    return {px:0,py:0,pz:0,nx:0,ny:0,nz:1};};}
+
+var NODE_BAKE_CHANNELS=[
+  {input:'baseColor',map:'map',srgb:true,isColor:true},
+  {input:'roughness',map:'roughnessMap',srgb:false,isColor:false},
+  {input:'metalness',map:'metalnessMap',srgb:false,isColor:false},
+  {input:'emission',map:'emissiveMap',srgb:true,isColor:true},
+  {input:'normal',map:'normalMap',srgb:false,isColor:true},
+  {input:'displacement',map:'displacementMap',srgb:false,isColor:false}];
+function bakeShaderMaterial(graph,registry,outputNodeId,res,model,partIndex){
+  res=res||256;
+  var part=model&&model.userData.parts[partIndex];
+  if(!part)return {baked:[]};
+  var connected=NODE_BAKE_CHANNELS.filter(function(ch){
+    return graph.links.some(function(l){return l.to[0]===outputNodeId&&l.to[1]===ch.input;});});
+  if(!connected.length)return {baked:[]};
+  var geomSampler=graphUsesNodeType(graph,'Geometry')?buildUVGeomSampler(part.baseGeo):null;
+  var bufs={};
+  connected.forEach(function(ch){var c=el('canvas');c.width=c.height=res;var ctx=c.getContext('2d');bufs[ch.input]={canvas:c,ctx:ctx,img:ctx.createImageData(res,res)};});
+  for(var y=0;y<res;y++){
+    for(var x=0;x<res;x++){
+      var u=(x+.5)/res,v=1-(y+.5)/res;
+      NodeBake.u=u;NodeBake.v=v;
+      if(geomSampler){var g=geomSampler(u,v);NodeBake.px=g.px;NodeBake.py=g.py;NodeBake.pz=g.pz;NodeBake.nx=g.nx;NodeBake.ny=g.ny;NodeBake.nz=g.nz;}
+      var out=NodeGraph.evalGraph(graph,registry,outputNodeId);
+      var idx=(y*res+x)*4;
+      connected.forEach(function(ch){
+        var val=out?out[ch.input]:undefined,buf=bufs[ch.input].img.data;
+        if(ch.isColor){
+          var c=(val&&typeof val==='object')?val:{r:0,g:0,b:0};
+          buf[idx]=to255(c.r);buf[idx+1]=to255(c.g);buf[idx+2]=to255(c.b);buf[idx+3]=255;
+        }else{
+          var f=(typeof val==='number')?val:0,g8=to255(f);
+          buf[idx]=g8;buf[idx+1]=g8;buf[idx+2]=g8;buf[idx+3]=255;}});}}
+  var prevMaps={},newMaps={},baked=[];
+  connected.forEach(function(ch){
+    var b=bufs[ch.input];b.ctx.putImageData(b.img,0,0);
+    prevMaps[ch.map]=part.mat[ch.map]||null;
+    var t=tex(b.canvas,ch.srgb,[1,1]);
+    part.mat[ch.map]=t;newMaps[ch.map]=t;baked.push(ch.map);});
+  part.mat.needsUpdate=true;invalidate();
+  History.push(function(){connected.forEach(function(ch){part.mat[ch.map]=prevMaps[ch.map];});part.mat.needsUpdate=true;invalidate();},
+               function(){connected.forEach(function(ch){part.mat[ch.map]=newMaps[ch.map];});part.mat.needsUpdate=true;invalidate();});
+  return {baked:baked,res:res};}
+var nodeBakeState={part:0,res:256};
+
 /* ================================================================================
    Wave G0 — node-graph editor widget: canvas-2D rendering + touch interaction.
    makeNodeEditor(canvas) returns an editor object bound to one <canvas>. Redraws
@@ -3915,17 +4022,52 @@ function bindNodeEditorPointers(ed){
   cv.addEventListener('pointerup',endPtr);cv.addEventListener('pointercancel',endPtr);}
 
 var NodeUI=makeNodeEditor($('#nodesCanvas'));
-NodeUI.setGraph(NodeGraph.make(),NODE_DEMO);
+NodeUI.setGraph(NodeGraph.make(),NODE_SHADER);
+
+/* Wave G1 integration: the Nodes tab bakes into the active model's active part.
+   "Bake to material" finds the first PrincipledOutput node in the graph and
+   runs bakeShaderMaterial against it -- baked maps land on
+   getModel(state.activeId).userData.parts[nodeBakeState.part].mat, same
+   material object the Viewer/Paint/Scene tabs already read, so the result is
+   visible immediately and survives GLB/OBJ export unchanged. */
+function renderNodeBakePanel(b,ed){
+  var m=getModel(state.activeId);
+  b.appendChild(el('div',{class:'section-title',text:'Bake target'}));
+  if(!m||!m.userData.parts.length){
+    b.appendChild(el('p',{class:'small muted',text:'No models yet — build one first (Build tab), then come back here.'}));
+    b.appendChild(el('hr',{class:'sep'}));
+    return;}
+  b.appendChild(el('p',{class:'small muted',text:'Model: '+m.userData.name}));
+  if(m.userData.parts.length>1){
+    var pSel=el('select',{onchange:function(e){nodeBakeState.part=+e.target.value;}});
+    m.userData.parts.forEach(function(p,i){pSel.appendChild(el('option',{value:i,text:'Part '+(i+1)}));});
+    pSel.value=Math.min(nodeBakeState.part,m.userData.parts.length-1);
+    b.appendChild(el('label',{class:'fld',text:'Target part'}));
+    b.appendChild(pSel);
+  }else nodeBakeState.part=0;
+  var rSel=el('select',{onchange:function(e){nodeBakeState.res=+e.target.value;}});
+  [128,256,512,1024].forEach(function(r){rSel.appendChild(el('option',{value:r,text:r+'×'+r}));});
+  rSel.value=nodeBakeState.res;
+  b.appendChild(el('label',{class:'fld',text:'Bake resolution'}));
+  b.appendChild(rSel);
+  b.appendChild(el('button',{class:'pri',style:'width:100%;margin-top:8px',text:'Bake to material',onclick:function(){
+    var outNode=ed.graph.nodes.filter(function(n){return n.type==='PrincipledOutput';})[0];
+    if(!outNode){toast('Add a Material Output node first');return;}
+    var res=bakeShaderMaterial(ed.graph,ed.registry,outNode.id,nodeBakeState.res,m,nodeBakeState.part);
+    if(res&&res.baked.length){toast('Baked '+res.res+'×'+res.res+': '+res.baked.join(', '));renderPanel();}
+    else toast('Nothing wired into Material Output — connect a channel first');}}));
+  b.appendChild(el('hr',{class:'sep'}));}
 
 function panelNodes(b){
   var ed=NodeUI;
   b.appendChild(el('h2',{text:'Nodes'}));
-  b.appendChild(el('p',{class:'sub',text:'Wave G0 demo — shared node-graph editor framework.'}));
+  b.appendChild(el('p',{class:'sub',text:'Shader nodes — baked-map path (Wave G1). Build a graph ending in Material Output, then Bake to material.'}));
   if(ed.catalogOpen){renderNodeCatalog(b,ed);return;}
   var sel=ed.selectedNode?NodeGraph.findNode(ed.graph,ed.selectedNode):null;
   if(sel){renderNodeInspector(b,ed,sel);return;}
   b.appendChild(el('button',{class:'pri',style:'width:100%',text:'+ Add node',onclick:function(){ed.catalogOpen=true;ed._catalogQuery='';renderPanel();openSheet(true);}}));
   b.appendChild(el('hr',{class:'sep'}));
+  if(ed.registry===NODE_SHADER)renderNodeBakePanel(b,ed);
   b.appendChild(el('p',{class:'small muted',text:ed.graph.nodes.length+' node'+(ed.graph.nodes.length===1?'':'s')+' · '+ed.graph.links.length+' link'+(ed.graph.links.length===1?'':'s')}));
   b.appendChild(el('p',{class:'small muted',text:'Tap a socket, then tap a compatible socket to connect. Tap a node to select & edit its params here. Drag a node body to move it. Pinch to zoom, two-finger drag to pan.'}));
   b.appendChild(el('button',{style:'width:100%;margin-top:8px',text:'Clear graph',onclick:function(){ed.graph=NodeGraph.make();ed.selectedNode=null;ed.draw();renderPanel();}}));}
