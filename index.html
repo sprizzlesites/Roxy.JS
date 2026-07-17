@@ -3432,6 +3432,283 @@ var NODE_DEMO={
 };
 
 /* ================================================================================
+   Wave G1 — shader nodes: baked-map path. Real nodes evaluated per-pixel over a
+   UV grid into canvas textures, then assigned onto the active model part's
+   MeshPhysicalMaterial (map/roughnessMap/metalnessMap/emissiveMap/normalMap/
+   displacementMap). Authored strictly against the G0 REGISTRY CONTRACT above —
+   NodeUI/NodeGraph need zero changes to host this registry.
+
+   BAKE-TIME INPUT MECHANISM: `TexCoord`/`Geometry` are per-texel "uniforms" —
+   like a shader, they can't be pure functions of (inputs,params) alone (there's
+   no per-texel channel in that signature), so they read the shared `NodeBake`
+   context object that the baker (and tests) set immediately before each
+   NodeGraph.evalGraph() call. Every other node is a pure function of its
+   resolved inputs/params, per contract.
+
+   APPROXIMATION NOTE (GAP_ANALYSIS §6.2): Fresnel/LayerWeight are view-dependent
+   and cannot bake into a static map — both are marked `approx:true` on their
+   registry entry and evaluate to an editable constant (params.approxValue*)
+   rather than a real per-angle Fresnel term. True fidelity is G2's GLSL path.
+   ================================================================================ */
+var NodeBake={u:0,v:0,px:0,py:0,pz:0,nx:0,ny:0,nz:1};
+
+function shaderHash2(x,y){return hash3(x,y,17.13);}
+function shaderValueNoise2(x,y){
+  var xi=Math.floor(x),yi=Math.floor(y),xf=x-xi,yf=y-yi;
+  var u=xf*xf*(3-2*xf),v=yf*yf*(3-2*yf);
+  var n00=shaderHash2(xi,yi),n10=shaderHash2(xi+1,yi),n01=shaderHash2(xi,yi+1),n11=shaderHash2(xi+1,yi+1);
+  var nx0=n00+(n10-n00)*u,nx1=n01+(n11-n01)*u;
+  return nx0+(nx1-nx0)*v;}
+function shaderFbm2(x,y,octaves){
+  octaves=Math.max(1,Math.round(octaves||1));
+  var sum=0,amp=.5,freq=1,norm=0;
+  for(var i=0;i<octaves;i++){sum+=shaderValueNoise2(x*freq,y*freq)*amp;norm+=amp;amp*=.5;freq*=2;}
+  return norm>0?sum/norm:0;}
+function shaderVoronoiCell(x,y){
+  var xi=Math.floor(x),yi=Math.floor(y),minD=8,cellX=xi,cellY=yi;
+  for(var dx=-1;dx<=1;dx++)for(var dy=-1;dy<=1;dy++){
+    var cx=xi+dx,cy=yi+dy;
+    var px=cx+shaderHash2(cx,cy*1.7+3.1),py=cy+shaderHash2(cx*2.3+7.9,cy);
+    var d=Math.hypot(px-x,py-y);
+    if(d<minD){minD=d;cellX=cx;cellY=cy;}}
+  var cr=shaderHash2(cellX+11.1,cellY),cg=shaderHash2(cellX,cellY+22.2),cb=shaderHash2(cellX+33.3,cellY+44.4);
+  return {d:minD,color:{r:cr,g:cg,b:cb}};}
+function lerpColor(a,b,t){return {r:a.r+(b.r-a.r)*t,g:a.g+(b.g-a.g)*t,b:a.b+(b.b-a.b)*t};}
+function to255(v){v=(v==null||isNaN(v))?0:v;return Math.max(0,Math.min(255,Math.round(v*255)));}
+
+var NODE_IMAGE_LIB={};
+function buildNodeImageLib(){
+  if(NODE_IMAGE_LIB._built)return;
+  function mk(w,h,draw){var c=el('canvas');c.width=w;c.height=h;var g=c.getContext('2d');draw(g,w,h);return {w:w,h:h,data:g.getImageData(0,0,w,h).data};}
+  NODE_IMAGE_LIB.checker=mk(64,64,function(g,w,h){var n=8,s=w/n;for(var y=0;y<n;y++)for(var x=0;x<n;x++){g.fillStyle=((x+y)%2)?'#202020':'#e6e6e6';g.fillRect(x*s,y*s,s,s);}});
+  NODE_IMAGE_LIB.gradient=mk(64,64,function(g,w,h){var gr=g.createLinearGradient(0,0,w,0);gr.addColorStop(0,'#000');gr.addColorStop(1,'#fff');g.fillStyle=gr;g.fillRect(0,0,w,h);});
+  NODE_IMAGE_LIB.white=mk(4,4,function(g,w,h){g.fillStyle='#fff';g.fillRect(0,0,w,h);});
+  NODE_IMAGE_LIB._built=true;}
+function sampleImageLib(name,u,v){
+  buildNodeImageLib();
+  var img=NODE_IMAGE_LIB[name]||NODE_IMAGE_LIB.white;
+  var x=Math.max(0,Math.min(img.w-1,Math.floor(u*img.w))),y=Math.max(0,Math.min(img.h-1,Math.floor((1-v)*img.h)));
+  var idx=(y*img.w+x)*4;
+  return {r:img.data[idx]/255,g:img.data[idx+1]/255,b:img.data[idx+2]/255,a:img.data[idx+3]/255};}
+
+var NODE_SHADER={
+  // ---------------- Input ----------------
+  TexCoord:{title:'Texture Coordinate',color:'#6cc6ff',
+    inputs:[],outputs:[{name:'uv',kind:'vec'},{name:'object',kind:'vec'},{name:'generated',kind:'vec'}],
+    params:[],
+    eval:function(){var b=NodeBake;var v={x:b.u,y:b.v,z:0};return {uv:v,object:v,generated:v};}}, // Object/Generated approximated as planar UV (documented, see report)
+  Geometry:{title:'Geometry',color:'#6cc6ff',
+    inputs:[],outputs:[{name:'position',kind:'vec'},{name:'normal',kind:'vec'}],
+    params:[],
+    eval:function(){var b=NodeBake;return {position:{x:b.px,y:b.py,z:b.pz},normal:{x:b.nx,y:b.ny,z:b.nz}};}},
+  Fresnel:{title:'Fresnel (bake-approx)',color:'#c9a6ff',approx:true,
+    inputs:[{name:'ior',kind:'float',default:1.45}],
+    outputs:[{name:'fac',kind:'float'}],
+    params:[{name:'approxValue',type:'float',default:.3,min:0,max:1}],
+    eval:function(inputs,params){return {fac:params.approxValue};}}, // view-dependent -- can't bake, see G2
+  LayerWeight:{title:'Layer Weight (bake-approx)',color:'#c9a6ff',approx:true,
+    inputs:[{name:'blend',kind:'float',default:.5}],
+    outputs:[{name:'fresnel',kind:'float'},{name:'facing',kind:'float'}],
+    params:[{name:'approxFresnel',type:'float',default:.3,min:0,max:1},{name:'approxFacing',type:'float',default:.7,min:0,max:1}],
+    eval:function(inputs,params){return {fresnel:params.approxFresnel,facing:params.approxFacing};}},
+  Value:{title:'Value',color:'#6cc6ff',
+    inputs:[],outputs:[{name:'out',kind:'float'}],
+    params:[{name:'value',type:'float',default:.5,min:0,max:1}],
+    eval:function(inputs,params){return {out:params.value};}},
+  RGB:{title:'RGB',color:'#6cc6ff',
+    inputs:[],outputs:[{name:'color',kind:'color'}],
+    params:[{name:'r',type:'float',default:.8,min:0,max:1},{name:'g',type:'float',default:.8,min:0,max:1},{name:'b',type:'float',default:.8,min:0,max:1}],
+    eval:function(inputs,params){return {color:{r:params.r,g:params.g,b:params.b}};}},
+
+  // ---------------- Texture ----------------
+  NoiseTex:{title:'Noise Texture',color:'#ff8fb1',
+    inputs:[{name:'uv',kind:'vec',default:{x:0,y:0,z:0}}],
+    outputs:[{name:'fac',kind:'float'},{name:'color',kind:'color'}],
+    params:[{name:'scale',type:'float',default:5,min:.1,max:50},{name:'detail',type:'float',default:2,min:0,max:6}],
+    eval:function(inputs,params){var uv=inputs.uv||{x:0,y:0};
+      var n=Math.max(0,Math.min(1,shaderFbm2(uv.x*params.scale,uv.y*params.scale,Math.round(params.detail)+1)));
+      return {fac:n,color:{r:n,g:n,b:n}};}},
+  VoronoiTex:{title:'Voronoi Texture',color:'#ff8fb1',
+    inputs:[{name:'uv',kind:'vec',default:{x:0,y:0,z:0}}],
+    outputs:[{name:'distance',kind:'float'},{name:'color',kind:'color'}],
+    params:[{name:'scale',type:'float',default:5,min:.1,max:50}],
+    eval:function(inputs,params){var uv=inputs.uv||{x:0,y:0};
+      var c=shaderVoronoiCell(uv.x*params.scale,uv.y*params.scale);
+      return {distance:Math.min(1,c.d),color:c.color};}},
+  WaveTex:{title:'Wave Texture',color:'#ff8fb1',
+    inputs:[{name:'uv',kind:'vec',default:{x:0,y:0,z:0}}],
+    outputs:[{name:'fac',kind:'float'},{name:'color',kind:'color'}],
+    params:[{name:'scale',type:'float',default:5,min:.1,max:20},{name:'distortion',type:'float',default:0,min:0,max:10},
+             {name:'type',type:'enum',default:'bands',options:['bands','rings']}],
+    eval:function(inputs,params){var uv=inputs.uv||{x:0,y:0};
+      var n=shaderFbm2(uv.x*params.scale*.5+11,uv.y*params.scale*.5+7,3)*params.distortion;
+      var phase=(params.type==='rings')?(Math.hypot(uv.x-.5,uv.y-.5)*params.scale*Math.PI*2):((uv.x+uv.y)*params.scale*Math.PI);
+      var f=.5+.5*Math.sin(phase+n*6);
+      return {fac:f,color:{r:f,g:f,b:f}};}},
+  CheckerTex:{title:'Checker Texture',color:'#ff8fb1',
+    inputs:[{name:'uv',kind:'vec',default:{x:0,y:0,z:0}},{name:'color1',kind:'color',default:{r:0,g:0,b:0}},{name:'color2',kind:'color',default:{r:1,g:1,b:1}}],
+    outputs:[{name:'fac',kind:'float'},{name:'color',kind:'color'}],
+    params:[{name:'scale',type:'float',default:8,min:1,max:64}],
+    eval:function(inputs,params){var uv=inputs.uv||{x:0,y:0};
+      var cx=Math.floor(uv.x*params.scale),cy=Math.floor(uv.y*params.scale);
+      var f=((cx+cy)%2+2)%2;
+      return {fac:f,color:f?inputs.color2:inputs.color1};}},
+  GradientTex:{title:'Gradient Texture',color:'#ff8fb1',
+    inputs:[{name:'uv',kind:'vec',default:{x:0,y:0,z:0}}],
+    outputs:[{name:'fac',kind:'float'},{name:'color',kind:'color'}],
+    params:[{name:'type',type:'enum',default:'linear',options:['linear','vertical','diagonal','radial','quadratic']}],
+    eval:function(inputs,params){var uv=inputs.uv||{x:0,y:0},f,t=params.type;
+      if(t==='vertical')f=uv.y;else if(t==='diagonal')f=(uv.x+uv.y)*.5;
+      else if(t==='radial')f=Math.hypot(uv.x-.5,uv.y-.5)*2;else if(t==='quadratic')f=uv.x*uv.x;else f=uv.x;
+      f=Math.max(0,Math.min(1,f));
+      return {fac:f,color:{r:f,g:f,b:f}};}},
+  BrickTex:{title:'Brick Texture',color:'#ff8fb1',
+    inputs:[{name:'uv',kind:'vec',default:{x:0,y:0,z:0}},
+            {name:'color1',kind:'color',default:{r:.72,g:.38,b:.28}},
+            {name:'color2',kind:'color',default:{r:.6,g:.3,b:.22}},
+            {name:'mortar',kind:'color',default:{r:.85,g:.85,b:.82}}],
+    outputs:[{name:'fac',kind:'float'},{name:'color',kind:'color'}],
+    params:[{name:'scaleX',type:'float',default:6,min:1,max:32},{name:'scaleY',type:'float',default:3,min:1,max:32},{name:'mortarSize',type:'float',default:.05,min:0,max:.3}],
+    eval:function(inputs,params){var uv=inputs.uv||{x:0,y:0};
+      var rows=uv.y*params.scaleY,row=Math.floor(rows);
+      var offset=(((row%2)+2)%2)*.5;
+      var xRaw=uv.x*params.scaleX+offset,x=xRaw-Math.floor(xRaw),y=rows-row;
+      var mm=params.mortarSize;
+      if(x<mm||x>1-mm||y<mm||y>1-mm)return {fac:0,color:inputs.mortar};
+      var tint=shaderHash2(row*13.7,Math.floor(xRaw)*7.3);
+      return {fac:1,color:(tint>.5)?inputs.color1:inputs.color2};}},
+  MagicTex:{title:'Magic Texture',color:'#ff8fb1',
+    inputs:[{name:'uv',kind:'vec',default:{x:0,y:0,z:0}}],
+    outputs:[{name:'fac',kind:'float'},{name:'color',kind:'color'}],
+    params:[{name:'scale',type:'float',default:5,min:.1,max:20},{name:'distortion',type:'float',default:1,min:0,max:5},{name:'depth',type:'float',default:2,min:1,max:5}],
+    eval:function(inputs,params){var uv=inputs.uv||{x:0,y:0};
+      var x=uv.x*params.scale,y=uv.y*params.scale,z=.5*params.scale,d=params.distortion,n=Math.round(params.depth);
+      var r=x,g=y,b=z,i,r2,g2,b2;
+      for(i=0;i<n;i++){r2=Math.sin((g+b)*Math.PI)*d;g2=Math.sin((r+b)*Math.PI)*d;b2=Math.sin((r+g)*Math.PI)*d;r=r2;g=g2;b=b2;}
+      var cr=.5+.5*Math.sin(r),cg=.5+.5*Math.sin(g),cb=.5+.5*Math.sin(b);
+      return {fac:(cr+cg+cb)/3,color:{r:cr,g:cg,b:cb}};}},
+  ImageTex:{title:'Image Texture',color:'#ff8fb1',
+    inputs:[{name:'uv',kind:'vec',default:{x:0,y:0,z:0}}],
+    outputs:[{name:'color',kind:'color'},{name:'alpha',kind:'float'}],
+    params:[{name:'source',type:'enum',default:'checker',options:['checker','gradient','white']}],
+    eval:function(inputs,params){var uv=inputs.uv||{x:0,y:0};
+      var s=sampleImageLib(params.source,uv.x,uv.y);
+      return {color:{r:s.r,g:s.g,b:s.b},alpha:s.a};}},
+
+  // ---------------- Utility ----------------
+  ColorRamp:{title:'Color Ramp',color:'#9be0a3',
+    inputs:[{name:'fac',kind:'float',default:0}],
+    outputs:[{name:'color',kind:'color'}],
+    params:[
+      {name:'pos0',type:'float',default:0,min:0,max:1},{name:'r0',type:'float',default:0,min:0,max:1},{name:'g0',type:'float',default:0,min:0,max:1},{name:'b0',type:'float',default:0,min:0,max:1},
+      {name:'pos1',type:'float',default:.5,min:0,max:1},{name:'r1',type:'float',default:.5,min:0,max:1},{name:'g1',type:'float',default:.5,min:0,max:1},{name:'b1',type:'float',default:.5,min:0,max:1},
+      {name:'pos2',type:'float',default:1,min:0,max:1},{name:'r2',type:'float',default:1,min:0,max:1},{name:'g2',type:'float',default:1,min:0,max:1},{name:'b2',type:'float',default:1,min:0,max:1}],
+    eval:function(inputs,params){
+      var stops=[{p:params.pos0,c:{r:params.r0,g:params.g0,b:params.b0}},
+                 {p:params.pos1,c:{r:params.r1,g:params.g1,b:params.b1}},
+                 {p:params.pos2,c:{r:params.r2,g:params.g2,b:params.b2}}];
+      stops.sort(function(a,b){return a.p-b.p;});
+      var f=Math.max(0,Math.min(1,inputs.fac));
+      if(f<=stops[0].p)return {color:stops[0].c};
+      if(f>=stops[2].p)return {color:stops[2].c};
+      for(var i=0;i<2;i++){
+        if(f>=stops[i].p&&f<=stops[i+1].p){
+          var span=stops[i+1].p-stops[i].p,t=span>1e-9?(f-stops[i].p)/span:0;
+          return {color:lerpColor(stops[i].c,stops[i+1].c,t)};}}
+      return {color:stops[2].c};}},
+  MixColor:{title:'Mix Color',color:'#9be0a3',
+    inputs:[{name:'fac',kind:'float',default:.5},{name:'color1',kind:'color',default:{r:0,g:0,b:0}},{name:'color2',kind:'color',default:{r:1,g:1,b:1}}],
+    outputs:[{name:'color',kind:'color'}],
+    params:[{name:'mode',type:'enum',default:'mix',options:['mix','add','multiply','screen']}],
+    eval:function(inputs,params){
+      var f=Math.max(0,Math.min(1,inputs.fac)),a=inputs.color1,b=inputs.color2,m=params.mode,o;
+      if(m==='add')o={r:a.r+b.r*f,g:a.g+b.g*f,b:a.b+b.b*f};
+      else if(m==='multiply')o=lerpColor(a,{r:a.r*b.r,g:a.g*b.g,b:a.b*b.b},f);
+      else if(m==='screen')o=lerpColor(a,{r:1-(1-a.r)*(1-b.r),g:1-(1-a.g)*(1-b.g),b:1-(1-a.b)*(1-b.b)},f);
+      else o=lerpColor(a,b,f);
+      return {color:o};}},
+  Math:{title:'Math',color:'#9be0a3',
+    inputs:[{name:'a',kind:'float',default:0},{name:'b',kind:'float',default:0}],
+    outputs:[{name:'out',kind:'float'}],
+    params:[{name:'op',type:'enum',default:'add',options:['add','sub','mul','div','min','max','pow','sin']}],
+    eval:function(inputs,params){
+      var a=inputs.a,b=inputs.b,o=params.op,r;
+      if(o==='sub')r=a-b;else if(o==='mul')r=a*b;else if(o==='div')r=b!==0?a/b:0;
+      else if(o==='min')r=Math.min(a,b);else if(o==='max')r=Math.max(a,b);
+      else if(o==='pow')r=Math.pow(a,b);else if(o==='sin')r=Math.sin(a);else r=a+b;
+      return {out:r};}},
+  VectorMath:{title:'Vector Math',color:'#9be0a3',
+    inputs:[{name:'a',kind:'vec',default:{x:0,y:0,z:0}},{name:'b',kind:'vec',default:{x:0,y:0,z:0}}],
+    outputs:[{name:'vector',kind:'vec'},{name:'value',kind:'float'}],
+    params:[{name:'op',type:'enum',default:'add',options:['add','sub','mul','cross','dot','length','normalize']}],
+    eval:function(inputs,params){
+      var a=inputs.a,b=inputs.b,o=params.op,v,val=0;
+      if(o==='sub')v={x:a.x-b.x,y:a.y-b.y,z:a.z-b.z};
+      else if(o==='mul')v={x:a.x*b.x,y:a.y*b.y,z:a.z*b.z};
+      else if(o==='cross')v={x:a.y*b.z-a.z*b.y,y:a.z*b.x-a.x*b.z,z:a.x*b.y-a.y*b.x};
+      else if(o==='dot'){val=a.x*b.x+a.y*b.y+a.z*b.z;v=a;}
+      else if(o==='length'){val=Math.sqrt(a.x*a.x+a.y*a.y+a.z*a.z);v=a;}
+      else if(o==='normalize'){var len=Math.sqrt(a.x*a.x+a.y*a.y+a.z*a.z)||1;v={x:a.x/len,y:a.y/len,z:a.z/len};}
+      else v={x:a.x+b.x,y:a.y+b.y,z:a.z+b.z};
+      if(o!=='dot'&&o!=='length')val=Math.sqrt(v.x*v.x+v.y*v.y+v.z*v.z);
+      return {vector:v,value:val};}},
+  MapRange:{title:'Map Range',color:'#9be0a3',
+    inputs:[{name:'value',kind:'float',default:0}],
+    outputs:[{name:'result',kind:'float'}],
+    params:[{name:'fromMin',type:'float',default:0,min:-10,max:10},{name:'fromMax',type:'float',default:1,min:-10,max:10},
+             {name:'toMin',type:'float',default:0,min:-10,max:10},{name:'toMax',type:'float',default:1,min:-10,max:10},
+             {name:'clampMode',type:'enum',default:'on',options:['on','off']}],
+    eval:function(inputs,params){
+      var v=inputs.value,span=params.fromMax-params.fromMin;
+      var t=span!==0?(v-params.fromMin)/span:0;
+      if(params.clampMode==='on')t=Math.max(0,Math.min(1,t));
+      return {result:params.toMin+t*(params.toMax-params.toMin)};}},
+  Clamp:{title:'Clamp',color:'#9be0a3',
+    inputs:[{name:'value',kind:'float',default:0}],
+    outputs:[{name:'result',kind:'float'}],
+    params:[{name:'min',type:'float',default:0,min:-10,max:10},{name:'max',type:'float',default:1,min:-10,max:10}],
+    eval:function(inputs,params){return {result:Math.max(params.min,Math.min(params.max,inputs.value))};}},
+  SeparateRGB:{title:'Separate RGB',color:'#9be0a3',
+    inputs:[{name:'color',kind:'color',default:{r:0,g:0,b:0}}],
+    outputs:[{name:'r',kind:'float'},{name:'g',kind:'float'},{name:'b',kind:'float'}],
+    params:[],
+    eval:function(inputs){var c=inputs.color||{r:0,g:0,b:0};return {r:c.r,g:c.g,b:c.b};}},
+  CombineRGB:{title:'Combine RGB',color:'#9be0a3',
+    inputs:[{name:'r',kind:'float',default:0},{name:'g',kind:'float',default:0},{name:'b',kind:'float',default:0}],
+    outputs:[{name:'color',kind:'color'}],
+    params:[],
+    eval:function(inputs){return {color:{r:inputs.r,g:inputs.g,b:inputs.b}};}},
+  SeparateXYZ:{title:'Separate XYZ',color:'#9be0a3',
+    inputs:[{name:'vector',kind:'vec',default:{x:0,y:0,z:0}}],
+    outputs:[{name:'x',kind:'float'},{name:'y',kind:'float'},{name:'z',kind:'float'}],
+    params:[],
+    eval:function(inputs){var v=inputs.vector||{x:0,y:0,z:0};return {x:v.x,y:v.y,z:v.z};}},
+  CombineXYZ:{title:'Combine XYZ',color:'#9be0a3',
+    inputs:[{name:'x',kind:'float',default:0},{name:'y',kind:'float',default:0},{name:'z',kind:'float',default:0}],
+    outputs:[{name:'vector',kind:'vec'}],
+    params:[],
+    eval:function(inputs){return {vector:{x:inputs.x,y:inputs.y,z:inputs.z}};}},
+
+  // ---------------- Output ----------------
+  PrincipledOutput:{title:'Material Output',color:'#ffd76c',
+    inputs:[
+      {name:'baseColor',kind:'color',default:{r:.8,g:.8,b:.8}},
+      {name:'roughness',kind:'float',default:.5},
+      {name:'metalness',kind:'float',default:0},
+      {name:'emission',kind:'color',default:{r:0,g:0,b:0}},
+      {name:'normal',kind:'vec',default:{x:.5,y:.5,z:1}},
+      {name:'displacement',kind:'float',default:0}],
+    outputs:[{name:'preview',kind:'color'},{name:'baseColor',kind:'color'},{name:'roughness',kind:'float'},
+             {name:'metalness',kind:'float'},{name:'emission',kind:'color'},{name:'normal',kind:'vec'},{name:'displacement',kind:'float'}],
+    params:[],
+    eval:function(inputs){
+      // Pass every resolved input straight through as an identically-named output so
+      // the baker can read out.baseColor/out.roughness/... from ONE evalGraph() call
+      // per texel (one DAG walk bakes every connected channel, not one walk per map).
+      var o={};for(var k in inputs)o[k]=inputs[k];o.preview=inputs.baseColor;return o;}}
+};
+
+/* ================================================================================
    Wave G0 — node-graph editor widget: canvas-2D rendering + touch interaction.
    makeNodeEditor(canvas) returns an editor object bound to one <canvas>. Redraws
    happen on state change/interaction only (no rAF loop) so hundreds of nodes stay
