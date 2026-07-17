@@ -44,10 +44,19 @@ window.__A={Anim:Anim,Registry:Registry,resolvePath:resolvePath,setView:setView,
   pickMp4MimeType:pickMp4MimeType,pickMimeType:pickMimeType,computeExportFrameTimes:computeExportFrameTimes,
   exportVideo:exportVideo,cancelVideoExport:cancelVideoExport,makeZip:makeZip,dataURLToBytes:dataURLToBytes,
   panelExport:panelExport,ExportState:ExportState,exportResDims:exportResDims,runExportVideoUI:runExportVideoUI,
-  exportFilename:exportFilename};
+  exportFilename:exportFilename,
+  exportStandaloneJS:exportStandaloneJS,collectExportPayload:collectExportPayload,serializeGeometry:serializeGeometry,
+  encodeAttr:encodeAttr,estimateExportSize:estimateExportSize,EXPORT_THREE_VERSION:EXPORT_THREE_VERSION,
+  EXPORT_THREE_CDN_URL:EXPORT_THREE_CDN_URL,CodeExportState:CodeExportState,copyStandaloneCode:copyStandaloneCode,
+  downloadStandaloneCode:downloadStandaloneCode,SAMPLER_RUNTIME_FUNCS:SAMPLER_RUNTIME_FUNCS};
 `;
 
+let generatedArtifactHTML = null; // set by the E2 end-to-end test below, served at /gen_export.html
+
 const server = http.createServer((req, res) => {
+  if (req.url === '/gen_export.html') {
+    res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(generatedArtifactHTML || '<!doctype html><title>empty</title>'); return;
+  }
   if (req.url === '/' || req.url.startsWith('/animate.html')) {
     let html = fs.readFileSync(path.join(ROOT, 'animate.html'), 'utf8');
     const anchor = "\n})();\n</script>";
@@ -1603,6 +1612,200 @@ function syntheticProject() {
     });
     if (res.v < 6) throw new Error('doAnimAutosave should tag v>=6 now that it carries `video`, got v=' + res.v);
     if (!res.video || res.video.resPreset !== '1080p' || res.video.fps !== 15) throw new Error('autosave payload missing/incorrect `video` (ExportState) field: ' + JSON.stringify(res.video));
+  });
+
+  await step('E2 collector: serialize->parse round-trips geometry vertex count, skin attrs, and skeleton shape', async () => {
+    const res = await page.evaluate(() => {
+      const A = window.__A;
+      A.buildDemoFigure();
+      const rig = A.newRig('ProbeRig');
+      const b1 = A.addBone(rig, 'Root', new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 1.6, 0), null);
+      A.addBone(rig, 'Head', new THREE.Vector3(0, 1.6, 0), new THREE.Vector3(0, 2, 0), b1.id);
+      const torso = A.Registry['demo.torso'];
+      const liveVertCount = torso.geometry.attributes.position.count;
+      const skinned = A.bindMeshToRig(torso, rig, { silent: true });
+      const payload = A.collectExportPayload();
+      const node = payload.objects.find(o => o.targetId === 'demo.torso');
+      return {
+        objCount: payload.objects.length,
+        nodeType: node && node.type,
+        geomCount: node && node.geometry && node.geometry.count,
+        liveVertCount,
+        hasSkinIndex: !!(node && node.geometry && node.geometry.skinIndex),
+        hasSkinWeight: !!(node && node.geometry && node.geometry.skinWeight),
+        boneCount: node && node.skeleton && node.skeleton.boneIdx.length,
+        hasBindMatrix: !!(node && node.bindMatrix && node.bindMatrix.length === 16),
+        // Total bones across EVERY rig live at this point in the shared-page suite (earlier C1-C4
+        // steps left their own rigs behind) — the payload's Bone-node count must match that total
+        // exactly, not just "2" (this suite reuses one page across all steps, so Rigs accumulates).
+        expectedTotalBones: Object.keys(A.Rigs).reduce((s, rid) => s + A.Rigs[rid].bones.length, 0),
+        hasRigBones: payload.objects.filter(o => o.type === 'Bone').length
+      };
+    });
+    if (!res.nodeType || res.nodeType !== 'SkinnedMesh') throw new Error('bound torso should serialize as SkinnedMesh, got ' + res.nodeType);
+    if (res.geomCount !== res.liveVertCount) throw new Error('serialized vertex count ' + res.geomCount + ' != live geometry count ' + res.liveVertCount);
+    if (!res.hasSkinIndex || !res.hasSkinWeight) throw new Error('SkinnedMesh node missing serialized skinIndex/skinWeight');
+    if (res.boneCount !== 2) throw new Error('expected the SkinnedMesh\'s own skeleton reference to list 2 bones, got ' + res.boneCount);
+    if (!res.hasBindMatrix) throw new Error('SkinnedMesh node missing a 16-element bindMatrix');
+    if (res.hasRigBones !== res.expectedTotalBones) throw new Error('expected ' + res.expectedTotalBones + ' serialized Bone nodes (all live rigs), got ' + res.hasRigBones);
+  });
+
+  await step('E2 collector: bone-visual meshes and IK handles never leak into the exported node list', async () => {
+    const res = await page.evaluate(() => {
+      const A = window.__A;
+      const payload = A.collectExportPayload();
+      // buildBoneVisual adds mesh/wire/headJoint/tailJoint as children of each THREE.Bone —
+      // none of those should ever appear as their own exported node (only type:'Bone' itself).
+      const meshNodesUnderBones = payload.objects.filter(o => o.type === 'Mesh' && /^(Cone|Sphere)/.test(o.name));
+      return { total: payload.objects.length, suspiciousMeshCount: meshNodesUnderBones.length };
+    });
+    if (res.suspiciousMeshCount > 0) throw new Error('bone-visual helper meshes leaked into the export node list');
+  });
+
+  await step('E2 collector: keyframe tracks survive into the payload verbatim (targetId/path/key count)', async () => {
+    const res = await page.evaluate(() => {
+      const A = window.__A;
+      A.Anim.tracks = [];
+      A.Anim.insertKey('demo', 'position.x', 0);
+      A.Registry['demo'].position.x = 4;
+      A.Anim.insertKey('demo', 'position.x', 8);
+      const payload = A.collectExportPayload();
+      const tr = payload.tracks.find(t => t.targetId === 'demo' && t.path === 'position.x');
+      return { trackCount: payload.tracks.length, found: !!tr, keyCount: tr && tr.keys.length, fps: payload.fps, start: payload.start, end: payload.end };
+    });
+    if (!res.found) throw new Error('the keyed demo/position.x track did not survive into the export payload');
+    if (res.keyCount !== 2) throw new Error('expected 2 keys on the track, got ' + res.keyCount);
+    if (typeof res.fps !== 'number' || typeof res.start !== 'number' || typeof res.end !== 'number') throw new Error('payload missing fps/start/end range');
+  });
+
+  await step('E2 anti-duplication: the embedded sampler functions are the SAME functions Anim.sample calls (not a rewritten copy)', async () => {
+    const res = await page.evaluate(() => {
+      const A = window.__A;
+      const names = A.SAMPLER_RUNTIME_FUNCS.map(f => f.name);
+      const animSampleSrc = A.Anim.sample.toString();
+      return { names, animSampleCallsSampleAllTracks: animSampleSrc.indexOf('sampleAllTracks') >= 0 };
+    });
+    ['slerpQuatArr', 'resolvePath', 'sampleTrackValue', 'applySampledValue', 'sampleAllTracks'].forEach(n => {
+      if (res.names.indexOf(n) < 0) throw new Error('SAMPLER_RUNTIME_FUNCS missing ' + n);
+    });
+    if (!res.animSampleCallsSampleAllTracks) throw new Error('Anim.sample should itself call sampleAllTracks — the export embeds that exact function, not a fork');
+  });
+
+  await step('E2 export: banner/version/mode shape — snippet has no <html>, full-HTML mode does, both carry the version banner', async () => {
+    const res = await page.evaluate(() => {
+      const A = window.__A;
+      const snip = A.exportStandaloneJS({ mode: 'snippet' });
+      const full = A.exportStandaloneJS({ mode: 'html' });
+      return {
+        three: A.EXPORT_THREE_VERSION,
+        snipHasBanner: snip.code.indexOf('Roxy.JS standalone export') >= 0 && snip.code.indexOf(A.EXPORT_THREE_VERSION) >= 0,
+        fullHasBanner: full.code.indexOf('Roxy.JS standalone export') >= 0,
+        snipHasDoctype: snip.code.toLowerCase().indexOf('<!doctype html>') >= 0,
+        fullHasDoctype: full.code.toLowerCase().indexOf('<!doctype html>') >= 0,
+        snipHasCdn: snip.code.indexOf(A.EXPORT_THREE_CDN_URL) >= 0,
+        sizeBytes: full.sizeBytes
+      };
+    });
+    if (!res.snipHasBanner || !res.fullHasBanner) throw new Error('generated code missing the version banner in one of the two modes');
+    if (res.snipHasDoctype) throw new Error('snippet mode should NOT be a full HTML document');
+    if (!res.fullHasDoctype) throw new Error('full-HTML mode should start with <!doctype html>');
+    if (!res.snipHasCdn) throw new Error('snippet should reference the three.js CDN URL');
+    if (!(res.sizeBytes > 0)) throw new Error('sizeBytes estimate should be positive');
+  });
+
+  await step('E2 UI: Export tab Code section renders the mode toggle, version/size readout, Copy/Download buttons', () => page.evaluate(() => {
+    const A = window.__A;
+    A.setView('export'); A.renderPanel();
+    const findBtn = t => Array.from(document.querySelectorAll('#panelBody button')).find(b => b.textContent.trim() === t);
+    ['Snippet', 'Full HTML', 'Copy Three.js code', 'Download .html'].forEach(t => { if (!findBtn(t)) throw new Error('missing button: ' + t); });
+    const sizeLbl = document.getElementById('codeExportSizeLbl');
+    if (!sizeLbl || sizeLbl.textContent.indexOf('KB') < 0) throw new Error('size-estimate readout missing/malformed');
+    if (sizeLbl.textContent.indexOf(A.EXPORT_THREE_VERSION) < 0) throw new Error('three.js version readout missing from the Code section');
+  }));
+
+  await step('E2 clipboard: copyStandaloneCode uses navigator.clipboard.writeText (textarea fallback exercised separately)', async () => {
+    const res = await page.evaluate(async () => {
+      const A = window.__A;
+      let written = null;
+      const origClipboard = navigator.clipboard;
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText: t => { written = t; return Promise.resolve(); } }, configurable: true });
+      A.copyStandaloneCode();
+      await new Promise(r => setTimeout(r, 30));
+      Object.defineProperty(navigator, 'clipboard', { value: origClipboard, configurable: true });
+      return { wrote: !!written, hasBanner: written && written.indexOf('Roxy.JS standalone export') >= 0 };
+    });
+    if (!res.wrote) throw new Error('copyStandaloneCode did not call navigator.clipboard.writeText');
+    if (!res.hasBanner) throw new Error('clipboard payload missing the generated code banner');
+  });
+
+  await step('E2 download: downloadStandaloneCode always emits a runnable full HTML document via a Blob URL', async () => {
+    const res = await page.evaluate(async () => {
+      const A = window.__A;
+      let blobText = null;
+      const origCreate = URL.createObjectURL;
+      URL.createObjectURL = b => { blobText = 'pending'; b.text().then(t => { blobText = t; }); return origCreate.call(URL, b); };
+      A.downloadStandaloneCode();
+      for (let i = 0; i < 20 && (blobText === null || blobText === 'pending'); i++) await new Promise(r => setTimeout(r, 20));
+      URL.createObjectURL = origCreate;
+      return { hasDoctype: !!blobText && blobText.toLowerCase().indexOf('<!doctype html>') >= 0 };
+    });
+    if (!res.hasDoctype) throw new Error('downloadStandaloneCode should always download a full standalone HTML document');
+  });
+
+  await step('E2 END-TO-END: the generated standalone artifact actually runs in a fresh page — scene rebuilds, sampler plays, skin binds', async () => {
+    const gen = await page.evaluate(() => {
+      const A = window.__A;
+      A.buildDemoFigure();
+      const rig = A.newRig('E2ERig');
+      const b1 = A.addBone(rig, 'Root', new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 1.6, 0), null);
+      A.addBone(rig, 'Head', new THREE.Vector3(0, 1.6, 0), new THREE.Vector3(0, 2, 0), b1.id);
+      A.bindMeshToRig(A.Registry['demo.torso'], rig, { silent: true });
+      A.Anim.tracks = [];
+      A.Anim.insertKey('demo', 'position.x', 0);
+      A.Registry['demo'].position.x = 3;
+      A.Anim.insertKey('demo', 'position.x', 10);
+      const out = A.exportStandaloneJS({ mode: 'html' });
+      return { code: out.code, sizeBytes: out.sizeBytes };
+    });
+    generatedArtifactHTML = gen.code;
+
+    const page2 = await browser.newPage();
+    const errors2 = [];
+    page2.on('pageerror', e => errors2.push('pageerror: ' + e.message));
+    page2.on('console', m => { if (m.type() === 'error' && !/Failed to load resource/.test(m.text())) errors2.push('console: ' + m.text()); });
+    // Route the exported artifact's own CDN reference (a NEWER three.js line than this app's own
+    // pinned r128 — see EXPORT_THREE_CDN_URL) to the same locally-pinned build the rest of this
+    // suite uses; the feature surface this export touches (Scene/Mesh/SkinnedMesh/Skeleton/Bone/
+    // materials/lights/PerspectiveCamera/WebGLRenderer) is stable across that range.
+    await page2.route(/three\.js\/r\d+\/three\.min\.js/, route =>
+      route.fulfill({ contentType: 'application/javascript', body: fs.readFileSync(path.join(SP, 'node_modules/three/build/three.min.js'), 'utf8') }));
+    await page2.goto('http://127.0.0.1:8932/gen_export.html', { waitUntil: 'load', timeout: 30000 });
+    await page2.waitForFunction(() => !!window.RoxyAnimExport, null, { timeout: 15000 })
+      .catch(() => errors2.push('RoxyAnimExport never appeared on window'));
+
+    const check = await page2.evaluate(() => {
+      const R = window.RoxyAnimExport;
+      if (!R) return { fatal: 'no RoxyAnimExport' };
+      let meshCount = 0, skinnedCount = 0;
+      R.scene.traverse(o => { if (o.isSkinnedMesh) skinnedCount++; else if (o.isMesh) meshCount++; });
+      const demo = R.registry['demo'];
+      R.setTime(0); const x0 = demo.position.x;
+      R.setTime(5); const x5 = demo.position.x;
+      const skMesh = Object.values(R.registry).find(o => o.isSkinnedMesh);
+      const hasSkinAttrs = !!(skMesh && skMesh.geometry.attributes.skinIndex && skMesh.geometry.attributes.skinWeight);
+      const isSceneInstance = R.scene.isScene === true;
+      return { meshCount, skinnedCount, x0, x5, hasSkinAttrs, isSceneInstance };
+    });
+    await page2.close();
+
+    if (errors2.length) throw new Error('the standalone artifact logged errors: ' + errors2.join(' | '));
+    if (check.fatal) throw new Error(check.fatal);
+    if (!check.isSceneInstance) throw new Error('window.RoxyAnimExport.scene is not a THREE.Scene');
+    if (check.meshCount < 4) throw new Error('expected the demo figure’s remaining plain parts as meshes, got ' + check.meshCount);
+    if (check.skinnedCount !== 1) throw new Error('expected exactly 1 SkinnedMesh in the rebuilt scene, got ' + check.skinnedCount);
+    if (!check.hasSkinAttrs) throw new Error('rebuilt SkinnedMesh is missing skinIndex/skinWeight attributes');
+    if (!(check.x0 === 0)) throw new Error('sampler should place position.x at 0 at t=0, got ' + check.x0);
+    if (!(Math.abs(check.x5 - 1.5) < 1e-6)) throw new Error('sampler should interpolate position.x to 1.5 at t=5 (midpoint of 0->3 over 0->10), got ' + check.x5);
   });
 
   await browser.close();

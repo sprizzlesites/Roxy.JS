@@ -2692,6 +2692,194 @@ function collectExportPayload(){
 
 function estimateExportSize(payload){return new TextEncoder().encode(JSON.stringify(payload)).length;}
 
+// The literal functions embedded into the exported artifact's sampler — see the Wave E2 header
+// comment above. `.toString()` on each gives back exactly the source text defined earlier in
+// this file; nothing here is retyped or paraphrased.
+var SAMPLER_RUNTIME_FUNCS=[slerpQuatArr,resolvePath,sampleTrackValue,applySampledValue,sampleAllTracks];
+
+// The rebuilder half: export-only glue with no live equivalent in this app (this app rebuilds
+// scenes from the modeler's project-JSON bridge, not from Wave E2's own serialization format —
+// see the header comment). Kept as one joined array-of-lines string in this same compact-JS
+// style as the rest of the file, rather than a template literal, for consistency.
+var EXPORT_RUNTIME_GLUE=[
+'var registry={};',
+'function decodeAttr(a){',
+'  if(!a)return null;',
+'  var bin=atob(a.data),bytes=new Uint8Array(bin.length);',
+'  for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);',
+'  var arr;',
+'  if(a.type==="Uint16Array")arr=new Uint16Array(bytes.buffer);',
+'  else if(a.type==="Uint32Array")arr=new Uint32Array(bytes.buffer);',
+'  else arr=new Float32Array(bytes.buffer);',
+'  return new THREE.BufferAttribute(arr,a.itemSize);}',
+'function buildGeometry(g){',
+'  var geo=new THREE.BufferGeometry();',
+'  geo.setAttribute("position",decodeAttr(g.position));',
+'  if(g.normal)geo.setAttribute("normal",decodeAttr(g.normal));else geo.computeVertexNormals();',
+'  if(g.uv)geo.setAttribute("uv",decodeAttr(g.uv));',
+'  if(g.index)geo.setIndex(decodeAttr(g.index));',
+'  if(g.skinIndex)geo.setAttribute("skinIndex",decodeAttr(g.skinIndex));',
+'  if(g.skinWeight)geo.setAttribute("skinWeight",decodeAttr(g.skinWeight));',
+'  return geo;}',
+'function buildMaterial(m){',
+'  var params={color:m.color,roughness:m.roughness,metalness:m.metalness,emissive:m.emissive,',
+'    emissiveIntensity:m.emissiveIntensity,opacity:m.opacity,transparent:m.transparent,flatShading:m.flatShading};',
+'  var isPhysical=false;',
+'  if(m.transmission!=null){params.transmission=m.transmission;isPhysical=true;}',
+'  if(m.clearcoat!=null){params.clearcoat=m.clearcoat;isPhysical=true;}',
+'  if(m.clearcoatRoughness!=null)params.clearcoatRoughness=m.clearcoatRoughness;',
+'  if(m.ior!=null){params.ior=m.ior;isPhysical=true;}',
+'  var mat=(isPhysical&&THREE.MeshPhysicalMaterial)?new THREE.MeshPhysicalMaterial(params):new THREE.MeshStandardMaterial(params);',
+'  var loader=new THREE.TextureLoader();',
+'  ["map","normalMap","roughnessMap","metalnessMap","emissiveMap","aoMap"].forEach(function(slot){',
+'    if(m[slot]){var t=loader.load(m[slot]);',
+'      if((slot==="map"||slot==="emissiveMap")&&THREE.sRGBEncoding!==undefined)t.encoding=THREE.sRGBEncoding;',
+'      mat[slot]=t;mat.needsUpdate=true;}});',
+'  return mat;}',
+'function buildLight(ld){',
+'  var L;',
+'  if(ld.type==="directional"){L=new THREE.DirectionalLight(ld.color,ld.intensity);L.position.fromArray(ld.position);',
+'    L.target.position.fromArray(ld.target);scene.add(L.target);}',
+'  else if(ld.type==="hemisphere")L=new THREE.HemisphereLight(ld.color,ld.groundColor,ld.intensity);',
+'  else if(ld.type==="point"){L=new THREE.PointLight(ld.color,ld.intensity,ld.distance,ld.decay);L.position.fromArray(ld.position);}',
+'  else if(ld.type==="spot"){L=new THREE.SpotLight(ld.color,ld.intensity,0,ld.angle,ld.penumbra);L.position.fromArray(ld.position);',
+'    L.target.position.fromArray(ld.target);scene.add(L.target);}',
+'  else L=new THREE.AmbientLight(ld.color,ld.intensity!=null?ld.intensity:1);',
+'  return L;}',
+'function buildSceneGraph(){',
+'  var nodes=[];',
+'  DATA.objects.forEach(function(nd,i){',
+'    var obj;',
+'    if(nd.type==="Bone")obj=new THREE.Bone();',
+'    else if(nd.type==="Group")obj=new THREE.Group();',
+'    else{var geo=buildGeometry(nd.geometry),mat=buildMaterial(nd.material);',
+'      obj=nd.type==="SkinnedMesh"?new THREE.SkinnedMesh(geo,mat):new THREE.Mesh(geo,mat);',
+'      obj.castShadow=true;obj.receiveShadow=true;}',
+'    obj.name=nd.name||"";',
+'    obj.position.fromArray(nd.position);',
+'    obj.quaternion.set(nd.quaternion[0],nd.quaternion[1],nd.quaternion[2],nd.quaternion[3]);',
+'    obj.scale.fromArray(nd.scale);',
+'    nodes[i]=obj;',
+'    if(nd.targetId)registry[nd.targetId]=obj;});',
+'  DATA.objects.forEach(function(nd,i){if(nd.parent==null)scene.add(nodes[i]);else nodes[nd.parent].add(nodes[i]);});',
+'  DATA.objects.forEach(function(nd,i){',
+'    if(nd.type!=="SkinnedMesh")return;',
+'    var bones=nd.skeleton.boneIdx.map(function(bi){return nodes[bi];});',
+'    var invs=nd.skeleton.boneInverses.map(function(m){return new THREE.Matrix4().fromArray(m);});',
+'    var skel=new THREE.Skeleton(bones,invs);',
+'    nodes[i].bind(skel,new THREE.Matrix4().fromArray(nd.bindMatrix));});',
+'  return nodes;}',
+'var scene=new THREE.Scene();',
+'scene.background=new THREE.Color(0x0b0c0f);',
+'DATA.lights.forEach(function(ld){scene.add(buildLight(ld));});',
+'buildSceneGraph();',
+'var camera=new THREE.PerspectiveCamera(DATA.camera.fov,1,DATA.camera.near,DATA.camera.far);',
+'camera.position.fromArray(DATA.camera.position);',
+'camera.lookAt(DATA.camera.target[0],DATA.camera.target[1],DATA.camera.target[2]);',
+'var mount=document.getElementById("roxy-anim-mount");',
+'if(!mount){',
+'  mount=document.createElement("div");',
+'  mount.style.cssText="width:100%;height:480px;position:relative;overflow:hidden;background:#0b0c0f";',
+'  var refScript=document.currentScript;',
+'  if(refScript&&refScript.parentNode)refScript.parentNode.insertBefore(mount,refScript);',
+'  else document.body.appendChild(mount);}',
+'var renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});',
+'renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2));',
+'if("outputEncoding" in renderer&&THREE.sRGBEncoding!==undefined)renderer.outputEncoding=THREE.sRGBEncoding;',
+'if("toneMapping" in renderer&&THREE.ACESFilmicToneMapping!==undefined)renderer.toneMapping=THREE.ACESFilmicToneMapping;',
+'mount.appendChild(renderer.domElement);',
+'function resize(){var w=mount.clientWidth||window.innerWidth,h=mount.clientHeight||window.innerHeight;',
+'  if(w<2||h<2)return;renderer.setSize(w,h);camera.aspect=w/h;camera.updateProjectionMatrix();}',
+'window.addEventListener("resize",resize);',
+'resize();',
+'var playState={time:DATA.start,playing:true,lastT:null,acc:0};',
+'function setTime(t){playState.time=t;if(DATA.tracks.length)sampleAllTracks(DATA.tracks,t,registry);renderer.render(scene,camera);}',
+'function tick(now){',
+'  requestAnimationFrame(tick);',
+'  if(playState.playing&&DATA.tracks.length){',
+'    if(playState.lastT==null)playState.lastT=now;',
+'    var dt=(now-playState.lastT)/1000;playState.lastT=now;playState.acc+=dt;',
+'    var step=1/Math.max(1,DATA.fps);',
+'    while(playState.acc>=step){playState.acc-=step;playState.time+=1;',
+'      if(playState.time>DATA.end)playState.time=DATA.start;}',
+'    sampleAllTracks(DATA.tracks,playState.time,registry);}',
+'  else playState.lastT=null;',
+'  renderer.render(scene,camera);}',
+'requestAnimationFrame(tick);',
+'window.RoxyAnimExport={scene:scene,camera:camera,renderer:renderer,registry:registry,data:DATA,',
+'  setTime:setTime,play:function(){playState.playing=true;},pause:function(){playState.playing=false;},',
+'  getTime:function(){return playState.time;}};'
+].join('\n');
+
+// Assemble the sampler + rebuilder into one self-executing script body (no outer <script> tags —
+// exportStandaloneJS wraps it per output mode).
+function buildRuntimeSource(payload){
+  var samplerSrc=SAMPLER_RUNTIME_FUNCS.map(function(f){return f.toString();}).join('\n\n');
+  return [
+    '/* Roxy.JS standalone export — Three.js '+EXPORT_THREE_VERSION+' (https://threejs.org) */',
+    '/* Generated '+new Date(payload.generatedAt).toISOString()+' — deferred fidelity vs the authoring app: environment/PMREM image-based lighting, compositor post-FX, and live constraint/IK re-solving (this replays the already-keyed pose values, it does not re-run constraints or IK each frame). */',
+    '(function(){',
+    '"use strict";',
+    'if(typeof THREE==="undefined"){console.error("Roxy export: THREE.js failed to load");return;}',
+    'var DATA='+JSON.stringify(payload)+';',
+    '',
+    '/* ---- shared keyframe-sampler runtime, verbatim from Roxy Animate\'s Anim core (see animate.html) ---- */',
+    samplerSrc,
+    '',
+    '/* ---- scene rebuild + render loop (export-only glue) ---- */',
+    EXPORT_RUNTIME_GLUE,
+    '})();'
+  ].join('\n');}
+
+// Public API: opts.mode 'snippet' (default, a <script src=cdn> + <script> pair to paste into any
+// page) or 'html' (the same wrapped in a complete minimal standalone document).
+function exportStandaloneJS(opts){
+  opts=opts||{};
+  var mode=opts.mode==='html'?'html':'snippet';
+  var payload=collectExportPayload();
+  var runtime=buildRuntimeSource(payload);
+  // NOTE: the closing script-tag text below is deliberately built by concatenation, split
+  // across two string pieces — this file itself lives inside a real script block, and the HTML
+  // tokenizer ends a script element on that raw closing-tag byte sequence wherever it appears
+  // (even mid-string, even inside a // comment) — writing it unsplit here, even in a comment,
+  // would truncate animate.html's OWN script early. See CLOSE_SCRIPT's own definition: it is
+  // never spelled out as one literal run of text anywhere in this source file.
+  var CLOSE_SCRIPT='</scr'+'ipt>';
+  var scriptTag='<script src="'+EXPORT_THREE_CDN_URL+'">'+CLOSE_SCRIPT;
+  var code;
+  if(mode==='html'){
+    code=['<!doctype html>','<html lang="en"><head><meta charset="utf-8">',
+      '<meta name="viewport" content="width=device-width, initial-scale=1">',
+      '<title>Roxy Animation</title>',
+      '<style>html,body{margin:0;height:100%;background:#0b0c0f}#roxy-anim-mount{position:fixed;inset:0}</style>',
+      '</head><body>','<div id="roxy-anim-mount"></div>',
+      scriptTag,'<script>',runtime,CLOSE_SCRIPT,'</body></html>'].join('\n');
+  }else{
+    code=[scriptTag,'<script>',runtime,CLOSE_SCRIPT].join('\n');}
+  return {code:code,mode:mode,three:EXPORT_THREE_VERSION,payload:payload,
+    sizeBytes:new TextEncoder().encode(code).length,payloadBytes:estimateExportSize(payload)};}
+
+/* ---------------- Code-export UI actions (clipboard w/ textarea fallback, .html download) ---------------- */
+var CodeExportState={mode:'snippet'};
+function copyStandaloneCode(){
+  var res=exportStandaloneJS({mode:CodeExportState.mode});
+  function done(ok){toast(ok?'Copied '+(res.sizeBytes/1024).toFixed(0)+' KB of Three.js code':'Copy failed — select and copy manually');}
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(res.code).then(function(){done(true);}).catch(function(){fallbackCopy(res.code,done);});
+  }else fallbackCopy(res.code,done);
+  return res;}
+function fallbackCopy(text,done){
+  var ta=el('textarea',{style:'position:fixed;left:-9999px;top:0'});ta.value=text;
+  document.body.appendChild(ta);ta.focus();ta.select();
+  var ok=false;try{ok=document.execCommand('copy');}catch(e){ok=false;}
+  document.body.removeChild(ta);done(ok);}
+function downloadStandaloneCode(){
+  var res=exportStandaloneJS({mode:'html'}); // always a runnable full document for the download action
+  var blob=new Blob([res.code],{type:'text/html'});
+  downloadURL(URL.createObjectURL(blob),'roxy_animation_'+Date.now()+'.html');
+  toast('Downloaded standalone .html ('+(res.sizeBytes/1024).toFixed(0)+' KB)');
+  return res;}
+
 /* ---------------- Export tab UI state (resolution/fps/range/format — rides the anim
    autosave as v6, additive; see doAnimAutosave/tryRestoreAnimAutosave below) ---------------- */
 var ExportState={resPreset:'720p',fps:Anim.fps,rangeMode:'all',rangeStart:Anim.start,rangeEnd:Anim.end,format:'webm'};
@@ -2782,7 +2970,19 @@ function panelExport(b){
     b.appendChild(el('button',{class:'pri',id:'btnExportVideo',style:'width:100%',text:'Export Video',onclick:function(){runExportVideoUI();}}));}
 
   b.appendChild(el('div',{class:'section-title',text:'Code'}));
-  b.appendChild(el('button',{style:'width:100%',disabled:'disabled',text:'Copy standalone Three.js code — coming in Wave E2'}));}
+  b.appendChild(el('p',{class:'sub',text:'Self-contained Three.js '+EXPORT_THREE_VERSION+' code that rebuilds this exact scene — geometry, materials, skeleton/skin, camera, lights — and replays the animation on any page.'}));
+  var modeRow=el('div',{style:'display:flex;gap:6px'});
+  [['snippet','Snippet'],['html','Full HTML']].forEach(function(m){
+    modeRow.appendChild(el('button',{class:CodeExportState.mode===m[0]?'on':'',style:'flex:1',text:m[1],
+      onclick:function(){CodeExportState.mode=m[0];renderPanel();}}));});
+  b.appendChild(modeRow);
+  var sizeRes=exportStandaloneJS({mode:CodeExportState.mode});
+  b.appendChild(el('p',{class:'small muted',id:'codeExportSizeLbl',style:'margin-top:6px',
+    text:'Three.js '+EXPORT_THREE_VERSION+' via CDN · ~'+(sizeRes.sizeBytes/1024).toFixed(1)+' KB '+
+      (CodeExportState.mode==='html'?'(full document)':'(snippet, paste before </body>)')}));
+  b.appendChild(el('div',{class:'grid2',style:'margin-top:8px'},[
+    el('button',{class:'pri',id:'btnCopyCode',text:'Copy Three.js code',onclick:function(){copyStandaloneCode();}}),
+    el('button',{id:'btnDownloadCode',text:'Download .html',onclick:function(){downloadStandaloneCode();}})]));}
 
 /* ---------------- nav build (rail desktop / tabbar + bottom sheet mobile, same as index.html) ---------------- */
 function buildNav(){var rail=$('#rail'),tab=$('#tabbar');VIEWS.forEach(function(v){
