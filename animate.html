@@ -1474,10 +1474,15 @@ function resolvePath(target,path){
 
 Anim.getValue=function(targetId,path){var t=resolveTarget(targetId);if(!t)return null;
   var r=resolvePath(t,path);return r?r.obj[r.key]:null;};
-Anim.setValue=function(targetId,path,v){var t=resolveTarget(targetId);if(!t)return;
-  var r=resolvePath(t,path);if(!r)return;
+// Write a sampled value `v` through the {obj,key} pair resolvePath() returns. Pulled out to a
+// free function (Wave E2) so it can be toString()-embedded verbatim into the standalone
+// Three.js export's sampler runtime — see exportStandaloneJS/SAMPLER_RUNTIME_FUNCS below. Kept
+// self-contained (no closures over animate.html globals) for exactly that reason.
+function applySampledValue(target,path,v){
+  var r=resolvePath(target,path);if(!r)return;
   if(Array.isArray(v)&&r.obj[r.key]&&r.obj[r.key].isQuaternion)r.obj[r.key].set(v[0],v[1],v[2],v[3]);
-  else r.obj[r.key]=v;};
+  else r.obj[r.key]=v;}
+Anim.setValue=function(targetId,path,v){var t=resolveTarget(targetId);if(!t)return;applySampledValue(t,path,v);};
 Anim.findTrack=function(targetId,path){for(var i=0;i<this.tracks.length;i++){
   var tr=this.tracks[i];if(tr.targetId===targetId&&tr.path===path)return tr;}return null;};
 
@@ -1499,30 +1504,44 @@ Anim.insertKey=function(targetId,path,t){
   scheduleAnimAutosave();
   return tr;};
 
-var _slerpA=new THREE.Quaternion(),_slerpB=new THREE.Quaternion();
-function slerpQuatArr(a,b,f){_slerpA.set(a[0],a[1],a[2],a[3]);_slerpB.set(b[0],b[1],b[2],b[3]);
-  _slerpA.slerp(_slerpB,f);return [_slerpA.x,_slerpA.y,_slerpA.z,_slerpA.w];}
+// slerpQuatArr/sampleTrackValue/sampleAllTracks (below) are the ENTIRE keyframe-sampler math —
+// deliberately written with zero closures over animate.html's outer scope (no shared scratch
+// objects, no reference to `Anim`/`Registry` by name) so each is independently toString()-safe.
+// Wave E2's standalone Three.js export embeds these four functions' source verbatim
+// (SAMPLER_RUNTIME_FUNCS, see the export section) as the played-back scene's sampler — this IS
+// the same code Anim.sample calls right below, not a rewritten copy (GAP_ANALYSIS §2.10: "the
+// runtime is shared code, build it once... don't reimplement a second player").
+function slerpQuatArr(a,b,f){
+  var qa=new THREE.Quaternion(a[0],a[1],a[2],a[3]),qb=new THREE.Quaternion(b[0],b[1],b[2],b[3]);
+  qa.slerp(qb,f);return [qa.x,qa.y,qa.z,qa.w];}
 
-// Evaluate every track at `time` and write the interpolated value through the path
-// resolver. Binary-searches the surrounding key pair per track, then lerps (scalar tracks)
-// or slerps (quaternion tracks, via THREE.Quaternion.slerp — proper spherical interpolation,
-// not a componentwise lerp+normalize approximation).
-Anim.sample=function(time){
-  var self=this;
-  this.tracks.forEach(function(tr){
-    var keys=tr.keys;if(!keys.length)return;
-    var isQuat=tr.valueType==='quat';
-    if(keys.length===1){self.setValue(tr.targetId,tr.path,keys[0].v);return;}
-    if(time<=keys[0].t){self.setValue(tr.targetId,tr.path,keys[0].v);return;}
-    if(time>=keys[keys.length-1].t){self.setValue(tr.targetId,tr.path,keys[keys.length-1].v);return;}
-    var lo=0,hi=keys.length-1;
-    while(hi-lo>1){var mid=(lo+hi)>>1;if(keys[mid].t<=time)lo=mid;else hi=mid;}
-    var a=keys[lo],b=keys[hi],span=b.t-a.t,f=span>1e-9?(time-a.t)/span:0,val;
-    if(a.interp==='constant')val=a.v;
-    else if(isQuat)val=slerpQuatArr(a.v,b.v,f);
-    else val=a.v+(b.v-a.v)*f;
-    self.setValue(tr.targetId,tr.path,val);});
-  this.time=time;};
+// Pure: the interpolated value of one track at `time` (no reads/writes outside `tr`/`time`).
+// Binary-searches the surrounding key pair, then lerps (scalar) or slerps (quaternion, via
+// THREE.Quaternion.slerp — proper spherical interpolation, not a componentwise lerp+normalize
+// approximation).
+function sampleTrackValue(tr,time){
+  var keys=tr.keys;if(!keys.length)return undefined;
+  var isQuat=tr.valueType==='quat';
+  if(keys.length===1)return keys[0].v;
+  if(time<=keys[0].t)return keys[0].v;
+  if(time>=keys[keys.length-1].t)return keys[keys.length-1].v;
+  var lo=0,hi=keys.length-1;
+  while(hi-lo>1){var mid=(lo+hi)>>1;if(keys[mid].t<=time)lo=mid;else hi=mid;}
+  var a=keys[lo],b=keys[hi],span=b.t-a.t,f=span>1e-9?(time-a.t)/span:0;
+  if(a.interp==='constant')return a.v;
+  if(isQuat)return slerpQuatArr(a.v,b.v,f);
+  return a.v+(b.v-a.v)*f;}
+
+// Evaluate every track in `tracks` at `time` and write each interpolated value through
+// `registry` (a plain targetId->live-object map — animate.html passes its global `Registry`;
+// the standalone export builds its own local one, see buildSceneGraph in the export section).
+function sampleAllTracks(tracks,time,registry){
+  tracks.forEach(function(tr){
+    if(!tr.keys.length)return;
+    var target=registry[tr.targetId];if(!target)return;
+    applySampledValue(target,tr.path,sampleTrackValue(tr,time));});}
+
+Anim.sample=function(time){sampleAllTracks(this.tracks,time,Registry);this.time=time;};
 
 // Convenience for the Timeline "Key Position" button: key all three axes at once.
 function insertPositionKey(targetId,t){
